@@ -1,4 +1,4 @@
-"""The linear LangGraph: retrieve -> generate -> persist -> remember.
+"""The linear pipeline: retrieve -> generate -> persist -> remember.
 
 - retrieve: local query embedding + pgvector top-k, budgeted to the active
   provider's window.
@@ -6,8 +6,10 @@
 - persist: neutral messages -> conv-svc (:8082).
 - remember: embed + write memories to Postgres.
 
-The graph emits SSE events through a plain callable (`emit`) carried in state,
-so main.py can drain them to the client in real time.
+Each step reads the shared state dict and returns a partial update. The steps
+run in fixed order with no branches or cycles, so `run()` is a straight
+sequence of calls — no graph engine needed. SSE events flow through a plain
+callable (`emit`) carried in state, so main.py can drain them in real time.
 """
 from __future__ import annotations
 
@@ -15,7 +17,6 @@ import uuid
 from typing import Any, TypedDict
 
 import httpx
-from langgraph.graph import END, StateGraph
 
 from config import CONV_SVC_URL
 from llm import resolver
@@ -159,25 +160,13 @@ def remember_node(state: GState) -> dict:
     return {}
 
 
-def _build_graph():
-    g = StateGraph(GState)
-    g.add_node("retrieve", retrieve_node)
-    g.add_node("generate", generate_node)
-    g.add_node("persist", persist_node)
-    g.add_node("remember", remember_node)
-    g.set_entry_point("retrieve")
-    g.add_edge("retrieve", "generate")
-    g.add_edge("generate", "persist")
-    g.add_edge("persist", "remember")
-    g.add_edge("remember", END)
-    return g.compile()
-
-
-_GRAPH = None
-
-
 def run(state: dict) -> None:
-    global _GRAPH
-    if _GRAPH is None:
-        _GRAPH = _build_graph()
-    _GRAPH.invoke(state)
+    """Run the four steps in order, merging each step's partial update back into
+    the shared state — the same last-value-wins channel behavior a StateGraph
+    gave us, minus the graph. Output is delivered via state["emit"], so the
+    return value is intentionally unused.
+    """
+    state.update(retrieve_node(state))
+    state.update(generate_node(state))
+    state.update(persist_node(state))
+    state.update(remember_node(state))
