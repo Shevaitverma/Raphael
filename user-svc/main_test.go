@@ -287,6 +287,90 @@ func TestLifeboat(t *testing.T) {
 	}
 }
 
+// --- designating / clearing the lifeboat -----------------------------------
+func TestDesignateLifeboat(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Active anthropic + two inactive rows (local, openai_compat).
+	do(t, srv, http.MethodPost, "/users/"+testUserID+"/credentials", createCredentialReq{
+		Provider: "anthropic", AuthType: "api_key", APIKey: "sk-ant-z",
+		ModelID: "claude-opus-4-8", Activate: true,
+	})
+	recLocal := do(t, srv, http.MethodPost, "/users/"+testUserID+"/credentials", createCredentialReq{
+		Provider: "local", AuthType: "api_key", ModelID: "qwen2.5:7b", Activate: false,
+	})
+	var local credential
+	_ = json.Unmarshal(recLocal.Body.Bytes(), &local)
+	recOR := do(t, srv, http.MethodPost, "/users/"+testUserID+"/credentials", createCredentialReq{
+		Provider: "openai_compat", AuthType: "api_key", APIKey: "sk-or-x",
+		BaseURL: strptr("https://openrouter.ai/api/v1"), ModelID: "meta/llama", Activate: false,
+	})
+	var openrouter credential
+	_ = json.Unmarshal(recOR.Body.Bytes(), &openrouter)
+
+	// Find the active anthropic id.
+	var listed struct {
+		Credentials []credential `json:"credentials"`
+	}
+	_ = json.Unmarshal(do(t, srv, http.MethodGet, "/users/"+testUserID+"/credentials", nil).Body.Bytes(), &listed)
+	var anthropicID string
+	for _, c := range listed.Credentials {
+		if c.Provider == "anthropic" {
+			anthropicID = c.ID
+		}
+	}
+
+	// Designating the ACTIVE credential as the lifeboat -> 409.
+	rec := do(t, srv, http.MethodPost, "/users/"+testUserID+"/credentials/"+anthropicID+"/lifeboat", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("designate active as lifeboat: got %d, want 409", rec.Code)
+	}
+
+	// Designate local -> 200, is_lifeboat true.
+	rec = do(t, srv, http.MethodPost, "/users/"+testUserID+"/credentials/"+local.ID+"/lifeboat", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("designate local: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got credential
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if !got.IsLifeboat {
+		t.Fatal("designated credential is not is_lifeboat")
+	}
+
+	// Designate openrouter -> local's flag must clear (one lifeboat per user).
+	rec = do(t, srv, http.MethodPost, "/users/"+testUserID+"/credentials/"+openrouter.ID+"/lifeboat", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("designate openrouter: %d body=%s", rec.Code, rec.Body.String())
+	}
+	_ = json.Unmarshal(do(t, srv, http.MethodGet, "/users/"+testUserID+"/credentials", nil).Body.Bytes(), &listed)
+	lifeboats := 0
+	for _, c := range listed.Credentials {
+		if c.IsLifeboat {
+			lifeboats++
+			if c.ID != openrouter.ID {
+				t.Fatalf("wrong lifeboat: %s", c.ID)
+			}
+		}
+	}
+	if lifeboats != 1 {
+		t.Fatalf("expected exactly 1 lifeboat, got %d", lifeboats)
+	}
+
+	// Clear it -> 200, none flagged.
+	rec = do(t, srv, http.MethodDelete, "/users/"+testUserID+"/credentials/"+openrouter.ID+"/lifeboat", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear lifeboat: %d", rec.Code)
+	}
+	_ = json.Unmarshal(do(t, srv, http.MethodGet, "/users/"+testUserID+"/credentials", nil).Body.Bytes(), &listed)
+	for _, c := range listed.Credentials {
+		if c.IsLifeboat {
+			t.Fatalf("lifeboat still set after clear: %s", c.ID)
+		}
+	}
+}
+
+func strptr(s string) *string { return &s }
+
 // --- /internal/* rejects requests without the shared secret ----------------
 func TestInternalRequiresToken(t *testing.T) {
 	srv := newTestServer(t)

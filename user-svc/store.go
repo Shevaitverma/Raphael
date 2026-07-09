@@ -30,17 +30,18 @@ type credential struct {
 	UserID    string    `json:"user_id"`
 	Provider  string    `json:"provider"`
 	AuthType  string    `json:"auth_type"`
-	BaseURL   *string   `json:"base_url"`
-	ModelID   string    `json:"model_id"`
-	IsActive  bool      `json:"is_active"`
-	CreatedAt time.Time `json:"created_at"`
+	BaseURL    *string   `json:"base_url"`
+	ModelID    string    `json:"model_id"`
+	IsActive   bool      `json:"is_active"`
+	IsLifeboat bool      `json:"is_lifeboat"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // listCredentials returns every credential for a user. It never selects
 // api_key_enc, so a leak is impossible on this path by construction.
 func (s *store) listCredentials(ctx context.Context, userID string) ([]credential, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, user_id, provider, auth_type, base_url, model_id, is_active, created_at
+		SELECT id, user_id, provider, auth_type, base_url, model_id, is_active, is_lifeboat, created_at
 		FROM provider_credentials
 		WHERE user_id = $1
 		ORDER BY created_at`, userID)
@@ -53,7 +54,7 @@ func (s *store) listCredentials(ctx context.Context, userID string) ([]credentia
 	for rows.Next() {
 		var c credential
 		if err := rows.Scan(&c.ID, &c.UserID, &c.Provider, &c.AuthType,
-			&c.BaseURL, &c.ModelID, &c.IsActive, &c.CreatedAt); err != nil {
+			&c.BaseURL, &c.ModelID, &c.IsActive, &c.IsLifeboat, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -95,10 +96,10 @@ func (s *store) createCredential(ctx context.Context, userID, provider, authType
 		INSERT INTO provider_credentials
 			(user_id, provider, auth_type, api_key_enc, base_url, model_id, is_active)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		RETURNING id, user_id, provider, auth_type, base_url, model_id, is_active, created_at`,
+		RETURNING id, user_id, provider, auth_type, base_url, model_id, is_active, is_lifeboat, created_at`,
 		userID, provider, authType, encKey, baseURL, modelID, activate).
 		Scan(&c.ID, &c.UserID, &c.Provider, &c.AuthType, &c.BaseURL,
-			&c.ModelID, &c.IsActive, &c.CreatedAt)
+			&c.ModelID, &c.IsActive, &c.IsLifeboat, &c.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -137,16 +138,89 @@ func (s *store) activateCredential(ctx context.Context, userID, credID string) (
 
 	var c credential
 	err = tx.QueryRow(ctx, `
-		UPDATE provider_credentials SET is_active = true
+		UPDATE provider_credentials SET is_active = true, is_lifeboat = false
 		WHERE id = $1 AND user_id = $2
-		RETURNING id, user_id, provider, auth_type, base_url, model_id, is_active, created_at`,
+		RETURNING id, user_id, provider, auth_type, base_url, model_id, is_active, is_lifeboat, created_at`,
 		credID, userID).
 		Scan(&c.ID, &c.UserID, &c.Provider, &c.AuthType, &c.BaseURL,
-			&c.ModelID, &c.IsActive, &c.CreatedAt)
+			&c.ModelID, &c.IsActive, &c.IsLifeboat, &c.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// errLifeboatActive is returned when the caller tries to designate the currently
+// active credential as the lifeboat — a row cannot be both the brain and the
+// fallback (active_is_not_lifeboat CHECK), and it maps to a clean 409.
+var errLifeboatActive = errors.New("credential is active; the active credential cannot also be the lifeboat")
+
+// designateLifeboat marks one credential as the user's lifeboat, clearing any
+// prior lifeboat in the same transaction (one_lifeboat_credential is a partial-
+// unique index). The target must not be the active row.
+func (s *store) designateLifeboat(ctx context.Context, userID, credID string) (*credential, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	// The row must belong to the user, and must not be active.
+	var isActive bool
+	if err := tx.QueryRow(ctx,
+		`SELECT is_active FROM provider_credentials WHERE id = $1 AND user_id = $2`,
+		credID, userID).Scan(&isActive); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errNotFound
+		}
+		return nil, err
+	}
+	if isActive {
+		return nil, errLifeboatActive
+	}
+
+	// Clear any existing lifeboat, then set this one.
+	if _, err := tx.Exec(ctx,
+		`UPDATE provider_credentials SET is_lifeboat = false WHERE user_id = $1 AND is_lifeboat`,
+		userID); err != nil {
+		return nil, err
+	}
+
+	var c credential
+	err = tx.QueryRow(ctx, `
+		UPDATE provider_credentials SET is_lifeboat = true
+		WHERE id = $1 AND user_id = $2
+		RETURNING id, user_id, provider, auth_type, base_url, model_id, is_active, is_lifeboat, created_at`,
+		credID, userID).
+		Scan(&c.ID, &c.UserID, &c.Provider, &c.AuthType, &c.BaseURL,
+			&c.ModelID, &c.IsActive, &c.IsLifeboat, &c.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// clearLifeboat removes the lifeboat flag from one credential. errNotFound when
+// the row does not belong to the user.
+func (s *store) clearLifeboat(ctx context.Context, userID, credID string) (*credential, error) {
+	var c credential
+	err := s.pool.QueryRow(ctx, `
+		UPDATE provider_credentials SET is_lifeboat = false
+		WHERE id = $1 AND user_id = $2
+		RETURNING id, user_id, provider, auth_type, base_url, model_id, is_active, is_lifeboat, created_at`,
+		credID, userID).
+		Scan(&c.ID, &c.UserID, &c.Provider, &c.AuthType, &c.BaseURL,
+			&c.ModelID, &c.IsActive, &c.IsLifeboat, &c.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errNotFound
+		}
 		return nil, err
 	}
 	return &c, nil

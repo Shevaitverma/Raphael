@@ -47,6 +47,8 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /users/{uid}/credentials", s.listCredentials)
 	mux.HandleFunc("POST /users/{uid}/credentials", s.createCredential)
 	mux.HandleFunc("POST /users/{uid}/credentials/{id}/activate", s.activateCredential)
+	mux.HandleFunc("POST /users/{uid}/credentials/{id}/lifeboat", s.designateLifeboat)
+	mux.HandleFunc("DELETE /users/{uid}/credentials/{id}/lifeboat", s.clearLifeboat)
 
 	// Internal routes — return the decrypted key. Shared-secret gated, and never
 	// routed by the gateway.
@@ -135,6 +137,42 @@ func (s *server) activateCredential(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.writeDBError(w, err, "failed to activate credential")
+		return
+	}
+	writeJSON(w, http.StatusOK, cred)
+}
+
+func (s *server) designateLifeboat(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	id := r.PathValue("id")
+
+	cred, err := s.store.designateLifeboat(r.Context(), uid, id)
+	if err != nil {
+		switch {
+		case errors.Is(err, errNotFound):
+			writeErr(w, http.StatusNotFound, "credential not found for this user")
+		case errors.Is(err, errLifeboatActive):
+			writeErr(w, http.StatusConflict,
+				"the active credential cannot also be the lifeboat; pick a different provider as the fallback")
+		default:
+			s.writeDBError(w, err, "failed to designate lifeboat")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, cred)
+}
+
+func (s *server) clearLifeboat(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	id := r.PathValue("id")
+
+	cred, err := s.store.clearLifeboat(r.Context(), uid, id)
+	if err != nil {
+		if errors.Is(err, errNotFound) {
+			writeErr(w, http.StatusNotFound, "credential not found for this user")
+			return
+		}
+		s.writeDBError(w, err, "failed to clear lifeboat")
 		return
 	}
 	writeJSON(w, http.StatusOK, cred)

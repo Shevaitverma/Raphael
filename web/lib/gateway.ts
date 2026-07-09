@@ -100,6 +100,84 @@ export async function listMessages(
   return Array.isArray(data) ? data : (data.messages ?? []);
 }
 
+// --- provider credentials ----------------------------------------------------
+
+export type Credential = {
+  id: string;
+  provider: "anthropic" | "openai_compat" | "local";
+  auth_type: "api_key" | "oauth";
+  base_url?: string | null;
+  model_id: string;
+  is_active: boolean;
+  is_lifeboat: boolean;
+  created_at?: string;
+};
+
+export type NewCredential = {
+  provider: string;
+  auth_type: string;
+  api_key?: string;
+  base_url?: string | null;
+  model_id: string;
+  activate: boolean;
+};
+
+export async function listProviders(token: string): Promise<Credential[]> {
+  const res = await fetch(`${GATEWAY_URL}/api/providers`, { headers: authHeader(token) });
+  if (!res.ok) throw new Error(`list providers failed: ${res.status}`);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.credentials ?? []);
+}
+
+export async function addProvider(token: string, cred: NewCredential): Promise<Credential> {
+  const res = await fetch(`${GATEWAY_URL}/api/providers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify(cred),
+  });
+  if (!res.ok) throw new Error(await errText(res, "add provider"));
+  return res.json();
+}
+
+export async function activateProvider(token: string, id: string): Promise<Credential> {
+  const res = await fetch(`${GATEWAY_URL}/api/providers/${id}/activate`, {
+    method: "POST",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new Error(await errText(res, "activate"));
+  return res.json();
+}
+
+export async function setLifeboat(token: string, id: string): Promise<Credential> {
+  const res = await fetch(`${GATEWAY_URL}/api/providers/${id}/lifeboat`, {
+    method: "POST",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new Error(await errText(res, "set lifeboat"));
+  return res.json();
+}
+
+export async function clearLifeboat(token: string, id: string): Promise<Credential> {
+  const res = await fetch(`${GATEWAY_URL}/api/providers/${id}/lifeboat`, {
+    method: "DELETE",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new Error(await errText(res, "clear lifeboat"));
+  return res.json();
+}
+
+// Pull a human-readable message out of the {"error": "..."} body.
+async function errText(res: Response, action: string): Promise<string> {
+  const body = await safeText(res);
+  try {
+    const j = JSON.parse(body);
+    if (j?.error) return `${action}: ${j.error}`;
+  } catch {
+    /* fall through */
+  }
+  return `${action} failed: ${res.status}`;
+}
+
 // --- SSE chat ----------------------------------------------------------------
 
 export type ChatHandlers = {

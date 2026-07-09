@@ -515,9 +515,14 @@ localhost Ollama that does not exist on ECS.
 
 Built: db/001_init.sql + db/002_lifeboat.sql.
 
-Deferred to Phase 2: the user-facing "make this my fallback" designation
-(setting is_lifeboat from the Settings UI). In the skeleton it is set directly
-in SQL by tests and the e2e.
+Designating the lifeboat: user-svc exposes
+  POST   /users/{uid}/credentials/{id}/lifeboat   (designate; 409 if the row is active)
+  DELETE /users/{uid}/credentials/{id}/lifeboat   (clear)
+proxied through the gateway as /api/providers/{id}/lifeboat, and driven from the
+web Settings tab (list credentials, "Use this" to activate, "Set as fallback" /
+"Clear fallback" to designate). Designating clears any prior lifeboat in the same
+transaction; activating a row clears its own lifeboat flag. The active credential
+can never also be the fallback.
 
 
 ## Provider Independence

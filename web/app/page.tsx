@@ -2,14 +2,21 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  activateProvider,
+  addProvider,
+  clearLifeboat,
   createConversation,
   devLogin,
   listConversations,
   listMessages,
+  listProviders,
+  setLifeboat,
   streamChat,
   type Conversation,
+  type Credential,
   type Degraded,
   type Message,
+  type NewCredential,
   type User,
 } from "@/lib/gateway";
 
@@ -35,6 +42,8 @@ export default function Page() {
 
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+
+  const [view, setView] = useState<"chat" | "settings">("chat");
 
   const threadRef = useRef<HTMLDivElement>(null);
 
@@ -190,7 +199,24 @@ export default function Page() {
   return (
     <div className="flex h-screen flex-col">
       <header className="flex items-center justify-between border-b border-neutral-200 px-4 py-3 dark:border-neutral-800">
-        <h1 className="text-lg font-semibold">Raphael</h1>
+        <div className="flex items-center gap-4">
+          <h1 className="text-lg font-semibold">Raphael</h1>
+          <nav className="flex items-center gap-1 text-sm">
+            {(["chat", "settings"] as const).map((v) => (
+              <button
+                key={v}
+                onClick={() => setView(v)}
+                className={`rounded-md px-3 py-1 capitalize ${
+                  view === v
+                    ? "bg-neutral-200 font-medium dark:bg-neutral-800"
+                    : "text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-900"
+                }`}
+              >
+                {v}
+              </button>
+            ))}
+          </nav>
+        </div>
         <div className="flex items-center gap-3 text-sm text-neutral-500">
           <span>{user?.email ?? user?.id}</span>
           <button
@@ -202,6 +228,9 @@ export default function Page() {
         </div>
       </header>
 
+      {view === "settings" ? (
+        <SettingsView token={token} />
+      ) : (
       <div className="flex min-h-0 flex-1">
         {/* Conversation list */}
         <aside className="flex w-64 flex-col border-r border-neutral-200 dark:border-neutral-800">
@@ -275,6 +304,7 @@ export default function Page() {
           </div>
         </main>
       </div>
+      )}
     </div>
   );
 }
@@ -302,6 +332,292 @@ function LoginScreen({
       {error && (
         <p className="max-w-md text-center text-sm text-red-600">{error}</p>
       )}
+    </div>
+  );
+}
+
+// --- settings: model providers + lifeboat designation ----------------------
+
+const PROVIDER_LABEL: Record<Credential["provider"], string> = {
+  anthropic: "Claude (Anthropic)",
+  openai_compat: "OpenRouter",
+  local: "Local (Ollama)",
+};
+
+function SettingsView({ token }: { token: string }) {
+  const [creds, setCreds] = useState<Credential[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null); // id currently mutating
+
+  const load = useCallback(async () => {
+    try {
+      setCreds(await listProviders(token));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [token]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function run(id: string, fn: () => Promise<unknown>) {
+    setBusy(id);
+    setError(null);
+    try {
+      await fn();
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const lifeboat = creds?.find((c) => c.is_lifeboat);
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
+      <div className="mx-auto flex max-w-2xl flex-col gap-6">
+        <div>
+          <h2 className="text-xl font-semibold">Model providers</h2>
+          <p className="mt-1 text-sm text-neutral-500">
+            The <span className="font-medium">active</span> provider answers your messages. The{" "}
+            <span className="font-medium">fallback</span> takes over only if the active provider&apos;s
+            credential is rejected — an expired key or an unpaid bill — and the reply is marked as
+            degraded. Rate limits and outages are not a fallback; they surface as an error.
+          </p>
+        </div>
+
+        {error && (
+          <div className="rounded-md border border-red-400 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-600/60 dark:bg-red-950/40 dark:text-red-300">
+            {error}
+          </div>
+        )}
+
+        {!lifeboat && creds && creds.length > 0 && (
+          <div className="rounded-md border border-amber-400 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-600/60 dark:bg-amber-950/40 dark:text-amber-300">
+            No fallback set. If your active credential is rejected, the assistant will stop instead of
+            degrading. Designate a fallback below — a local or OpenRouter provider.
+          </div>
+        )}
+
+        <div className="flex flex-col gap-2">
+          {creds === null && <p className="text-sm text-neutral-400">Loading…</p>}
+          {creds?.length === 0 && (
+            <p className="text-sm text-neutral-400">No providers yet. Add one below.</p>
+          )}
+          {creds?.map((c) => (
+            <div
+              key={c.id}
+              className="flex items-center justify-between rounded-lg border border-neutral-200 px-4 py-3 dark:border-neutral-800"
+            >
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">{PROVIDER_LABEL[c.provider]}</span>
+                  {c.is_active && (
+                    <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/50 dark:text-green-300">
+                      Active
+                    </span>
+                  )}
+                  {c.is_lifeboat && (
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/50 dark:text-amber-300">
+                      Fallback
+                    </span>
+                  )}
+                </div>
+                <div className="truncate text-xs text-neutral-500">
+                  {c.model_id} · {c.auth_type}
+                  {c.base_url ? ` · ${c.base_url}` : ""}
+                </div>
+              </div>
+
+              <div className="flex shrink-0 items-center gap-2">
+                {!c.is_active && (
+                  <button
+                    disabled={busy === c.id}
+                    onClick={() => void run(c.id, () => activateProvider(token, c.id))}
+                    className="rounded-md border border-neutral-300 px-2.5 py-1 text-xs hover:bg-neutral-100 disabled:opacity-40 dark:border-neutral-700 dark:hover:bg-neutral-800"
+                  >
+                    Use this
+                  </button>
+                )}
+                {c.is_lifeboat ? (
+                  <button
+                    disabled={busy === c.id}
+                    onClick={() => void run(c.id, () => clearLifeboat(token, c.id))}
+                    className="rounded-md border border-neutral-300 px-2.5 py-1 text-xs hover:bg-neutral-100 disabled:opacity-40 dark:border-neutral-700 dark:hover:bg-neutral-800"
+                  >
+                    Clear fallback
+                  </button>
+                ) : (
+                  // The active credential can't also be the fallback.
+                  !c.is_active && (
+                    <button
+                      disabled={busy === c.id}
+                      onClick={() => void run(c.id, () => setLifeboat(token, c.id))}
+                      className="rounded-md border border-amber-400 px-2.5 py-1 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-40 dark:border-amber-600/60 dark:text-amber-300 dark:hover:bg-amber-950/40"
+                    >
+                      Set as fallback
+                    </button>
+                  )
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <AddProviderForm
+          onAdd={async (cred) => {
+            setError(null);
+            try {
+              await addProvider(token, cred);
+              await load();
+            } catch (e) {
+              setError(e instanceof Error ? e.message : String(e));
+              throw e;
+            }
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function AddProviderForm({
+  onAdd,
+}: {
+  onAdd: (cred: NewCredential) => Promise<void>;
+}) {
+  const [provider, setProvider] = useState<Credential["provider"]>("openai_compat");
+  const [authType, setAuthType] = useState<"api_key" | "oauth">("api_key");
+  const [modelId, setModelId] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [activate, setActivate] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const needsBaseUrl = provider === "openai_compat" || provider === "local";
+  const oauthAllowed = provider === "anthropic";
+
+  async function submit() {
+    if (!modelId.trim() || saving) return;
+    setSaving(true);
+    try {
+      await onAdd({
+        provider,
+        auth_type: authType,
+        api_key: apiKey || undefined,
+        base_url: needsBaseUrl && baseUrl ? baseUrl : undefined,
+        model_id: modelId.trim(),
+        activate,
+      });
+      setModelId("");
+      setBaseUrl("");
+      setApiKey("");
+      setActivate(false);
+    } catch {
+      /* error shown by parent */
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-neutral-200 p-4 dark:border-neutral-800">
+      <h3 className="mb-3 text-sm font-semibold">Add a provider</h3>
+      <div className="grid grid-cols-2 gap-3 text-sm">
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-neutral-500">Provider</span>
+          <select
+            value={provider}
+            onChange={(e) => {
+              const p = e.target.value as Credential["provider"];
+              setProvider(p);
+              if (p !== "anthropic" && authType === "oauth") setAuthType("api_key");
+            }}
+            className="rounded-md border border-neutral-300 bg-white px-2 py-1.5 dark:border-neutral-700 dark:bg-neutral-900"
+          >
+            <option value="anthropic">Claude (Anthropic)</option>
+            <option value="openai_compat">OpenRouter</option>
+            <option value="local">Local (Ollama)</option>
+          </select>
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-neutral-500">Auth</span>
+          <select
+            value={authType}
+            onChange={(e) => setAuthType(e.target.value as "api_key" | "oauth")}
+            className="rounded-md border border-neutral-300 bg-white px-2 py-1.5 dark:border-neutral-700 dark:bg-neutral-900"
+          >
+            <option value="api_key">API key</option>
+            {oauthAllowed && <option value="oauth">OAuth (Claude subscription)</option>}
+          </select>
+        </label>
+
+        <label className="col-span-2 flex flex-col gap-1">
+          <span className="text-xs text-neutral-500">Model</span>
+          <input
+            value={modelId}
+            onChange={(e) => setModelId(e.target.value)}
+            placeholder={
+              provider === "anthropic"
+                ? "claude-opus-4-8"
+                : provider === "local"
+                  ? "qwen2.5:7b"
+                  : "meta-llama/llama-3.1-70b-instruct"
+            }
+            className="rounded-md border border-neutral-300 bg-white px-2 py-1.5 dark:border-neutral-700 dark:bg-neutral-900"
+          />
+        </label>
+
+        {needsBaseUrl && (
+          <label className="col-span-2 flex flex-col gap-1">
+            <span className="text-xs text-neutral-500">
+              Base URL {provider === "local" && "(blank = deployment default)"}
+            </span>
+            <input
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder={
+                provider === "local" ? "http://ollama:11434/v1" : "https://openrouter.ai/api/v1"
+              }
+              className="rounded-md border border-neutral-300 bg-white px-2 py-1.5 dark:border-neutral-700 dark:bg-neutral-900"
+            />
+          </label>
+        )}
+
+        {authType === "api_key" && provider !== "local" && (
+          <label className="col-span-2 flex flex-col gap-1">
+            <span className="text-xs text-neutral-500">API key</span>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="stored encrypted; never shown again"
+              className="rounded-md border border-neutral-300 bg-white px-2 py-1.5 dark:border-neutral-700 dark:bg-neutral-900"
+            />
+          </label>
+        )}
+
+        <label className="col-span-2 flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-400">
+          <input
+            type="checkbox"
+            checked={activate}
+            onChange={(e) => setActivate(e.target.checked)}
+          />
+          Make this the active provider
+        </label>
+      </div>
+
+      <button
+        onClick={() => void submit()}
+        disabled={saving || !modelId.trim()}
+        className="mt-3 rounded-md bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-40 dark:bg-white dark:text-neutral-900"
+      >
+        {saving ? "Adding…" : "Add provider"}
+      </button>
     </div>
   );
 }
