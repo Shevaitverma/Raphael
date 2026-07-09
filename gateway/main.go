@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
@@ -83,6 +84,15 @@ func (s *Server) BuildApp() *fiber.App {
 		// SSE streaming requires that responses are not pre-buffered.
 		StreamRequestBody: true,
 	})
+
+	// CORS: the browser SPA is a different origin than the gateway, so without
+	// this every /auth and /api call is blocked by the preflight. Allows the
+	// configured web origin(s), the Authorization header, and the verbs we use.
+	app.Use(cors.New(cors.Config{
+		AllowOrigins: s.cfg.CORSOrigins,
+		AllowMethods: "GET,POST,DELETE,OPTIONS",
+		AllowHeaders: "Authorization,Content-Type,Accept",
+	}))
 
 	app.Get("/healthz", s.handleHealth) // liveness
 	app.Get("/readyz", s.handleReady)   // readiness

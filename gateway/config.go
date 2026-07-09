@@ -15,6 +15,11 @@ type Config struct {
 	ConvSvcURL     string
 	AgentSvcURL    string
 	RateLimitPerMin int
+	// CORSOrigins is the comma-separated allow-list for the browser SPA. The web
+	// app runs on a different origin than the gateway, so cross-origin requests
+	// need explicit CORS or the browser blocks them (curl doesn't, which is why
+	// it's easy to miss).
+	CORSOrigins string
 }
 
 func getenv(key, def string) string {
@@ -35,5 +40,6 @@ func LoadConfig() Config {
 		ConvSvcURL:      getenv("CONV_SVC_URL", "http://localhost:8082"),
 		AgentSvcURL:     getenv("AGENT_SVC_URL", "http://localhost:8000"),
 		RateLimitPerMin: 60,
+		CORSOrigins:     getenv("CORS_ORIGINS", "http://localhost:3000"),
 	}
 }
