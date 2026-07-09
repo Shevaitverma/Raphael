@@ -1,8 +1,21 @@
-# Infrastructure only. Services run on the host during the walking skeleton
-# so that the agent service can reach Ollama on 127.0.0.1:11434.
+# The one compose file. Two ways to use it:
 #
-# Postgres is on 5433, NOT 5432 — an unrelated hotel_bookings_db container
-# already owns 5432 on this machine.
+#   Everything in containers (demo / prod-like):
+#     docker compose up --build
+#
+#   Host-dev (services on your machine, only infra in Docker — faster iteration):
+#     docker compose up -d postgres redis        # then: bash scripts/dev.sh
+#     (host-dev reaches your host Ollama on localhost:11434)
+#
+# In-container hostnames are service names (postgres, redis, ollama, user-svc…),
+# not localhost. Secrets come from .env: CREDENTIAL_ENC_KEY, INTERNAL_TOKEN,
+# JWT_SECRET (run scripts/dev.sh once, or cp .env.example .env and fill them in).
+#
+# First full-stack run pulls qwen2.5:7b (~4.7GB) via the one-shot ollama-pull
+# service; agent-svc chat errors until it completes.
+#
+# Ports: Postgres is on 5433 (5432 is often taken). If your host already runs
+# Ollama on 11434, set OLLAMA_HOST_PORT=11435 in .env — no override file needed.
 
 services:
   postgres:
@@ -12,10 +25,9 @@ services:
       POSTGRES_USER: raphael
       POSTGRES_PASSWORD: raphael
       POSTGRES_DB: raphael
-    ports:
-      - "5433:5432"
+    ports: ["5433:5432"]
     volumes:
-      - raphael_pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
       - ./db:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U raphael -d raphael"]
@@ -27,13 +39,107 @@ services:
     image: redis:7-alpine
     container_name: raphael_redis
     command: ["redis-server", "--save", "", "--appendonly", "no"]
-    ports:
-      - "6379:6379"
+    ports: ["6379:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
       timeout: 3s
       retries: 20
 
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["${OLLAMA_HOST_PORT:-11434}:11434"]
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One-shot: pull the tool-calling model into the ollama volume, then exit.
+  ollama-pull:
+    image: ollama/ollama:latest
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama pull qwen2.5:7b"]
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+  user-svc:
+    build: ./user-svc
+    environment:
+      USER_SVC_PORT: "8081"
+      DATABASE_URL: postgresql://raphael:raphael@postgres:5432/raphael
+      CREDENTIAL_ENC_KEY: ${CREDENTIAL_ENC_KEY:?set CREDENTIAL_ENC_KEY in .env}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  conv-svc:
+    build: ./conv-svc
+    environment:
+      CONV_SVC_PORT: "8082"
+      DATABASE_URL: postgresql://raphael:raphael@postgres:5432/raphael
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  agent-svc:
+    build: ./agent-svc
+    environment:
+      AGENT_SVC_PORT: "8000"
+      DATABASE_URL: postgresql://raphael:raphael@postgres:5432/raphael
+      USER_SVC_URL: http://user-svc:8081
+      CONV_SVC_URL: http://conv-svc:8082
+      OLLAMA_BASE_URL: http://ollama:11434/v1
+      OPENROUTER_BASE_URL: https://openrouter.ai/api/v1
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      user-svc:
+        condition: service_started
+      conv-svc:
+        condition: service_started
+
+  gateway:
+    build: ./gateway
+    ports: ["8080:8080"]
+    environment:
+      GATEWAY_PORT: "8080"
+      DATABASE_URL: postgresql://raphael:raphael@postgres:5432/raphael
+      REDIS_URL: redis://redis:6379/0
+      USER_SVC_URL: http://user-svc:8081
+      CONV_SVC_URL: http://conv-svc:8082
+      AGENT_SVC_URL: http://agent-svc:8000
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
+      DEV_AUTH_ENABLED: "true"
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    depends_on:
+      redis:
+        condition: service_healthy
+      user-svc:
+        condition: service_started
+      conv-svc:
+        condition: service_started
+      agent-svc:
+        condition: service_started
+
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_GATEWAY_URL: http://localhost:8080
+    ports: ["3000:3000"]
+    depends_on:
+      gateway:
+        condition: service_started
+
 volumes:
-  raphael_pgdata:
+  pgdata:
+  ollama:

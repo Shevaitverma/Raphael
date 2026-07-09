@@ -755,7 +755,7 @@ credentials of the user the job belongs to.
 ## Infrastructure
 
 
-Containers. Every service has a Dockerfile; docker-compose.full.yml is the
+Containers. Every service has a Dockerfile; docker-compose.yml is the
 whole stack (Postgres+pgvector, Redis, Ollama, the five services) on one network
 with service-name DNS. This is the deployment artifact - ECS task definitions
 and K8s manifests derive from it.
@@ -804,7 +804,7 @@ Steps:
 The lifeboat and the cloud. There is no localhost Ollama on ECS, so the cloud
 lifeboat is an OpenRouter credential, not a local one - which is exactly why
 resolver.lifeboat() reads is_lifeboat and not provider='local'. To keep a truly
-self-hosted floor in the cluster, run the Ollama service (docker-compose.full.yml
+self-hosted floor in the cluster, run the Ollama service (docker-compose.yml
 has it) as an ECS service or K8s Deployment with a volume for the weights; a 7B
 model on CPU Fargate is slow but real. In-process embeddings need no such thing -
 they ride inside the agent image and work everywhere.

@@ -2,7 +2,7 @@
   Start every Raphael service on the host for the walking skeleton.
 
   Infrastructure (Postgres :5433, Redis :6379) must already be running via
-  `docker compose up -d`. This script builds the Go binaries, ensures the
+  `docker compose up -d postgres redis`. This script builds the Go binaries, ensures the
   agent-svc venv and web deps exist, then launches all five services detached,
   writing logs to .\logs\.
 

@@ -2,7 +2,7 @@
 # Start every Raphael service on the host for the walking skeleton.
 #
 # Infrastructure (Postgres :5433, Redis :6379) must already be up via
-# `docker compose up -d`. Builds the Go binaries, ensures the agent-svc venv and
+# `docker compose up -d postgres redis`. Builds the Go binaries, ensures the agent-svc venv and
 # web deps exist, then launches all five services in the background, logging to
 # ./logs/. On Windows run this from Git Bash; Go must be on PATH
 # (export PATH="$PATH:/c/Program Files/Go/bin").

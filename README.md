@@ -44,14 +44,23 @@ does not).
 cp .env.example .env
 # Set a real 32-byte base64 key (used by user-svc to encrypt api keys):
 #   openssl rand -base64 32   → paste into CREDENTIAL_ENC_KEY in .env
-docker compose up -d          # Postgres (:5433) + Redis (:6379); schema auto-applies
+
+# Everything in containers:
+docker compose up --build     # all services + Postgres, Redis, Ollama (pulls the model on first run)
+
+# …or just infra for host-dev (services on your machine, faster iteration):
+docker compose up -d postgres redis
 ```
+
+There is **one** compose file. `docker compose up` starts the whole stack;
+naming a subset (`postgres redis`) starts just those. If your host already runs
+Ollama on 11434, set `OLLAMA_HOST_PORT=11435` in `.env`.
 
 The schema (`db/001_init.sql`) is applied on first container start and seeds the
 dev user `00000000-0000-0000-0000-000000000001` with an **active local Ollama
 credential**, so the system runs with no paid keys.
 
-## Run all five services
+## Run all five services (host-dev)
 
 **Windows (PowerShell):**
 ```powershell
