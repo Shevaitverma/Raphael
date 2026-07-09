@@ -85,7 +85,10 @@ VALUES ('00000000-0000-0000-0000-000000000001', 'dev@raphael.local', 'Dev User')
 ON CONFLICT (email) DO NOTHING;
 
 -- Local Ollama credential, active by default so the system runs with no keys.
-INSERT INTO provider_credentials (user_id, provider, auth_type, base_url, model_id, is_active)
+-- base_url is left NULL on purpose: "local" means "the Ollama this deployment is
+-- configured for", which is an env concern (OLLAMA_BASE_URL), not a stored
+-- per-credential host. localhost on a laptop, http://ollama:11434/v1 in compose.
+INSERT INTO provider_credentials (user_id, provider, auth_type, model_id, is_active)
 VALUES ('00000000-0000-0000-0000-000000000001', 'local', 'api_key',
-        'http://localhost:11434/v1', 'qwen2.5:7b', true)
+        'qwen2.5:7b', true)
 ON CONFLICT (user_id, provider) DO NOTHING;

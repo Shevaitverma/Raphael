@@ -1,0 +1,136 @@
+# Full containerized stack — the deployment artifact.
+#   docker compose -f docker-compose.full.yml up --build
+#
+# Everything runs in containers: Postgres+pgvector, Redis, Ollama, and all five
+# services. In-container hostnames are service names (postgres, redis, ollama,
+# user-svc, …), not localhost.
+#
+# Secrets come from .env (CREDENTIAL_ENC_KEY, INTERNAL_TOKEN, JWT_SECRET). Run
+# scripts/dev.sh once first, or `cp .env.example .env` and fill them in.
+#
+# First run pulls the qwen2.5:7b model into the ollama volume (~4.7GB) via the
+# one-shot `ollama-pull` service; agent-svc chat errors until that completes.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: raphael
+      POSTGRES_PASSWORD: raphael
+      POSTGRES_DB: raphael
+    ports: ["5433:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U raphael -d raphael"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["11434:11434"]
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One-shot: pull the tool-calling model into the ollama volume, then exit.
+  ollama-pull:
+    image: ollama/ollama:latest
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama pull qwen2.5:7b"]
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+  user-svc:
+    build: ./user-svc
+    environment:
+      USER_SVC_PORT: "8081"
+      DATABASE_URL: postgresql://raphael:raphael@postgres:5432/raphael
+      CREDENTIAL_ENC_KEY: ${CREDENTIAL_ENC_KEY:?set CREDENTIAL_ENC_KEY in .env}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  conv-svc:
+    build: ./conv-svc
+    environment:
+      CONV_SVC_PORT: "8082"
+      DATABASE_URL: postgresql://raphael:raphael@postgres:5432/raphael
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  agent-svc:
+    build: ./agent-svc
+    environment:
+      AGENT_SVC_PORT: "8000"
+      DATABASE_URL: postgresql://raphael:raphael@postgres:5432/raphael
+      USER_SVC_URL: http://user-svc:8081
+      CONV_SVC_URL: http://conv-svc:8082
+      OLLAMA_BASE_URL: http://ollama:11434/v1
+      OPENROUTER_BASE_URL: https://openrouter.ai/api/v1
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      user-svc:
+        condition: service_started
+      conv-svc:
+        condition: service_started
+
+  gateway:
+    build: ./gateway
+    ports: ["8080:8080"]
+    environment:
+      GATEWAY_PORT: "8080"
+      DATABASE_URL: postgresql://raphael:raphael@postgres:5432/raphael
+      REDIS_URL: redis://redis:6379/0
+      USER_SVC_URL: http://user-svc:8081
+      CONV_SVC_URL: http://conv-svc:8082
+      AGENT_SVC_URL: http://agent-svc:8000
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
+      DEV_AUTH_ENABLED: "true"
+    depends_on:
+      redis:
+        condition: service_healthy
+      user-svc:
+        condition: service_started
+      conv-svc:
+        condition: service_started
+      agent-svc:
+        condition: service_started
+
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_GATEWAY_URL: http://localhost:8080
+    ports: ["3000:3000"]
+    depends_on:
+      gateway:
+        condition: service_started
+
+volumes:
+  pgdata:
+  ollama:
