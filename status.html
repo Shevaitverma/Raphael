@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Raphael — Development Status</title>
+<meta name="description" content="Live build status for the Raphael agentic assistant: services, tests, deployment, phases, and open gaps.">
+<style>
+:root{
+  color-scheme: dark;
+  --bg:oklch(0.165 0.007 264); --surface:oklch(0.205 0.009 264); --surface2:oklch(0.245 0.011 264);
+  --border:oklch(0.315 0.014 264); --border2:oklch(0.420 0.020 264);
+  --ink:oklch(0.945 0.008 264); --muted:oklch(0.720 0.014 264); --faint:oklch(0.560 0.014 264);
+  --done:oklch(0.74 0.15 150); --done-bg:oklch(0.31 0.055 150);
+  --partial:oklch(0.80 0.14 85); --partial-bg:oklch(0.32 0.055 85);
+  --todo:oklch(0.68 0.02 264); --todo-bg:oklch(0.28 0.01 264);
+  --accent:oklch(0.76 0.135 52); --accent2:oklch(0.74 0.135 300); --data:oklch(0.74 0.135 340);
+  --hazard:oklch(0.72 0.16 25);
+  --font:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:ui-monospace,"SF Mono","Cascadia Code",Menlo,Consolas,monospace;
+  --radius:12px;
+}
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:oklch(0.985 0.003 264); --surface:oklch(0.965 0.005 264); --surface2:oklch(0.940 0.007 264);
+  --border:oklch(0.880 0.010 264); --border2:oklch(0.780 0.015 264);
+  --ink:oklch(0.260 0.020 264); --muted:oklch(0.460 0.020 264); --faint:oklch(0.600 0.020 264);
+  --done:oklch(0.52 0.15 150); --done-bg:oklch(0.945 0.03 150);
+  --partial:oklch(0.58 0.14 75); --partial-bg:oklch(0.95 0.04 85);
+  --todo:oklch(0.55 0.02 264); --todo-bg:oklch(0.93 0.006 264);
+  --accent:oklch(0.55 0.15 52); --accent2:oklch(0.55 0.15 300); --data:oklch(0.55 0.16 340);
+  --hazard:oklch(0.55 0.17 25);
+}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){
+  color-scheme:light;
+  --bg:oklch(0.985 0.003 264); --surface:oklch(0.965 0.005 264); --surface2:oklch(0.940 0.007 264);
+  --border:oklch(0.880 0.010 264); --border2:oklch(0.780 0.015 264);
+  --ink:oklch(0.260 0.020 264); --muted:oklch(0.460 0.020 264); --faint:oklch(0.600 0.020 264);
+  --done:oklch(0.52 0.15 150); --done-bg:oklch(0.945 0.03 150);
+  --partial:oklch(0.58 0.14 75); --partial-bg:oklch(0.95 0.04 85);
+  --todo:oklch(0.55 0.02 264); --todo-bg:oklch(0.93 0.006 264);
+  --accent:oklch(0.55 0.15 52); --accent2:oklch(0.55 0.15 300); --data:oklch(0.55 0.16 340);
+  --hazard:oklch(0.55 0.17 25);
+}}
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);line-height:1.6;
+  -webkit-font-smoothing:antialiased;overflow-x:hidden}
+h1,h2,h3,p,dl,dd{margin:0}
+a{color:var(--accent2)}
+code,.mono{font-family:var(--mono);font-size:.9em}
+
+.top{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:16px;padding:12px 24px;
+  background:color-mix(in oklab,var(--bg) 84%,transparent);backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--border)}
+.top .glyph{width:22px;height:22px;border-radius:6px;flex:none;background:linear-gradient(140deg,var(--accent),var(--accent2))}
+.top nav{display:flex;gap:2px;margin-left:auto;overflow-x:auto;scrollbar-width:none}
+.top nav::-webkit-scrollbar{display:none}
+.top nav a{color:var(--muted);text-decoration:none;font-size:13px;font-weight:500;padding:5px 9px;
+  border-radius:999px;white-space:nowrap}
+.top nav a:hover{color:var(--ink);background:var(--surface2)}
+#theme{flex:none;width:32px;height:32px;border-radius:999px;border:1px solid var(--border);
+  background:none;color:var(--muted);cursor:pointer;display:grid;place-items:center}
+#theme:hover{color:var(--ink);border-color:var(--border2)}
+@media (max-width:720px){.top nav{display:none}}
+
+.wrap{max-width:76rem;margin:0 auto;padding:0 24px}
+header.hero{padding:48px 24px 8px;max-width:76rem;margin:0 auto}
+.eyebrow{font-size:12px;font-weight:600;letter-spacing:.11em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+header.hero h1{font-size:clamp(2rem,1.4rem + 2.4vw,2.9rem);font-weight:680;line-height:1.05;letter-spacing:-.025em}
+.hero .lede{margin-top:14px;max-width:64ch;color:var(--muted);font-size:1.05rem}
+.meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}
+
+section{max-width:76rem;margin:0 auto;padding:36px 24px;scroll-margin-top:64px}
+section h2{font-size:1.5rem;font-weight:640;letter-spacing:-.012em;margin-bottom:4px}
+section .sub{color:var(--muted);font-size:.95rem;margin-bottom:20px}
+
+.chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;
+  font-size:12.5px;font-weight:500;background:var(--surface);border:1px solid var(--border);color:var(--muted)}
+.chip .dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+
+.pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;
+  letter-spacing:.03em;text-transform:uppercase;white-space:nowrap}
+.pill.done{color:var(--done);background:var(--done-bg)}
+.pill.partial{color:var(--partial);background:var(--partial-bg)}
+.pill.todo{color:var(--todo);background:var(--todo-bg)}
+
+.cards{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(230px,1fr))}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px}
+.card h3{font-size:.95rem;font-weight:600;margin-bottom:6px}
+.card.accent{border-left:3px solid var(--accent)}
+.card .big{font-size:2rem;font-weight:680;letter-spacing:-.02em;line-height:1}
+.card .note{font-size:13px;color:var(--faint);margin-top:6px}
+.card p{font-size:14px;color:var(--muted)}
+
+.tablewrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius);scrollbar-width:thin}
+table{border-collapse:collapse;width:100%;min-width:640px;font-size:14px}
+th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--border);vertical-align:top}
+th{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);
+  background:var(--surface2);white-space:nowrap;position:sticky;top:0}
+tbody tr:last-child td{border-bottom:none}
+td:first-child{color:var(--ink);font-weight:500}
+td .mono{color:var(--muted)}
+.src{font-family:var(--mono);font-size:11px;color:var(--faint)}
+
+ul.list{list-style:none;padding:0;margin:0;display:grid;gap:8px}
+ul.list li{display:flex;gap:10px;align-items:baseline;font-size:14px;color:var(--muted)}
+ul.list li b{color:var(--ink);font-weight:600}
+.gaps li{padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-radius:10px;display:block}
+.gaps li b{color:var(--ink)}
+.gaps .why{color:var(--faint);font-size:13px;display:block;margin-top:2px}
+
+.log{display:grid;gap:8px}
+.log .row{display:flex;gap:12px;align-items:baseline;font-size:14px;padding:10px 14px;
+  background:var(--surface);border:1px solid var(--border);border-radius:10px}
+.log .row .ok{color:var(--done);font-weight:700;flex:none}
+.log .row .txt{color:var(--muted)}
+.log .row .txt b{color:var(--ink);font-weight:600}
+
+.two{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+
+footer{max-width:76rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid var(--border);
+  color:var(--faint);font-size:13px}
+.banner{margin:20px auto 0;max-width:76rem;padding:0 24px}
+.banner .inner{border:1px solid color-mix(in oklab,var(--partial) 40%,transparent);
+  background:var(--partial-bg);color:var(--partial);border-radius:10px;padding:12px 16px;font-size:13.5px}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <span class="glyph"></span><strong>Raphael</strong>
+  <span class="pill done" style="margin-left:2px">Skeleton green</span>
+  <nav>
+    <a href="#now">Now</a>
+    <a href="#services">Services</a>
+    <a href="#tests">Tests</a>
+    <a href="#brain">Model layer</a>
+    <a href="#deploy">Deploy</a>
+    <a href="#phases">Phases</a>
+    <a href="#roadmap">Roadmap</a>
+    <a href="#gaps">Not built</a>
+    <a href="#log">Verified</a>
+  </nav>
+  <button id="theme" type="button" aria-label="Toggle theme">◐</button>
+</div>
+
+<header class="hero">
+  <div class="eyebrow">Development Status · 2026-07-09</div>
+  <h1>What&rsquo;s built, tested, and running</h1>
+  <p class="lede">
+    A brain-agnostic, memory-backed chat assistant runs end to end today — five services, provider
+    fallback, in-process embeddings, and a full container stack. This page is the honest snapshot:
+    what works, what&rsquo;s partial, and what has no code yet. Read it next to
+    <a href="architecture.html">architecture.html</a> and <a href="plan.md">plan.md</a>.
+  </p>
+  <div class="meta">
+    <span class="chip"><i class="dot" style="color:var(--accent)"></i>Milestone: walking skeleton</span>
+    <span class="chip"><i class="dot" style="color:var(--done)"></i>7 commits</span>
+    <span class="chip"><i class="dot" style="color:var(--accent2)"></i>55 unit tests + e2e</span>
+    <span class="chip"><i class="dot" style="color:var(--data)"></i>latest: gateway CORS fix</span>
+  </div>
+</header>
+
+<div class="banner"><div class="inner">
+  Milestone scope: this is a <b>walking skeleton</b> — one real request path through every seam. Tools,
+  background workers, real OAuth login, and cloud infra are described in the plan but not built yet
+  (see <a href="#gaps" style="color:inherit;text-decoration:underline">Not built yet</a>).
+</div></div>
+
+<!-- NOW -->
+<section id="now">
+  <h2>What works today</h2>
+  <p class="sub">The end-to-end path a user actually exercises.</p>
+  <div class="cards">
+    <div class="card accent">
+      <h3>Brain-agnostic chat</h3>
+      <p>Dev-login → message → the gateway streams tokens over SSE from whichever provider the user
+      activated (seeded default: local Ollama <span class="mono">qwen2.5:7b</span>).</p>
+    </div>
+    <div class="card accent">
+      <h3>Memory that outlives providers</h3>
+      <p>Each turn is embedded in-process (nomic, 768-d) and stored in pgvector; retrieval is cosine
+      top-k, budgeted to the active model&rsquo;s context window.</p>
+    </div>
+    <div class="card accent">
+      <h3>The lifeboat</h3>
+      <p>If the active credential is <em>rejected</em> (401/403/402) the designated fallback answers
+      with a visible &ldquo;degraded&rdquo; banner. Rate limits and outages error instead — no silent swap.</p>
+    </div>
+    <div class="card accent">
+      <h3>Settings &amp; safety</h3>
+      <p>A Settings tab manages providers and picks the fallback. Keys are AES-256-GCM encrypted;
+      the internal key-serving route is shared-secret gated.</p>
+    </div>
+  </div>
+</section>
+
+<!-- SERVICES -->
+<section id="services">
+  <h2>Services</h2>
+  <p class="sub">Five services, all building, all tests green.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Service</th><th>Port</th><th>Stack</th><th>Does</th><th>Tests</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td>gateway</td><td class="mono">8080</td><td>Go · Fiber</td>
+          <td>JWT auth, Redis rate-limit (60/min), SSE passthrough, tenant isolation, CORS</td>
+          <td class="mono">7</td><td><span class="pill done">Done</span></td></tr>
+        <tr><td>user-svc</td><td class="mono">8081</td><td>Go</td>
+          <td>Encrypted provider credentials; shared-secret internal key routes; lifeboat designation</td>
+          <td class="mono">9</td><td><span class="pill done">Done</span></td></tr>
+        <tr><td>conv-svc</td><td class="mono">8082</td><td>Go</td>
+          <td>Conversations + messages; rejects any non-neutral <span class="mono">tool_calls</span> on write</td>
+          <td class="mono">14</td><td><span class="pill done">Done</span></td></tr>
+        <tr><td>agent-svc</td><td class="mono">8000</td><td>Python · FastAPI · LangGraph</td>
+          <td>Resolver, 4 adapters, in-process embeddings, retrieve→generate→persist→remember, SSE + lifeboat</td>
+          <td class="mono">18</td><td><span class="pill done">Done</span></td></tr>
+        <tr><td>web</td><td class="mono">3000</td><td>Next.js · TS · Tailwind</td>
+          <td>Chat SPA (JWT in memory), degraded banner, Settings tab with lifeboat designation</td>
+          <td class="mono">7</td><td><span class="pill done">Done</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- TESTS -->
+<section id="tests">
+  <h2>Tests &amp; verification</h2>
+  <p class="sub">Unit suites plus an 8-stage end-to-end acceptance run — driven and observed, not trusted from reports.</p>
+  <div class="cards">
+    <div class="card"><div class="big">55</div><div class="note">unit tests: gateway 7 · user-svc 9 · conv-svc 14 · agent-svc 18 · web 7</div></div>
+    <div class="card"><div class="big">8 / 8</div><div class="note">e2e stages: chat streams, memory row, lifeboat on real 401, silent on 429, no wire-format in DB</div></div>
+    <div class="card"><div class="big">6 / 6</div><div class="note">lifeboat-designation flow verified through the gateway against containers</div></div>
+    <div class="card"><div class="big">2×</div><div class="note">adversarial audit lenses that returned <em>claim_holds:false</em> — both fixed</div></div>
+  </div>
+</section>
+
+<!-- BRAIN -->
+<section id="brain">
+  <h2>Model provider layer</h2>
+  <p class="sub">One loop, one set of tool definitions, swap the brain with zero agent changes. Embeddings never leave the process.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Adapter</th><th>Serves</th><th>Status</th><th>native_tools</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">anthropic_api.py</td><td>Claude, API key</td><td><span class="pill done">Done</span></td>
+          <td class="mono">true</td><td>messages.create/.stream; adaptive thinking; drops thinking blocks &amp; toolu_ ids</td></tr>
+        <tr><td class="mono">anthropic_cli.py</td><td>Claude, OAuth</td><td><span class="pill partial">Degraded by design</span></td>
+          <td class="mono">false</td><td>claude-agent-sdk CLI door, completion-only; excluded from the slim image</td></tr>
+        <tr><td class="mono">openai_compat.py</td><td>OpenRouter · Ollama</td><td><span class="pill done">Done</span></td>
+          <td class="mono">model-dep.</td><td>one adapter, base_url switch; qwen2.5→true, gemma3/llama2→false</td></tr>
+        <tr><td class="mono">embeddings.py</td><td>local encoder</td><td><span class="pill done">Done</span></td>
+          <td class="mono">n/a</td><td>nomic-embed-text-v1.5, 768-d, CPU, no key, no network at inference</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="two" style="margin-top:16px">
+    <div class="card"><h3>Resolution</h3><p>The user picks; the resolver reads their one active credential — no precedence, no silent failover. <span class="mono">resolver.chat()</span> / <span class="mono">embed()</span> / <span class="mono">lifeboat()</span>.</p></div>
+    <div class="card"><h3>Data model</h3><p>5 tables, vendor-neutral. <span class="mono">provider_credentials</span> enforces one active + one lifeboat per user, oauth-only-on-anthropic, and active≠lifeboat — all as DB constraints.</p></div>
+  </div>
+</section>
+
+<!-- DEPLOY -->
+<section id="deploy">
+  <h2>Deployment</h2>
+  <p class="sub">Every service containerized; <span class="mono">docker-compose.full.yml</span> is the self-contained stack.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Image</th><th>Base</th><th>Size</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>raphael-gateway</td><td>distroless static</td><td class="mono">23 MB</td><td>non-root, static Go binary</td></tr>
+        <tr><td>raphael-user-svc</td><td>distroless static</td><td class="mono">20 MB</td><td>non-root</td></tr>
+        <tr><td>raphael-conv-svc</td><td>distroless static</td><td class="mono">20 MB</td><td>non-root</td></tr>
+        <tr><td>raphael-agent-svc</td><td>python:3.13-slim</td><td class="mono">4.21 GB</td><td>CPU torch + <b>nomic weights baked at build</b> (zero cold-start fetch); optimization target</td></tr>
+        <tr><td>raphael-web</td><td>node:22-alpine</td><td class="mono">336 MB</td><td>Next standalone</td></tr>
+        <tr><td class="mono">…/Dockerfile.oauth</td><td>python:3.13-slim + Node</td><td class="mono">—</td><td>OAuth variant with the claude CLI; built on demand</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="two" style="margin-top:16px">
+    <div class="card accent"><h3>Clean-room run</h3><p>Fresh volumes, all images built from source, Postgres+pgvector, Redis, Ollama + one-shot model pull, all five services on one network. Every service came up healthy; gateway reports all deps ok. The 4.7&nbsp;GB <span class="mono">qwen2.5:7b</span> pull is the only slow first-boot step.</p></div>
+    <div class="card"><h3>Config &amp; secrets</h3><p>Secrets live in <span class="mono">.env</span> (gitignored), never baked into images: <span class="mono">CREDENTIAL_ENC_KEY</span>, <span class="mono">INTERNAL_TOKEN</span>, <span class="mono">JWT_SECRET</span>. Overrides: <span class="mono">verify</span> (host infra) and <span class="mono">cleanroom</span> (ollama port).</p></div>
+  </div>
+</section>
+
+<!-- PHASES -->
+<section id="phases">
+  <h2>Phases</h2>
+  <p class="sub">Plan vs. reality, grounded in what exists in the repo.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Phase</th><th>Status</th><th>Evidence</th></tr></thead>
+      <tbody>
+        <tr><td>1 · Core Platform</td><td><span class="pill partial">Partial</span></td><td>Gateway + dev-login + chat SPA exist; no auth pages, no OpenTelemetry/WebSocket (chat is SSE)</td></tr>
+        <tr><td>2 · Backend Services</td><td><span class="pill done">Done</span></td><td>user-svc + conv-svc with tests; full users/conversations/messages schema</td></tr>
+        <tr><td>3 · Agent System</td><td><span class="pill partial">Partial</span></td><td>Linear LangGraph (retrieve→generate→persist→remember); no planner/executor/tool loop</td></tr>
+        <tr><td>4 · Model Provider Layer</td><td><span class="pill done">Done</span></td><td>All 4 adapters real; resolver + lifeboat + capabilities; the most complete phase</td></tr>
+        <tr><td>5 · Memory System</td><td><span class="pill done">Done</span></td><td>Local embed + pgvector cosine top-k, budgeted; <span class="mono">memories</span> + HNSW index</td></tr>
+        <tr><td>6 · Tools</td><td><span class="pill todo">Not started</span></td><td>No <span class="mono">tools/</span> dir; wire-format plumbing exists but nothing populates or executes tools</td></tr>
+        <tr><td>7 · Background Workers</td><td><span class="pill todo">Not started</span></td><td>No worker service, no Redis Streams consumer</td></tr>
+        <tr><td>Harness Decision</td><td><span class="pill done">Done</span></td><td>LangGraph owns the loop; Claude is a provider — honored in code</td></tr>
+        <tr><td>Provider Independence</td><td><span class="pill partial">Partial</span></td><td>Neutral persistence, in-process encoder, capability branching all real; Rule 5 (CI vs Ollama) absent — no <span class="mono">.github/</span></td></tr>
+        <tr><td>Infrastructure</td><td><span class="pill partial">Partial</span></td><td>All Dockerfiles + full compose; AWS/Terraform/CI-CD described but not built</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ROADMAP -->
+<section id="roadmap">
+  <h2>MVP roadmap</h2>
+  <p class="sub">Per-item status against the plan&rsquo;s three weeks.</p>
+  <div class="two">
+    <div class="card">
+      <h3>Week 1 &nbsp;<span class="pill done" style="vertical-align:middle">mostly done</span></h3>
+      <ul class="list" style="margin-top:10px">
+        <li><span class="pill done">Done</span> <b>Next.js UI</b></li>
+        <li><span class="pill done">Done</span> <b>Go Gateway</b></li>
+        <li><span class="pill partial">Partial</span> <b>Authentication</b> — dev-login only</li>
+        <li><span class="pill done">Done</span> <b>Chat Service</b></li>
+        <li><span class="pill partial">Partial</span> <b>Basic Agent</b> — linear graph, no tools</li>
+        <li><span class="pill done">Done</span> <b>Claude provider</b></li>
+        <li><span class="pill done">Done</span> <b>Ollama provider</b></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Week 2 &nbsp;<span class="pill done" style="vertical-align:middle">mostly done</span></h3>
+      <ul class="list" style="margin-top:10px">
+        <li><span class="pill partial">Partial</span> <b>LangGraph workflows</b> — one linear graph</li>
+        <li><span class="pill done">Done</span> <b>Model Router + resolver</b></li>
+        <li><span class="pill done">Done</span> <b>provider_credentials + settings UI</b></li>
+        <li><span class="pill done">Done</span> <b>Local embeddings</b></li>
+        <li><span class="pill done">Done</span> <b>Memory service</b></li>
+        <li><span class="pill done">Done</span> <b>pgvector</b></li>
+        <li><span class="pill todo">Todo</span> <b>Gmail integration</b></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Week 3 &nbsp;<span class="pill todo" style="vertical-align:middle">open</span></h3>
+      <ul class="list" style="margin-top:10px">
+        <li><span class="pill todo">Todo</span> <b>Calendar</b></li>
+        <li><span class="pill todo">Todo</span> <b>Drive</b></li>
+        <li><span class="pill partial">Partial</span> <b>OpenRouter provider</b> — adapter + UI, untested path</li>
+        <li><span class="pill todo">Todo</span> <b>Background agents</b></li>
+        <li><span class="pill todo">Todo</span> <b>Monitoring</b></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Future</h3>
+      <ul class="list" style="margin-top:10px">
+        <li><span class="pill todo">Todo</span> <b>React Native mobile app</b></li>
+        <li><span class="pill todo">Todo</span> <b>Voice assistant</b></li>
+        <li><span class="pill todo">Todo</span> <b>Multi-agent marketplace</b></li>
+        <li><span class="pill todo">Todo</span> <b>Custom user agents</b></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- GAPS -->
+<section id="gaps">
+  <h2>Not built yet</h2>
+  <p class="sub">Described in the plan, no code today. Being explicit so the status isn&rsquo;t read as more finished than it is.</p>
+  <ul class="list gaps">
+    <li><b>Tools &amp; integrations</b><span class="why">No <span class="mono">tools/</span> directory. Gmail, Calendar, Drive, Web Search, GitHub — zero implementation. The neutral tool-call plumbing exists; the graph never passes tools.</span></li>
+    <li><b>Background workers</b><span class="why">No worker service, no Redis Streams consumer. Email monitoring / scheduled tasks / daily summaries absent.</span></li>
+    <li><b>Real OAuth login</b><span class="why">Only <span class="mono">POST /auth/dev-login</span> gated by <span class="mono">DEV_AUTH_ENABLED</span>. No identity provider, no Google OAuth connections.</span></li>
+    <li><b>Planner / executor / tool loop</b><span class="why">The graph is a fixed 4-node line; no capability-based branching or subagents.</span></li>
+    <li><b>Monitoring &amp; CI/CD</b><span class="why">No OpenTelemetry/metrics beyond <span class="mono">/healthz</span> &amp; <span class="mono">/readyz</span>; no <span class="mono">.github/</span> workflow, so &ldquo;CI runs the suite against Ollama&rdquo; is not yet true.</span></li>
+    <li><b>Cloud infrastructure</b><span class="why">No Terraform, no ECS task defs. The full compose is the only deployment artifact; AWS is described, not provisioned.</span></li>
+  </ul>
+</section>
+
+<!-- LOG -->
+<section id="log">
+  <h2>Recently verified &amp; fixed</h2>
+  <p class="sub">Each ran and was observed, not assumed.</p>
+  <div class="log">
+    <div class="row"><span class="ok">✓</span><span class="txt"><b>Dev-login CORS</b> — browser preflight was 405; added gateway CORS, now 204 with the right headers. <span class="src">51742c1</span></span></div>
+    <div class="row"><span class="ok">✓</span><span class="txt"><b>Lifeboat designation UI</b> — Settings tab set/clear fallback; 6/6 through the gateway; active-as-fallback → 409. <span class="src">c309f3f</span></span></div>
+    <div class="row"><span class="ok">✓</span><span class="txt"><b>Dockerized</b> — 5 images build; full stack driven end-to-end in containers. <span class="src">6c78fec</span></span></div>
+    <div class="row"><span class="ok">✓</span><span class="txt"><b>Security fix</b> — the AES master key was one <span class="mono">git add</span> from being committed; closed before it happened. <span class="src">e25fbc7</span></span></div>
+    <div class="row"><span class="ok">✓</span><span class="txt"><b>Internal auth</b> — <span class="mono">/internal/*</span> now requires a shared secret (was unauthenticated, bound to all interfaces). <span class="src">7454948</span></span></div>
+    <div class="row"><span class="ok">✓</span><span class="txt"><b>OAuth adapter</b> — implemented on the CLI door; smoke-tested Opus against the real subscription. <span class="src">7454948</span></span></div>
+    <div class="row"><span class="ok">✓</span><span class="txt"><b>Cloud lifeboat</b> — <span class="mono">is_lifeboat</span> flag replaces hardcoded <span class="mono">provider='local'</span>; the guarantee now holds on ECS. <span class="src">7454948</span></span></div>
+  </div>
+</section>
+
+<footer>
+  Snapshot generated 2026-07-09 from a read-only audit of the repository. Facts (endpoints, tests,
+  constraints, image sizes) were verified against source, not recalled. Companion documents:
+  <a href="plan.md">plan.md</a> (design) · <a href="architecture.html">architecture.html</a> (system diagrams).
+</footer>
+
+<script>
+(function(){
+  var root=document.documentElement;
+  try{var s=localStorage.getItem("raphael-theme"); if(s)root.setAttribute("data-theme",s);}catch(e){}
+  document.getElementById("theme").addEventListener("click",function(){
+    var cur=root.getAttribute("data-theme")||(matchMedia("(prefers-color-scheme:light)").matches?"light":"dark");
+    var next=cur==="dark"?"light":"dark";
+    root.setAttribute("data-theme",next);
+    try{localStorage.setItem("raphael-theme",next);}catch(e){}
+  });
+})();
+</script>
+</body>
+</html>
