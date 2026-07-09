@@ -1,0 +1,39 @@
+# Infrastructure only. Services run on the host during the walking skeleton
+# so that the agent service can reach Ollama on 127.0.0.1:11434.
+#
+# Postgres is on 5433, NOT 5432 — an unrelated hotel_bookings_db container
+# already owns 5432 on this machine.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: raphael_db
+    environment:
+      POSTGRES_USER: raphael
+      POSTGRES_PASSWORD: raphael
+      POSTGRES_DB: raphael
+    ports:
+      - "5433:5432"
+    volumes:
+      - raphael_pgdata:/var/lib/postgresql/data
+      - ./db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U raphael -d raphael"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: raphael_redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  raphael_pgdata:

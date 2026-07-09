@@ -1,0 +1,34 @@
+# secrets
+.env
+.env.local
+*.pem
+*.key
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# go
+/gateway/bin/
+/user-svc/bin/
+/conv-svc/bin/
+*.exe
+
+# data
+volumes/
+*.db
+
+# editors / os
+.DS_Store
+Thumbs.db
