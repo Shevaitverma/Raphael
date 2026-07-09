@@ -13,6 +13,11 @@ DATABASE_URL = os.environ.get(
 USER_SVC_URL = os.environ.get("USER_SVC_URL", "http://localhost:8081")
 CONV_SVC_URL = os.environ.get("CONV_SVC_URL", "http://localhost:8082")
 
+# Shared secret for user-svc /internal/* (which returns decrypted keys). Must
+# match user-svc's INTERNAL_TOKEN. No default — an empty value means the
+# resolver cannot fetch credentials, which fails loudly rather than silently.
+INTERNAL_TOKEN = os.environ.get("INTERNAL_TOKEN", "")
+
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 

@@ -65,8 +65,10 @@ func newTestServer(t *testing.T) *server {
 	if err != nil {
 		t.Fatalf("cryptor: %v", err)
 	}
-	return &server{store: &store{pool: testPool, crypto: cr}}
+	return &server{store: &store{pool: testPool, crypto: cr}, internalToken: testInternalToken}
 }
+
+const testInternalToken = "test-internal-token-0123456789"
 
 func do(t *testing.T, srv *server, method, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
@@ -77,6 +79,10 @@ func do(t *testing.T, srv *server, method, path string, body any) *httptest.Resp
 		}
 	}
 	req := httptest.NewRequest(method, path, &buf)
+	// Internal routes require the shared secret; supply it for these tests.
+	if strings.HasPrefix(path, "/internal/") {
+		req.Header.Set("X-Internal-Token", testInternalToken)
+	}
 	rec := httptest.NewRecorder()
 	srv.routes().ServeHTTP(rec, req)
 	return rec
@@ -235,18 +241,20 @@ func TestOauthNonAnthropicRejected(t *testing.T) {
 	}
 }
 
-// --- lifeboat: local row, or 204 when absent -------------------------------
-
+// --- lifeboat: the designated is_lifeboat row, or 204 when none ------------
+// The lifeboat is whatever row is flagged is_lifeboat (not hardcoded to
+// provider='local'), excluding the active row. Skeleton note: the designation
+// is set here via SQL; a user-facing "make this my fallback" API/UI is Phase 2.
 func TestLifeboat(t *testing.T) {
 	srv := newTestServer(t)
 
-	// No local row yet -> 204.
+	// No lifeboat designated yet -> 204.
 	rec := do(t, srv, http.MethodGet, "/internal/users/"+testUserID+"/credential/lifeboat", nil)
 	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204 when no local row, got %d", rec.Code)
+		t.Fatalf("expected 204 when no lifeboat, got %d", rec.Code)
 	}
 
-	// Add a local (inactive) row alongside an active anthropic one.
+	// Active anthropic + an inactive local row.
 	_ = do(t, srv, http.MethodPost, "/users/"+testUserID+"/credentials", createCredentialReq{
 		Provider: "anthropic", AuthType: "api_key", APIKey: "sk-ant-y",
 		ModelID: "claude-opus-4-8", Activate: true,
@@ -254,6 +262,19 @@ func TestLifeboat(t *testing.T) {
 	_ = do(t, srv, http.MethodPost, "/users/"+testUserID+"/credentials", createCredentialReq{
 		Provider: "local", AuthType: "api_key", ModelID: "qwen2.5:7b", Activate: false,
 	})
+
+	// Not a lifeboat until designated: still 204.
+	rec = do(t, srv, http.MethodGet, "/internal/users/"+testUserID+"/credential/lifeboat", nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 before designation, got %d", rec.Code)
+	}
+
+	// Designate the local row as the lifeboat.
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE provider_credentials SET is_lifeboat = true
+		 WHERE user_id = $1 AND provider = 'local'`, testUserID); err != nil {
+		t.Fatalf("designate lifeboat: %v", err)
+	}
 
 	rec = do(t, srv, http.MethodGet, "/internal/users/"+testUserID+"/credential/lifeboat", nil)
 	if rec.Code != http.StatusOK {
@@ -263,6 +284,22 @@ func TestLifeboat(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &d)
 	if d.Provider != "local" {
 		t.Fatalf("lifeboat provider = %s, want local", d.Provider)
+	}
+}
+
+// --- /internal/* rejects requests without the shared secret ----------------
+func TestInternalRequiresToken(t *testing.T) {
+	srv := newTestServer(t)
+	// Bypass do()'s auto-header by building the request directly.
+	req := httptest.NewRequest(http.MethodGet,
+		"/internal/users/"+testUserID+"/credential/active", nil)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("internal without token: got %d, want 401", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "api_key") {
+		t.Fatalf("unauthorized response should not include credential data")
 	}
 }
 

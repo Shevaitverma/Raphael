@@ -84,7 +84,8 @@ func (s *Server) BuildApp() *fiber.App {
 		StreamRequestBody: true,
 	})
 
-	app.Get("/healthz", s.handleHealth)
+	app.Get("/healthz", s.handleHealth) // liveness
+	app.Get("/readyz", s.handleReady)   // readiness
 
 	if s.cfg.DevAuthEnabled {
 		app.Post("/auth/dev-login", s.handleDevLogin)

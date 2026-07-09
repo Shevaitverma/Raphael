@@ -27,6 +27,13 @@ func main() {
 		log.Fatalf("credential encryption unavailable: %v", err)
 	}
 
+	// Fail loudly if the internal shared secret is missing — /internal/* returns
+	// decrypted keys and must never be left unauthenticated.
+	internalToken := os.Getenv("INTERNAL_TOKEN")
+	if internalToken == "" {
+		log.Fatalf("INTERNAL_TOKEN is required (guards /internal/* credential endpoints)")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, dbURL)
@@ -38,7 +45,7 @@ func main() {
 		log.Fatalf("ping postgres: %v", err)
 	}
 
-	srv := &server{store: &store{pool: pool, crypto: crypto}}
+	srv := &server{store: &store{pool: pool, crypto: crypto}, internalToken: internalToken}
 
 	httpSrv := &http.Server{
 		Addr:              ":" + port,

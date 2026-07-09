@@ -169,12 +169,16 @@ func (s *store) activeDecrypted(ctx context.Context, userID string) (*decryptedC
 		 FROM provider_credentials WHERE user_id = $1 AND is_active`, userID)
 }
 
-// lifeboatDecrypted returns the user's provider='local' row with the key
-// decrypted. errNotFound when they have no local row.
+// lifeboatDecrypted returns the user's DESIGNATED lifeboat credential, decrypted.
+// It is whichever row is flagged is_lifeboat — a local Ollama row on a laptop, an
+// OpenRouter row in the cloud — never hardcoded to provider='local' (there is no
+// localhost Ollama in ECS/K8s). It excludes the active row: falling back to the
+// credential that just died is not a fallback. errNotFound when none is set.
 func (s *store) lifeboatDecrypted(ctx context.Context, userID string) (*decryptedCredential, error) {
 	return s.oneDecrypted(ctx,
 		`SELECT provider, auth_type, api_key_enc, base_url, model_id
-		 FROM provider_credentials WHERE user_id = $1 AND provider = 'local'`, userID)
+		 FROM provider_credentials
+		 WHERE user_id = $1 AND is_lifeboat AND NOT is_active`, userID)
 }
 
 func (s *store) oneDecrypted(ctx context.Context, query, userID string) (*decryptedCredential, error) {

@@ -100,6 +100,10 @@ echo "== 6. LIFEBOAT: dead anthropic credential (401) must degrade to local =="
 curl -s --max-time 8 -X POST "$GATEWAY/api/providers" -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"provider":"anthropic","auth_type":"api_key","api_key":"sk-ant-invalid","model_id":"claude-opus-4-8","activate":true}' >/dev/null
+# Activating anthropic deactivated local (one active per user). Now designate the
+# inactive local row as the lifeboat — the resolver falls back to is_lifeboat, not
+# to a hardcoded provider='local'.
+psql -q -c "UPDATE provider_credentials SET is_lifeboat=true WHERE user_id='$DEV_UID' AND provider='local';" >/dev/null
 BEFORE=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$DEV_UID';")
 "$PY" "$HERE/sse_client.py" "$GATEWAY" "$TOKEN" "$CID" \
   "In one short sentence, what is the capital of Japan?" > "$TMP/lifeboat.json"
@@ -144,7 +148,9 @@ kill "$STUB_PID" >/dev/null 2>&1; STUB_PID=""
 
 echo "== 8. restore local as the active credential =="
 psql -q -c "DELETE FROM provider_credentials WHERE user_id='$DEV_UID' AND provider IN ('anthropic','openai_compat');" >/dev/null
-psql -q -c "UPDATE provider_credentials SET is_active=true WHERE user_id='$DEV_UID' AND provider='local';" >/dev/null
+# Clear the lifeboat flag as we reactivate local — a row cannot be both active
+# and the lifeboat (active_is_not_lifeboat CHECK).
+psql -q -c "UPDATE provider_credentials SET is_active=true, is_lifeboat=false WHERE user_id='$DEV_UID' AND provider='local';" >/dev/null
 FINAL=$(psql -Atc "SELECT provider||'='||is_active FROM provider_credentials WHERE user_id='$DEV_UID';")
 pass "restored: $FINAL"
 

@@ -63,7 +63,9 @@ func login(t *testing.T, app interface {
 	return out.Token, out.User.ID
 }
 
-func TestHealthz(t *testing.T) {
+// Liveness must be 200 regardless of downstream health — its upstreams here all
+// point at a dead address, and it must still report ok.
+func TestHealthzLiveness(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:1", "http://127.0.0.1:1", "http://127.0.0.1:1")
 	app := newServerT(t, cfg).BuildApp()
 
@@ -75,20 +77,40 @@ func TestHealthz(t *testing.T) {
 		t.Fatalf("healthz status = %d, want 200", resp.StatusCode)
 	}
 	var out struct {
+		Status string `json:"status"`
+	}
+	json.NewDecoder(resp.Body).Decode(&out)
+	if out.Status != "ok" {
+		t.Fatalf("liveness status = %q, want ok", out.Status)
+	}
+}
+
+// Readiness probes dependencies and reports them. Redis is up in the test env,
+// so it must be "ready" with deps populated.
+func TestReadyz(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:1", "http://127.0.0.1:1", "http://127.0.0.1:1")
+	app := newServerT(t, cfg).BuildApp()
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
 		Status string            `json:"status"`
 		Deps   map[string]string `json:"deps"`
 	}
 	json.NewDecoder(resp.Body).Decode(&out)
-	if out.Status != "ok" {
-		t.Fatalf("status = %q", out.Status)
-	}
 	for _, k := range []string{"redis", "user_svc", "conv_svc", "agent_svc"} {
 		if _, ok := out.Deps[k]; !ok {
-			t.Fatalf("healthz deps missing %q: %+v", k, out.Deps)
+			t.Fatalf("readyz deps missing %q: %+v", k, out.Deps)
 		}
 	}
+	// Redis is up in CI/dev -> ready + 200. If Redis were down we'd expect 503.
 	if out.Deps["redis"] != "ok" {
 		t.Fatalf("redis dep = %q, want ok (is Redis up?)", out.Deps["redis"])
+	}
+	if resp.StatusCode != 200 || out.Status != "ready" {
+		t.Fatalf("readyz = %d %q, want 200 ready", resp.StatusCode, out.Status)
 	}
 }
 

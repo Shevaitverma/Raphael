@@ -9,7 +9,8 @@ chat(user_id) reads the ONE active credential from user-svc
 No active row -> NoActiveCredential (HTTP 409).
 
 embed()        -> always the local encoder (never a chat provider).
-lifeboat(uid)  -> the provider='local' row (or None).
+lifeboat(uid)  -> the user's designated is_lifeboat row, excluding the active
+                  one (local Ollama on a laptop, OpenRouter in the cloud), or None.
 
 Selection has no precedence: the user picks, we read their one active row. The
 lifeboat is an error path, not a preference ordering.
@@ -20,6 +21,7 @@ import httpx
 
 from config import (
     ANTHROPIC_DEFAULT_MODEL,
+    INTERNAL_TOKEN,
     OLLAMA_BASE_URL,
     OPENROUTER_BASE_URL,
     USER_SVC_URL,
@@ -34,7 +36,8 @@ class NoActiveCredential(Exception):
 
 
 def _get(path: str):
-    r = httpx.get(USER_SVC_URL + path, timeout=10.0)
+    headers = {"X-Internal-Token": INTERNAL_TOKEN} if INTERNAL_TOKEN else {}
+    r = httpx.get(USER_SVC_URL + path, headers=headers, timeout=10.0)
     if r.status_code in (204, 404):
         return None
     r.raise_for_status()

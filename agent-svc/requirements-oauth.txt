@@ -1,0 +1,6 @@
+# OAuth (claude-agent-sdk / CLI door) adapter dependency.
+# Installed ONLY in the oauth-capable image (Dockerfile.oauth) and for local dev
+# that exercises anthropic+oauth. The slim production image (Dockerfile) omits
+# this — anthropic_cli.py imports it lazily and raises a clear error if absent.
+# Also requires the `claude` CLI binary (npm i -g @anthropic-ai/claude-code) + Node.
+claude-agent-sdk>=0.2,<0.3

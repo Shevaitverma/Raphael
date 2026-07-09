@@ -8,18 +8,32 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-// handleHealth reports the gateway's own status plus a live probe of each
-// dependency. The gateway itself is "ok" as long as it can answer; a downed
-// dependency is reported in deps but does not fail the endpoint (it always
-// returns 200 so orchestration can read the detail).
+// handleHealth is the LIVENESS probe. It answers 200 as long as the process is
+// running. It deliberately does NOT probe downstream dependencies: a transient
+// blip in Redis or a downstream service must not cause Kubernetes to kill and
+// restart an otherwise-healthy gateway.
 func (s *Server) handleHealth(c *fiber.Ctx) error {
+	return c.JSON(fiber.Map{"status": "ok"})
+}
+
+// handleReady is the READINESS probe. It reports whether the gateway should
+// receive traffic. Redis is required (rate limiting can't function without it),
+// so a downed Redis returns 503 and the pod is pulled from the load balancer.
+// Downstream services are reported for visibility but do not fail readiness —
+// the gateway degrades per-route (502) rather than going dark for all traffic.
+func (s *Server) handleReady(c *fiber.Ctx) error {
+	redis := s.pingRedis()
 	deps := fiber.Map{
-		"redis":     s.pingRedis(),
+		"redis":     redis,
 		"user_svc":  s.pingHTTP(s.cfg.UserSvcURL + "/healthz"),
 		"conv_svc":  s.pingHTTP(s.cfg.ConvSvcURL + "/healthz"),
 		"agent_svc": s.pingHTTP(s.cfg.AgentSvcURL + "/healthz"),
 	}
-	return c.JSON(fiber.Map{"status": "ok", "deps": deps})
+	if redis != "ok" {
+		return c.Status(http.StatusServiceUnavailable).
+			JSON(fiber.Map{"status": "not_ready", "deps": deps})
+	}
+	return c.JSON(fiber.Map{"status": "ready", "deps": deps})
 }
 
 func (s *Server) pingRedis() string {

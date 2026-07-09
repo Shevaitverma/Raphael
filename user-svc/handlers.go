@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -8,6 +9,24 @@ import (
 
 type server struct {
 	store *store
+	// internalToken guards /internal/* (which returns DECRYPTED keys). Network
+	// isolation is not a control in K8s — pods can reach each other — so these
+	// endpoints require a shared secret that only the agent service holds.
+	internalToken string
+}
+
+// requireInternal rejects any /internal/* request lacking the shared secret.
+// Constant-time compare so the check can't be timing-probed.
+func (s *server) requireInternal(h http.HandlerFunc) http.HandlerFunc {
+	want := []byte(s.internalToken)
+	return func(w http.ResponseWriter, r *http.Request) {
+		got := []byte(r.Header.Get("X-Internal-Token"))
+		if len(want) == 0 || subtle.ConstantTimeCompare(got, want) != 1 {
+			writeErr(w, http.StatusUnauthorized, "internal endpoint")
+			return
+		}
+		h(w, r)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -29,9 +48,10 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /users/{uid}/credentials", s.createCredential)
 	mux.HandleFunc("POST /users/{uid}/credentials/{id}/activate", s.activateCredential)
 
-	// Internal routes — return the decrypted key. Not routed by the gateway.
-	mux.HandleFunc("GET /internal/users/{uid}/credential/active", s.internalActive)
-	mux.HandleFunc("GET /internal/users/{uid}/credential/lifeboat", s.internalLifeboat)
+	// Internal routes — return the decrypted key. Shared-secret gated, and never
+	// routed by the gateway.
+	mux.HandleFunc("GET /internal/users/{uid}/credential/active", s.requireInternal(s.internalActive))
+	mux.HandleFunc("GET /internal/users/{uid}/credential/lifeboat", s.requireInternal(s.internalLifeboat))
 	return mux
 }
 
