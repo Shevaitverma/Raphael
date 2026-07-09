@@ -487,21 +487,37 @@ provider_credentials
 - base_url
 - model_id
 - is_active
+- is_lifeboat
 - created_at
 
-api_key_enc is encrypted at rest and never returned by the API.
+api_key_enc is encrypted at rest and never returned by the API. base_url is left
+NULL for the local row: "local" means "the Ollama this deployment is configured
+for" (OLLAMA_BASE_URL), which is env, not a stored per-credential host.
 
-Exactly one active row per user:
+Exactly one active row per user, and at most one lifeboat, and they cannot be
+the same row (falling back to the credential that just died is not a fallback):
 
   CREATE UNIQUE INDEX one_active_credential
-    ON provider_credentials (user_id)
-    WHERE is_active;
+    ON provider_credentials (user_id) WHERE is_active;
+  CREATE UNIQUE INDEX one_lifeboat_credential
+    ON provider_credentials (user_id) WHERE is_lifeboat;
+  ALTER TABLE provider_credentials
+    ADD CONSTRAINT active_is_not_lifeboat CHECK (NOT (is_active AND is_lifeboat));
 
 auth_type = oauth is only valid when provider = anthropic. Reject it in the
 service and add a CHECK so the database refuses it too.
 
-At most one row per (user_id, provider). The lifeboat is the local row, so a
-user may hold an inactive local credential alongside an active Claude one.
+At most one row per (user_id, provider), so a user may hold an inactive
+credential (the lifeboat) alongside an active one. resolver.lifeboat() reads the
+is_lifeboat row, NOT a hardcoded provider='local' — that is what makes the
+guarantee hold in the cloud, where the lifeboat is an OpenRouter row, not a
+localhost Ollama that does not exist on ECS.
+
+Built: db/001_init.sql + db/002_lifeboat.sql.
+
+Deferred to Phase 2: the user-facing "make this my fallback" designation
+(setting is_lifeboat from the Settings UI). In the skeleton it is set directly
+in SQL by tests and the e2e.
 
 
 ## Provider Independence
@@ -734,13 +750,36 @@ credentials of the user the job belongs to.
 ## Infrastructure
 
 
+Containers. Every service has a Dockerfile; docker-compose.full.yml is the
+whole stack (Postgres+pgvector, Redis, Ollama, the five services) on one network
+with service-name DNS. This is the deployment artifact - ECS task definitions
+and K8s manifests derive from it.
+
+Images, as built:
+
+gateway / user-svc / conv-svc   distroless static, non-root, ~20MB each
+agent-svc                       python:3.13-slim + CPU torch + nomic weights
+                                baked in, non-root, ~4.2GB
+agent-svc Dockerfile.oauth      the same + Node + claude CLI, for the oauth path
+web                             Next standalone, node:22-alpine, ~335MB
+
+The agent image bakes the nomic-embed-text-v1.5 weights at BUILD time, so cold
+start does zero network I/O (HF_HUB_OFFLINE=1 enforces it). ~4.2GB is heavy -
+an optimization target (drop pip caches, thin the torch deps), not a blocker.
+
+The oauth image carries Node + `npm install -g @anthropic-ai/claude-code` and
+must run non-root (the CLI refuses root). The slim image omits it; the adapter
+imports claude-agent-sdk lazily and errors clearly if oauth is selected without
+it. Another reason api_key is the supported path.
+
+
 AWS:
 
 - CloudFront
 - ALB
 - ECS Fargate
-- RDS PostgreSQL
-- ElastiCache Redis
+- RDS PostgreSQL      (replaces the compose Postgres)
+- ElastiCache Redis   (replaces the compose Redis)
 - S3
 - SQS
 
@@ -757,17 +796,13 @@ Steps:
 4. Deploy ECS Service
 
 
-Note - a local Ollama model is reachable from your machine, not from ECS.
-Cloud deployments use Claude or OpenRouter. Local is a development and
-self-hosting path.
-
-The agent image carries CPU-only torch and the nomic-embed-text-v1.5 weights
-for in-process embeddings. Budget the layer size and warm the model at boot,
-not on the first request.
-
-If we ship the oauth adapter, the image also needs Node and
-`npm install -g @anthropic-ai/claude-code`, and must run as a non-root user
-because the CLI refuses root. Another reason api_key is the supported path.
+The lifeboat and the cloud. There is no localhost Ollama on ECS, so the cloud
+lifeboat is an OpenRouter credential, not a local one - which is exactly why
+resolver.lifeboat() reads is_lifeboat and not provider='local'. To keep a truly
+self-hosted floor in the cluster, run the Ollama service (docker-compose.full.yml
+has it) as an ECS service or K8s Deployment with a volume for the weights; a 7B
+model on CPU Fargate is slow but real. In-process embeddings need no such thing -
+they ride inside the agent image and work everywhere.
 
 
 ## MVP Roadmap
