@@ -3,6 +3,12 @@
 .env.local
 *.pem
 *.key
+# The credential master key decrypts every provider_credentials row.
+# Belt and braces: dev scripts now write it into .env, but never let a stray
+# sidecar file be stageable.
+.dev_enc_key
+**/.dev_enc_key
+*_enc_key
 
 # python
 __pycache__/
@@ -32,3 +38,6 @@ volumes/
 # editors / os
 .DS_Store
 Thumbs.db
+
+# runtime
+logs/
