@@ -1,21 +1,9 @@
 # The one compose file. Two ways to use it:
+#   Everything in containers:  docker compose up --build
+#   Host-dev (infra only):     docker compose up -d postgres redis
 #
-#   Everything in containers (demo / prod-like):
-#     docker compose up --build
-#
-#   Host-dev (services on your machine, only infra in Docker — faster iteration):
-#     docker compose up -d postgres redis        # then: bash scripts/dev.sh
-#     (host-dev reaches your host Ollama on localhost:11434)
-#
-# In-container hostnames are service names (postgres, redis, ollama, user-svc…),
-# not localhost. Secrets come from .env: CREDENTIAL_ENC_KEY, INTERNAL_TOKEN,
-# JWT_SECRET (run scripts/dev.sh once, or cp .env.example .env and fill them in).
-#
-# First full-stack run pulls qwen2.5:7b (~4.7GB) via the one-shot ollama-pull
-# service; agent-svc chat errors until it completes.
-#
-# Ports: Postgres is on 5433 (5432 is often taken). If your host already runs
-# Ollama on 11434, set OLLAMA_HOST_PORT=11435 in .env — no override file needed.
+# Postgres is on 5433 (5432 is often taken). If your host already runs
+# Ollama on 11434, set OLLAMA_HOST_PORT=11435 in .env.
 
 services:
   postgres:
@@ -67,12 +55,10 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
-    restart: "no"
 
   user-svc:
     build: ./user-svc
     environment:
-      USER_SVC_PORT: "8081"
       DATABASE_URL: postgresql://raphael:raphael@postgres:5432/raphael
       CREDENTIAL_ENC_KEY: ${CREDENTIAL_ENC_KEY:?set CREDENTIAL_ENC_KEY in .env}
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN in .env}
@@ -83,7 +69,6 @@ services:
   conv-svc:
     build: ./conv-svc
     environment:
-      CONV_SVC_PORT: "8082"
       DATABASE_URL: postgresql://raphael:raphael@postgres:5432/raphael
     depends_on:
       postgres:
@@ -92,12 +77,10 @@ services:
   agent-svc:
     build: ./agent-svc
     environment:
-      AGENT_SVC_PORT: "8000"
       DATABASE_URL: postgresql://raphael:raphael@postgres:5432/raphael
       USER_SVC_URL: http://user-svc:8081
       CONV_SVC_URL: http://conv-svc:8082
       OLLAMA_BASE_URL: http://ollama:11434/v1
-      OPENROUTER_BASE_URL: https://openrouter.ai/api/v1
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN in .env}
     depends_on:
       postgres:
@@ -111,7 +94,6 @@ services:
     build: ./gateway
     ports: ["8080:8080"]
     environment:
-      GATEWAY_PORT: "8080"
       DATABASE_URL: postgresql://raphael:raphael@postgres:5432/raphael
       REDIS_URL: redis://redis:6379/0
       USER_SVC_URL: http://user-svc:8081
@@ -136,9 +118,7 @@ services:
       args:
         NEXT_PUBLIC_GATEWAY_URL: http://localhost:8080
     ports: ["3000:3000"]
-    depends_on:
-      gateway:
-        condition: service_started
+    depends_on: [gateway]
 
 volumes:
   pgdata:
