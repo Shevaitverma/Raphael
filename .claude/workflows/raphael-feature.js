@@ -1,10 +1,7 @@
 export const meta = {
   name: 'raphael-feature',
   description: 'Plan and implement any Raphael change end to end: recon, design panel, judge, implement, adversarially verify',
-  whenToUse:
-    'Any substantial Raphael work stated in one line — a feature, a refactor, a bug hunt, a subsystem overhaul. ' +
-    'Pass the request as args (a string), or {request, mode} where mode is "plan" | "implement" | "both" (default "both"). ' +
-    'Bakes in the standing project constraints so no agent has to be re-told them.',
+  whenToUse: 'Any substantial Raphael work stated in one line: a feature, a refactor, a bug hunt, a subsystem overhaul. Pass the request as args (a string), or {request, mode} where mode is "plan" | "implement" | "both" (default "both"). Bakes in the standing project constraints so no agent has to be re-told them.',
   phases: [
     { title: 'Recon', detail: 'parallel readers establish ground truth against the real code' },
     { title: 'Design', detail: 'three independent design lenses' },
@@ -76,6 +73,15 @@ const CONSTRAINTS = `
 10. VERIFY, DON'T ASSERT. Cite file:line for every factual claim. If you did not read it,
     do not claim it. If a check fails, say so with the output. Never report a thing as done
     that you did not observe working.
+
+11. NEVER VERIFY BY DESTROYING. A check must not delete or reset state the user did not
+    name as disposable. Specifically forbidden: 'docker compose down -v' (it drops the
+    pgdata volume holding real conversations, credentials, facts and memories), DROP/TRUNCATE
+    on any table, deleting .env, and 'git checkout'/'git stash' over a working tree other
+    agents are writing to. A migration is verified by APPLYING it to the live database and
+    applying it a second time to prove idempotency — never by wiping and re-initialising.
+    If a check seems to need a clean database, it does not: use a scratch schema, a fake, or
+    say plainly that you could not verify it.
 `
 
 phase('Recon')
