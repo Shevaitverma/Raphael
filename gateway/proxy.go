@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -84,10 +85,15 @@ func (s *Server) proxyConversations(c *fiber.Ctx) error {
 	}
 	target := s.cfg.ConvSvcURL + "/conversations" + rest
 
-	// Preserve any existing query, then force user_id from the JWT.
-	q := string(c.Request().URI().QueryString())
-	target = appendQuery(target, q)
-	target = appendQuery(target, "user_id="+uid)
+	// Preserve any existing query, then force user_id from the JWT. Set, never
+	// append: url.Values.Get upstream returns the FIRST value, so appending ours
+	// after a client's ?user_id=<victim> would hand the victim's id to conv-svc.
+	q, err := url.ParseQuery(string(c.Request().URI().QueryString()))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid query string")
+	}
+	q.Set("user_id", uid)
+	target += "?" + q.Encode()
 
 	var body []byte
 	if len(c.Body()) > 0 {
@@ -201,15 +207,4 @@ func sseError(c *fiber.Ctx, msg string) error {
 	c.Set("Cache-Control", "no-cache")
 	c.Status(fiber.StatusOK)
 	return c.SendString(fmt.Sprintf("event: error\ndata: {\"message\":%q}\n\n", msg))
-}
-
-func appendQuery(url, q string) string {
-	q = strings.TrimSpace(q)
-	if q == "" {
-		return url
-	}
-	if strings.Contains(url, "?") {
-		return url + "&" + q
-	}
-	return url + "?" + q
 }

@@ -16,6 +16,17 @@ import (
 
 const devUserID = "00000000-0000-0000-0000-000000000001"
 
+// otherUserID stands in for any authenticated user who is not the owner. It need
+// not exist in `users`: an ownership check that passes for a non-owner is broken
+// whether or not the non-owner is real.
+const otherUserID = "11111111-1111-1111-1111-111111111111"
+
+// msgsURL builds the messages path for a conversation as the caller must send
+// it: user_id is a query parameter, never part of the message body.
+func msgsURL(convID, userID string) string {
+	return "/conversations/" + convID + "/messages?user_id=" + userID
+}
+
 // newTestServer opens a transaction and hands the handlers a Server bound to it.
 // The transaction is rolled back at the end of the test, so nothing persists.
 func newTestServer(t *testing.T) (*Server, func()) {
@@ -187,7 +198,7 @@ func TestCreateAndListMessages(t *testing.T) {
 	convID := createConv(t, srv)
 
 	// a plain user message
-	rr := do(t, srv, "POST", "/conversations/"+convID+"/messages", map[string]any{
+	rr := do(t, srv, "POST", msgsURL(convID, devUserID), map[string]any{
 		"role": "user", "content": "hi there",
 	})
 	if rr.Code != http.StatusCreated {
@@ -195,7 +206,7 @@ func TestCreateAndListMessages(t *testing.T) {
 	}
 
 	// an assistant message with neutral tool_calls
-	rr = do(t, srv, "POST", "/conversations/"+convID+"/messages", map[string]any{
+	rr = do(t, srv, "POST", msgsURL(convID, devUserID), map[string]any{
 		"role":    "assistant",
 		"content": "",
 		"tool_calls": []map[string]any{
@@ -214,7 +225,7 @@ func TestCreateAndListMessages(t *testing.T) {
 	}
 
 	// list them back, oldest first
-	rr = do(t, srv, "GET", "/conversations/"+convID+"/messages", nil)
+	rr = do(t, srv, "GET", msgsURL(convID, devUserID), nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("list msgs = %d, want 200; body=%s", rr.Code, rr.Body)
 	}
@@ -245,7 +256,7 @@ func TestCreateMessageBadRole(t *testing.T) {
 	srv, cleanup := newTestServer(t)
 	defer cleanup()
 	convID := createConv(t, srv)
-	rr := do(t, srv, "POST", "/conversations/"+convID+"/messages", map[string]any{
+	rr := do(t, srv, "POST", msgsURL(convID, devUserID), map[string]any{
 		"role": "system", "content": "nope",
 	})
 	if rr.Code != http.StatusBadRequest {
@@ -268,7 +279,7 @@ func TestCreateMessageProviderWireFormatRejected(t *testing.T) {
 		map[string]any{"name": "search", "arguments": map[string]any{}},         // object, not array
 	}
 	for i, tc := range cases {
-		rr := do(t, srv, "POST", "/conversations/"+convID+"/messages", map[string]any{
+		rr := do(t, srv, "POST", msgsURL(convID, devUserID), map[string]any{
 			"role": "assistant", "content": "", "tool_calls": tc,
 		})
 		if rr.Code != http.StatusBadRequest {
@@ -277,19 +288,120 @@ func TestCreateMessageProviderWireFormatRejected(t *testing.T) {
 	}
 }
 
+// A message body carries {role,content,tool_calls?} and nothing else: ownership
+// comes from the conversation row, not the body. Anything that bolts a user_id
+// onto a message write is talking to the wrong service and must be rejected,
+// not silently ignored.
+func TestCreateMessageRejectsUserID(t *testing.T) {
+	srv, cleanup := newTestServer(t)
+	defer cleanup()
+	convID := createConv(t, srv)
+	rr := do(t, srv, "POST", msgsURL(convID, devUserID), map[string]any{
+		"role": "user", "content": "hi", "user_id": devUserID,
+	})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("user_id in message body = %d, want 400; body=%s", rr.Code, rr.Body)
+	}
+}
+
 func TestMessagesForMissingConversation(t *testing.T) {
 	srv, cleanup := newTestServer(t)
 	defer cleanup()
 	missing := "22222222-2222-2222-2222-222222222222"
-	rr := do(t, srv, "GET", "/conversations/"+missing+"/messages", nil)
+	rr := do(t, srv, "GET", msgsURL(missing, devUserID), nil)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("list missing conv = %d, want 404; body=%s", rr.Code, rr.Body)
 	}
-	rr = do(t, srv, "POST", "/conversations/"+missing+"/messages", map[string]any{
+	rr = do(t, srv, "POST", msgsURL(missing, devUserID), map[string]any{
 		"role": "user", "content": "hi",
 	})
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("post to missing conv = %d, want 404; body=%s", rr.Code, rr.Body)
+	}
+}
+
+// ---- authorization --------------------------------------------------------
+//
+// conv-svc owns conversations and messages, so it — not the gateway — decides
+// who may read and write them. Every case below must be indistinguishable from
+// "no such conversation": a 403 would confirm the id is real.
+
+// READ IDOR: knowing a conversation uuid must not be enough to read it.
+func TestListMessagesOtherUserGets404(t *testing.T) {
+	srv, cleanup := newTestServer(t)
+	defer cleanup()
+	convID := createConv(t, srv)
+	if rr := do(t, srv, "POST", msgsURL(convID, devUserID), map[string]any{
+		"role": "user", "content": "a private secret",
+	}); rr.Code != http.StatusCreated {
+		t.Fatalf("setup post = %d; body=%s", rr.Code, rr.Body)
+	}
+
+	rr := do(t, srv, "GET", msgsURL(convID, otherUserID), nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("read another user's messages = %d, want 404; body=%s", rr.Code, rr.Body)
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte("private secret")) {
+		t.Fatalf("leaked message content to a non-owner: %s", rr.Body)
+	}
+}
+
+// WRITE IDOR: POST /api/chat lets a client name any conversation_id, and
+// agent-svc persists into it. Ownership must stop the write at the DB.
+func TestCreateMessageOtherUserGets404(t *testing.T) {
+	srv, cleanup := newTestServer(t)
+	defer cleanup()
+	convID := createConv(t, srv)
+
+	rr := do(t, srv, "POST", msgsURL(convID, otherUserID), map[string]any{
+		"role": "user", "content": "injected",
+	})
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("write into another user's conversation = %d, want 404; body=%s", rr.Code, rr.Body)
+	}
+
+	// The 404 must mean nothing was written, not merely that nothing was returned.
+	rr = do(t, srv, "GET", msgsURL(convID, devUserID), nil)
+	var msgs []Message
+	if err := json.Unmarshal(rr.Body.Bytes(), &msgs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("rejected write still persisted %d message(s): %+v", len(msgs), msgs)
+	}
+}
+
+// The gateway appends its JWT-derived user_id AFTER the client's query string,
+// and url.Values.Get returns the FIRST value — so a duplicated user_id would let
+// ?user_id=<victim> outrank it. conv-svc refuses to guess which one is trusted.
+func TestDuplicateUserIDRejected(t *testing.T) {
+	srv, cleanup := newTestServer(t)
+	defer cleanup()
+	convID := createConv(t, srv)
+
+	targets := []string{
+		"/conversations?user_id=" + otherUserID + "&user_id=" + devUserID,
+		"/conversations/" + convID + "/messages?user_id=" + otherUserID + "&user_id=" + devUserID,
+	}
+	for _, target := range targets {
+		if rr := do(t, srv, "GET", target, nil); rr.Code != http.StatusBadRequest {
+			t.Fatalf("GET %s = %d, want 400; body=%s", target, rr.Code, rr.Body)
+		}
+	}
+}
+
+func TestMessagesRequireUserID(t *testing.T) {
+	srv, cleanup := newTestServer(t)
+	defer cleanup()
+	convID := createConv(t, srv)
+
+	if rr := do(t, srv, "GET", "/conversations/"+convID+"/messages", nil); rr.Code != http.StatusBadRequest {
+		t.Fatalf("list without user_id = %d, want 400; body=%s", rr.Code, rr.Body)
+	}
+	if rr := do(t, srv, "POST", "/conversations/"+convID+"/messages", map[string]any{
+		"role": "user", "content": "hi",
+	}); rr.Code != http.StatusBadRequest {
+		t.Fatalf("post without user_id = %d, want 400; body=%s", rr.Code, rr.Body)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -76,9 +77,9 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 
 // GET /conversations?user_id=
 func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request) {
-	userID := r.URL.Query().Get("user_id")
-	if userID == "" {
-		writeErr(w, http.StatusBadRequest, "user_id query parameter is required")
+	userID, err := queryUserID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -119,14 +120,21 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, out)
 }
 
-// GET /conversations/{id}/messages
+// GET /conversations/{id}/messages?user_id=
 func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	convID := r.PathValue("id")
+	userID, err := queryUserID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	ctx, cancel := reqCtx(r)
 	defer cancel()
 
-	exists, err := s.conversationExists(ctx, convID)
+	// A conversation owned by someone else is indistinguishable from one that
+	// does not exist: both 404. A 403 here would confirm the id is real.
+	owned, err := s.conversationOwnedBy(ctx, convID, userID)
 	if err != nil {
 		if isInvalidUUID(err) {
 			writeErr(w, http.StatusBadRequest, "conversation id is not a valid uuid")
@@ -135,7 +143,7 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "could not load conversation")
 		return
 	}
-	if !exists {
+	if !owned {
 		writeErr(w, http.StatusNotFound, "conversation not found")
 		return
 	}
@@ -173,9 +181,14 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// POST /conversations/{id}/messages  {role, content, tool_calls?}
+// POST /conversations/{id}/messages?user_id=  {role, content, tool_calls?}
 func (s *Server) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
 	convID := r.PathValue("id")
+	userID, err := queryUserID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	var in struct {
 		Role      string          `json:"role"`
@@ -207,23 +220,26 @@ func (s *Server) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
 
 	var m Message
 	var tc []byte
-	err := s.db.QueryRow(ctx,
+	// The EXISTS guard makes the insert conditional on ownership in a single
+	// statement: a conversation belonging to another user matches no row, so the
+	// insert writes nothing and Scan reports ErrNoRows => 404, exactly as for an
+	// id that does not exist. It also subsumes the old FK-violation branch.
+	err = s.db.QueryRow(ctx,
 		`INSERT INTO messages (conversation_id, role, content, tool_calls)
-		 VALUES ($1, $2, $3, $4)
+		 SELECT $1::uuid, $2::text, $3::text, $4::jsonb
+		 WHERE EXISTS (SELECT 1 FROM conversations WHERE id = $1 AND user_id = $5)
 		 RETURNING id, conversation_id, role, content, tool_calls, created_at`,
-		convID, in.Role, in.Content, toolCallsArg,
+		convID, in.Role, in.Content, toolCallsArg, userID,
 	).Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &tc, &m.CreatedAt)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeErr(w, http.StatusNotFound, "conversation not found")
+			return
+		}
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) {
-			switch pgErr.Code {
-			case "23503": // FK violation: conversation does not exist
-				writeErr(w, http.StatusNotFound, "conversation not found")
-				return
-			case "22P02": // invalid uuid text
-				writeErr(w, http.StatusBadRequest, "conversation id is not a valid uuid")
-				return
-			}
+		if errors.As(err, &pgErr) && pgErr.Code == "22P02" { // invalid uuid text
+			writeErr(w, http.StatusBadRequest, "conversation id is not a valid uuid")
+			return
 		}
 		writeErr(w, http.StatusInternalServerError, "could not create message")
 		return
@@ -236,15 +252,34 @@ func (s *Server) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
 
 // ---- internals ------------------------------------------------------------
 
-func (s *Server) conversationExists(ctx context.Context, id string) (bool, error) {
-	var exists bool
+// conversationOwnedBy answers the only question the message handlers may ask
+// about a conversation: does it belong to this user? Existence alone is not an
+// authorization answer — checking it was the bug.
+func (s *Server) conversationOwnedBy(ctx context.Context, id, userID string) (bool, error) {
+	var owned bool
 	err := s.db.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM conversations WHERE id = $1)`, id,
-	).Scan(&exists)
+		`SELECT EXISTS (SELECT 1 FROM conversations WHERE id = $1 AND user_id = $2)`, id, userID,
+	).Scan(&owned)
 	if err != nil {
 		return false, err
 	}
-	return exists, nil
+	return owned, nil
+}
+
+// queryUserID returns the one user_id query parameter. A repeated user_id is
+// rejected rather than resolved: url.Values.Get returns the FIRST value, so a
+// caller that appends its trusted user_id after a client-supplied query string
+// would be silently overruled by an attacker's ?user_id=<victim>. conv-svc owns
+// this data and does not trust its caller to have built the query correctly.
+func queryUserID(r *http.Request) (string, error) {
+	v := r.URL.Query()["user_id"]
+	if len(v) == 0 || v[0] == "" {
+		return "", errors.New("user_id query parameter is required")
+	}
+	if len(v) > 1 {
+		return "", errors.New("user_id query parameter must appear exactly once")
+	}
+	return v[0], nil
 }
 
 func decodeBody(r *http.Request, v any) error {

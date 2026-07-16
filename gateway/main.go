@@ -106,9 +106,12 @@ func (s *Server) BuildApp() *fiber.App {
 
 	api.Post("/chat", s.handleChat)
 
-	// Conversations: exact and wildcard so /:id/messages is covered.
-	api.All("/conversations", s.proxyConversations)
-	api.All("/conversations/*", s.proxyConversations)
+	// Conversations: exactly the three routes in the contract. Message *writes*
+	// are agent-svc's job (it posts to conv-svc directly), so there is no
+	// POST /conversations/:id/messages here — a client cannot write a message.
+	api.Get("/conversations", s.proxyConversations)
+	api.Post("/conversations", s.proxyConversations)
+	api.Get("/conversations/:id/messages", s.proxyConversations)
 
 	// Providers: exact and wildcard. The proxy roots every target at
 	// /users/<uid>/credentials so user-svc /internal/* is unreachable.

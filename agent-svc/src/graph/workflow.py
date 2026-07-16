@@ -118,9 +118,15 @@ def generate_node(state: GState) -> dict:
     return stream_with_lifeboat(state["user_id"], state["provider"], messages, system, state["emit"])
 
 
-def _post_message(client, conversation_id, role, content):
+def _post_message(client, conversation_id, user_id, role, content):
+    # user_id rides in the query, not the body: conv-svc's message body is
+    # {role, content, tool_calls?} and rejects anything else. It authorizes the
+    # write against the conversation's owner and 404s if they do not match, so a
+    # conversation_id from the client cannot be used to write into someone
+    # else's history. user_id originates from the gateway's verified JWT.
     return client.post(
         f"{CONV_SVC_URL}/conversations/{conversation_id}/messages",
+        params={"user_id": user_id},
         json={"role": role, "content": content},
     )
 
@@ -131,8 +137,9 @@ def persist_node(state: GState) -> dict:
     mid = None
     try:
         with httpx.Client(timeout=10.0) as client:
-            _post_message(client, state["conversation_id"], "user", state["message"])
-            r = _post_message(client, state["conversation_id"], "assistant", state.get("answer", ""))
+            uid = state["user_id"]
+            _post_message(client, state["conversation_id"], uid, "user", state["message"])
+            r = _post_message(client, state["conversation_id"], uid, "assistant", state.get("answer", ""))
             if r.status_code < 300:
                 data = r.json()
                 mid = data.get("id") or data.get("message_id")
