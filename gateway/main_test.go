@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -149,9 +150,13 @@ func TestConversationsInjectsUserID(t *testing.T) {
 	app := newServerT(t, cfg).BuildApp()
 	token, uid := login(t, app, fmt.Sprintf("conv-%d@raphael.local", time.Now().UnixNano()))
 
-	// POST with a SPOOFED user_id in the body — the gateway must overwrite it.
+	// POST with a SPOOFED user_id in BOTH the body and the query — the gateway
+	// must overwrite each. The query half is the regression guard for the bug
+	// where the gateway appended user_id instead of setting it: url.Values.Get
+	// returns the FIRST value, so a client-supplied one won.
 	body, _ := json.Marshal(map[string]any{"title": "hi", "user_id": "11111111-1111-1111-1111-111111111111"})
-	req := httptest.NewRequest(http.MethodPost, "/api/conversations", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/conversations?user_id=11111111-1111-1111-1111-111111111111", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := app.Test(req, 5000)
@@ -164,8 +169,14 @@ func TestConversationsInjectsUserID(t *testing.T) {
 	if gotPath != "/conversations" {
 		t.Fatalf("upstream path = %q, want /conversations", gotPath)
 	}
-	if !strings.Contains(gotQuery, "user_id="+uid) {
-		t.Fatalf("query = %q, want user_id=%s", gotQuery, uid)
+	// EXACTLY one user_id must reach upstream. len(got) != 1 is the load-bearing
+	// half: a Contains() check passes against the appending (vulnerable) code.
+	q, err := url.ParseQuery(gotQuery)
+	if err != nil {
+		t.Fatalf("upstream query %q is unparseable: %v", gotQuery, err)
+	}
+	if got := q["user_id"]; len(got) != 1 || got[0] != uid {
+		t.Fatalf("upstream user_id = %v, want exactly [%s]", got, uid)
 	}
 	var forwarded map[string]any
 	json.Unmarshal([]byte(gotBody), &forwarded)

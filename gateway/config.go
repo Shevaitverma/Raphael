@@ -35,7 +35,11 @@ func LoadConfig() Config {
 		DatabaseURL:     getenv("DATABASE_URL", "postgresql://raphael:raphael@localhost:5433/raphael"),
 		RedisURL:        getenv("REDIS_URL", "redis://localhost:6379/0"),
 		JWTSecret:       getenv("JWT_SECRET", "dev-only-change-me"),
-		DevAuthEnabled:  getenv("DEV_AUTH_ENABLED", "true") == "true",
+		// Defaults CLOSED. dev-login mints a 24h JWT for any email with no
+		// password, so an unset var must never mean "enabled" — a deploy that
+		// forgets it would be an account-takeover bypass. Both dev paths set it
+		// explicitly (docker-compose.yml, scripts/dev.sh).
+		DevAuthEnabled:  getenv("DEV_AUTH_ENABLED", "false") == "true",
 		UserSvcURL:      getenv("USER_SVC_URL", "http://localhost:8081"),
 		ConvSvcURL:      getenv("CONV_SVC_URL", "http://localhost:8082"),
 		AgentSvcURL:     getenv("AGENT_SVC_URL", "http://localhost:8000"),
