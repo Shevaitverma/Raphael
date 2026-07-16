@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { streamChat, type Degraded, type Done } from "../lib/gateway.ts";
+import {
+  streamChat,
+  type ChatHandlers,
+  type Degraded,
+  type Done,
+} from "../lib/gateway.ts";
 
 // Build a Response whose body streams the given string in the given chunk sizes,
 // so we exercise the parser's handling of events split across network reads.
@@ -27,20 +32,28 @@ type Collected = {
   errors: string[];
 };
 
+function collect(): Collected {
+  return { tokens: [], degraded: [], done: [], errors: [] };
+}
+
+function handlers(c: Collected): ChatHandlers {
+  return {
+    onToken: (t) => c.tokens.push(t),
+    onDegraded: (d) => c.degraded.push(d),
+    onDone: (d) => c.done.push(d),
+    onError: (m) => c.errors.push(m),
+  };
+}
+
 async function run(payload: string, chunkSize: number): Promise<Collected> {
-  const c: Collected = { tokens: [], degraded: [], done: [], errors: [] };
+  const c = collect();
   const orig = globalThis.fetch;
   globalThis.fetch = async () => sseResponse(payload, chunkSize);
   try {
     await streamChat(
       "fake-token",
       { conversation_id: "c1", message: "hi" },
-      {
-        onToken: (t) => c.tokens.push(t),
-        onDegraded: (d) => c.degraded.push(d),
-        onDone: (d) => c.done.push(d),
-        onError: (m) => c.errors.push(m),
-      },
+      handlers(c),
     );
   } finally {
     globalThis.fetch = orig;
@@ -106,25 +119,115 @@ test("flushes a trailing event with no terminating blank line", async () => {
 });
 
 test("reports an error when the gateway is unreachable", async () => {
-  const c: Collected = { tokens: [], degraded: [], done: [], errors: [] };
+  const c = collect();
   const orig = globalThis.fetch;
   globalThis.fetch = async () => {
     throw new TypeError("fetch failed");
   };
   try {
-    await streamChat(
-      "t",
-      { conversation_id: "c1", message: "hi" },
-      {
-        onToken: (t) => c.tokens.push(t),
-        onDegraded: (d) => c.degraded.push(d),
-        onDone: (d) => c.done.push(d),
-        onError: (m) => c.errors.push(m),
-      },
-    );
+    await streamChat("t", { conversation_id: "c1", message: "hi" }, handlers(c));
   } finally {
     globalThis.fetch = orig;
   }
   assert.equal(c.errors.length, 1);
   assert.match(c.errors[0], /gateway/i);
+});
+
+// --- the no-credential 409 ---------------------------------------------------
+
+test("a 409 names the fix instead of dumping the upstream body", async () => {
+  const c = collect();
+  const orig = globalThis.fetch;
+  // agent-svc's FastAPI body, copied through verbatim by the gateway proxy.
+  globalThis.fetch = async () =>
+    new Response('{"detail":"no active credential; add a provider key"}', {
+      status: 409,
+    });
+  try {
+    await streamChat("t", { conversation_id: "c1", message: "hi" }, handlers(c));
+  } finally {
+    globalThis.fetch = orig;
+  }
+  assert.equal(c.errors.length, 1);
+  assert.match(c.errors[0], /Settings/);
+  // No raw JSON, no status code soup.
+  assert.doesNotMatch(c.errors[0], /[{}]|detail|409/);
+});
+
+test("a non-409 chat failure still reports, without the raw body", async () => {
+  const c = collect();
+  const orig = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response("upstream exploded <html>", { status: 500 });
+  try {
+    await streamChat("t", { conversation_id: "c1", message: "hi" }, handlers(c));
+  } finally {
+    globalThis.fetch = orig;
+  }
+  assert.equal(c.errors.length, 1);
+  assert.match(c.errors[0], /chat failed: 500/);
+  assert.doesNotMatch(c.errors[0], /html/);
+});
+
+// --- abort: the Stop button and switching conversations mid-stream -----------
+
+test("aborting a hung stream resolves and reports no error", async () => {
+  const c = collect();
+  const ctrl = new AbortController();
+  const orig = globalThis.fetch;
+  // One token, then a stall that never ends — a wedged upstream behind a
+  // gateway that sets no stream timeout.
+  globalThis.fetch = async (_url, init) => {
+    const signal = (init as RequestInit).signal!;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode('event: token\ndata: {"text":"Hi"}\n\n'),
+        );
+        signal.addEventListener("abort", () =>
+          controller.error(new DOMException("aborted", "AbortError")),
+        );
+      },
+    });
+    return new Response(body, { status: 200 });
+  };
+  try {
+    const p = streamChat(
+      "t",
+      { conversation_id: "c1", message: "hi" },
+      handlers(c),
+      ctrl.signal,
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    ctrl.abort();
+    // Must resolve: this is what re-enables Send after Stop.
+    await p;
+  } finally {
+    globalThis.fetch = orig;
+  }
+  assert.equal(c.tokens.join(""), "Hi");
+  assert.deepEqual(c.errors, []);
+});
+
+test("aborting before the first byte reports no error", async () => {
+  const c = collect();
+  const ctrl = new AbortController();
+  const orig = globalThis.fetch;
+  // Stop pressed while the request is still opening: fetch rejects, and that is
+  // the user's own doing — not a network failure worth a red banner.
+  globalThis.fetch = async () => {
+    throw new DOMException("The operation was aborted.", "AbortError");
+  };
+  try {
+    ctrl.abort();
+    await streamChat(
+      "t",
+      { conversation_id: "c1", message: "hi" },
+      handlers(c),
+      ctrl.signal,
+    );
+  } finally {
+    globalThis.fetch = orig;
+  }
+  assert.deepEqual(c.errors, []);
 });

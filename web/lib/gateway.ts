@@ -44,6 +44,28 @@ export type Done = {
   message_id?: string;
 };
 
+// --- errors ------------------------------------------------------------------
+
+// A failed API call, carrying the HTTP status so callers can tell an expired
+// session apart from a service that is merely down.
+export class ApiError extends Error {
+  // A plain field, not a constructor parameter property: node's strip-only
+  // type stripping (how `npm test` runs) rejects those.
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+// A 401 on /api/* means the JWT expired (it is minted with a 24h TTL) — the
+// session is over and nothing but a fresh login will fix it.
+export function isAuthError(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 401;
+}
+
 // --- REST calls --------------------------------------------------------------
 
 export async function devLogin(email: string): Promise<DevLoginResponse> {
@@ -63,7 +85,7 @@ export async function listConversations(token: string): Promise<Conversation[]> 
     headers: authHeader(token),
   });
   if (!res.ok) {
-    throw new Error(`list conversations failed: ${res.status}`);
+    throw new ApiError(`list conversations failed: ${res.status}`, res.status);
   }
   const data = await res.json();
   // Gateway may return a bare array or {conversations:[...]}.
@@ -80,7 +102,7 @@ export async function createConversation(
     body: JSON.stringify({ title: title ?? "New conversation" }),
   });
   if (!res.ok) {
-    throw new Error(`create conversation failed: ${res.status}`);
+    throw new ApiError(`create conversation failed: ${res.status}`, res.status);
   }
   return res.json();
 }
@@ -94,7 +116,7 @@ export async function listMessages(
     { headers: authHeader(token) },
   );
   if (!res.ok) {
-    throw new Error(`list messages failed: ${res.status}`);
+    throw new ApiError(`list messages failed: ${res.status}`, res.status);
   }
   const data = await res.json();
   return Array.isArray(data) ? data : (data.messages ?? []);
@@ -124,7 +146,7 @@ export type NewCredential = {
 
 export async function listProviders(token: string): Promise<Credential[]> {
   const res = await fetch(`${GATEWAY_URL}/api/providers`, { headers: authHeader(token) });
-  if (!res.ok) throw new Error(`list providers failed: ${res.status}`);
+  if (!res.ok) throw new ApiError(`list providers failed: ${res.status}`, res.status);
   const data = await res.json();
   return Array.isArray(data) ? data : (data.credentials ?? []);
 }
@@ -135,7 +157,7 @@ export async function addProvider(token: string, cred: NewCredential): Promise<C
     headers: { "Content-Type": "application/json", ...authHeader(token) },
     body: JSON.stringify(cred),
   });
-  if (!res.ok) throw new Error(await errText(res, "add provider"));
+  if (!res.ok) throw new ApiError(await errText(res, "add provider"), res.status);
   return res.json();
 }
 
@@ -144,7 +166,7 @@ export async function activateProvider(token: string, id: string): Promise<Crede
     method: "POST",
     headers: authHeader(token),
   });
-  if (!res.ok) throw new Error(await errText(res, "activate"));
+  if (!res.ok) throw new ApiError(await errText(res, "activate"), res.status);
   return res.json();
 }
 
@@ -153,7 +175,7 @@ export async function setLifeboat(token: string, id: string): Promise<Credential
     method: "POST",
     headers: authHeader(token),
   });
-  if (!res.ok) throw new Error(await errText(res, "set lifeboat"));
+  if (!res.ok) throw new ApiError(await errText(res, "set lifeboat"), res.status);
   return res.json();
 }
 
@@ -162,7 +184,21 @@ export async function clearLifeboat(token: string, id: string): Promise<Credenti
     method: "DELETE",
     headers: authHeader(token),
   });
-  if (!res.ok) throw new Error(await errText(res, "clear lifeboat"));
+  if (!res.ok) throw new ApiError(await errText(res, "clear lifeboat"), res.status);
+  return res.json();
+}
+
+// --- capabilities ------------------------------------------------------------
+
+export type Capabilities = {
+  provider: string;
+  model: string;
+  web_search: boolean;
+};
+
+export async function getCapabilities(token: string): Promise<Capabilities> {
+  const res = await fetch(`${GATEWAY_URL}/api/capabilities`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`capabilities failed: ${res.status}`, res.status);
   return res.json();
 }
 
@@ -176,6 +212,16 @@ async function errText(res: Response, action: string): Promise<string> {
     /* fall through */
   }
   return `${action} failed: ${res.status}`;
+}
+
+// A chat request that never became a stream. agent-svc answers 409 when the user
+// has no active credential and the gateway copies status and body straight
+// through, so name the one fix that exists rather than echoing an upstream body.
+async function chatErrorMessage(res: Response): Promise<string> {
+  if (res.status === 409) {
+    return "No model provider is active. Add one in Settings, then send this message again.";
+  }
+  return errText(res, "chat");
 }
 
 // --- SSE chat ----------------------------------------------------------------
@@ -192,7 +238,7 @@ export type ChatHandlers = {
 // hand: events are separated by a blank line, fields are "event:" and "data:".
 export async function streamChat(
   token: string,
-  body: { conversation_id: string; message: string },
+  body: { conversation_id: string; message: string; search?: boolean },
   handlers: ChatHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -209,12 +255,15 @@ export async function streamChat(
       signal,
     });
   } catch (e) {
+    // Aborting before the first byte (Stop on a stream that never opened) is
+    // the user's own doing, not a network failure.
+    if ((e as Error)?.name === "AbortError") return;
     handlers.onError(networkMessage(e));
     return;
   }
 
   if (!res.ok || !res.body) {
-    handlers.onError(`chat request failed: ${res.status} ${await safeText(res)}`);
+    handlers.onError(await chatErrorMessage(res));
     return;
   }
 

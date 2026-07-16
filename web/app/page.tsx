@@ -7,6 +7,8 @@ import {
   clearLifeboat,
   createConversation,
   devLogin,
+  getCapabilities,
+  isAuthError,
   listConversations,
   listMessages,
   listProviders,
@@ -21,9 +23,14 @@ import {
 } from "@/lib/gateway";
 
 const DEV_EMAIL = "dev@raphael.local";
+const SEARCH_KEY = "raphael.search";
 
 // UI message carries extra render state that never touches the database.
 type UiMessage = Message & {
+  // Client-side identity, assigned before the row has a database id. Streaming
+  // patches address the message by this, never by its index: any reload can
+  // replace the array and leave an index pointing at a different message.
+  localId?: string;
   degraded?: Degraded;
   error?: string;
   streaming?: boolean;
@@ -42,10 +49,23 @@ export default function Page() {
 
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [view, setView] = useState<"chat" | "settings">("chat");
 
+  // The toggle is the only gate on search, so it must survive a reload — but a
+  // sticky true means nothing if this deployment has no search key, hence both
+  // flags. searchOn, never `search` alone, is what reaches the wire.
+  const [search, setSearch] = useState(false);
+  const [searchAvailable, setSearchAvailable] = useState(false);
+  const searchOn = search && searchAvailable;
+
   const threadRef = useRef<HTMLDivElement>(null);
+  // The in-flight chat stream, so switching conversations, signing out, or
+  // pressing Stop can cut it loose. The gateway never times a stream out.
+  const abortRef = useRef<AbortController | null>(null);
+  // A conversation we just created: the load effect must skip it exactly once.
+  const skipLoadRef = useRef<string | null>(null);
 
   // --- auth ------------------------------------------------------------------
 
@@ -63,12 +83,57 @@ export default function Page() {
     }
   }
 
-  function handleLogout() {
+  const handleLogout = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
     setToken(null);
     setUser(null);
     setConversations([]);
     setActiveId(null);
     setMessages([]);
+    setSending(false);
+    setError(null);
+  }, []);
+
+  // Every /api call funnels its failure here: an expired token ends the session,
+  // anything else gets shown. Nothing is allowed to die in the console — a dead
+  // backend used to be indistinguishable from an empty account.
+  const failed = useCallback(
+    (e: unknown) => {
+      if (isAuthError(e)) {
+        handleLogout();
+        setAuthError("Your session expired. Sign in again.");
+        return;
+      }
+      setError(e instanceof Error ? e.message : String(e));
+    },
+    [handleLogout],
+  );
+
+  // --- search toggle ---------------------------------------------------------
+
+  // localStorage does not exist during the server render, so read it in an
+  // effect rather than a useState initializer.
+  useEffect(() => {
+    setSearch(localStorage.getItem(SEARCH_KEY) === "1");
+  }, []);
+
+  // A checkbox that silently does nothing is the invisible failure this whole
+  // feature must not have. No key -> no toggle, with the reason said out loud.
+  useEffect(() => {
+    if (!token) return;
+    let live = true;
+    getCapabilities(token)
+      .then((c) => live && setSearchAvailable(c.web_search))
+      .catch(() => live && setSearchAvailable(false));
+    return () => {
+      live = false;
+    };
+  }, [token]);
+
+  function toggleSearch(on: boolean) {
+    setSearch(on);
+    localStorage.setItem(SEARCH_KEY, on ? "1" : "0");
   }
 
   // --- conversations ---------------------------------------------------------
@@ -78,13 +143,14 @@ export default function Page() {
     try {
       const convs = await listConversations(token);
       setConversations(convs);
+      setError(null);
       if (convs.length > 0 && activeId === null) {
         setActiveId(convs[0].id);
       }
     } catch (e) {
-      console.error(e);
+      failed(e);
     }
-  }, [token, activeId]);
+  }, [token, activeId, failed]);
 
   useEffect(() => {
     if (token) void refreshConversations();
@@ -96,16 +162,31 @@ export default function Page() {
       try {
         const msgs = await listMessages(token, conversationId);
         setMessages(msgs);
+        setError(null);
       } catch (e) {
-        console.error(e);
+        // Clear rather than leave the previous conversation's messages under
+        // this one's header. The banner below says why the thread is empty —
+        // silently blanking it is what made a dead backend look like no data.
         setMessages([]);
+        failed(e);
       }
     },
-    [token],
+    [token, failed],
   );
 
   useEffect(() => {
-    if (token && activeId) void loadMessages(activeId);
+    if (!token || !activeId) return;
+    // A conversation we just created holds only the optimistic messages already
+    // on screen. Loading it would replace them mid-stream and drop the reply.
+    if (skipLoadRef.current === activeId) {
+      skipLoadRef.current = null;
+      return;
+    }
+    void loadMessages(activeId);
+    // Cleanup only registers once a conversation is actually being viewed, so
+    // the null -> new-conversation transition in handleSend cannot abort the
+    // stream it is about to start. Switching away from a live one does.
+    return () => abortRef.current?.abort();
   }, [token, activeId, loadMessages]);
 
   async function handleNewConversation() {
@@ -113,10 +194,12 @@ export default function Page() {
     try {
       const conv = await createConversation(token);
       setConversations((prev) => [conv, ...prev]);
+      skipLoadRef.current = conv.id;
       setActiveId(conv.id);
       setMessages([]);
+      setError(null);
     } catch (e) {
-      console.error(e);
+      failed(e);
     }
   }
 
@@ -137,54 +220,66 @@ export default function Page() {
       try {
         const conv = await createConversation(token);
         setConversations((prev) => [conv, ...prev]);
+        // Claim the load skip before activeId changes, or the effect fires and
+        // replaces the optimistic messages below with the server's empty list.
+        skipLoadRef.current = conv.id;
         setActiveId(conv.id);
         conversationId = conv.id;
       } catch (e) {
-        console.error(e);
+        failed(e);
         return;
       }
     }
 
     setDraft("");
+    setError(null);
     setSending(true);
 
-    // Optimistic user message + a placeholder assistant message we stream into.
-    const assistantIndex = messages.length + 1;
+    // Optimistic user message + a placeholder assistant message we stream into,
+    // addressed by a stable id: a patch aimed at an index would land on whatever
+    // message happened to occupy that slot.
+    const localId = crypto.randomUUID();
     setMessages((prev) => [
       ...prev,
       { role: "user", content: text },
-      { role: "assistant", content: "", streaming: true },
+      { localId, role: "assistant", content: "", streaming: true },
     ]);
 
     const patchAssistant = (patch: Partial<UiMessage>) => {
-      setMessages((prev) => {
-        const next = [...prev];
-        const cur = next[assistantIndex];
-        if (cur) next[assistantIndex] = { ...cur, ...patch };
-        return next;
-      });
+      setMessages((prev) =>
+        prev.map((m) => (m.localId === localId ? { ...m, ...patch } : m)),
+      );
     };
 
     const appendToken = (t: string) => {
-      setMessages((prev) => {
-        const next = [...prev];
-        const cur = next[assistantIndex];
-        if (cur) next[assistantIndex] = { ...cur, content: cur.content + t };
-        return next;
-      });
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.localId === localId ? { ...m, content: m.content + t } : m,
+        ),
+      );
     };
+
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
 
     await streamChat(
       token,
-      { conversation_id: conversationId, message: text },
+      { conversation_id: conversationId, message: text, search: searchOn },
       {
         onToken: (t) => appendToken(t),
         onDegraded: (d) => patchAssistant({ degraded: d }),
-        onDone: () => patchAssistant({ streaming: false }),
+        // Keep the row's database id so it stops being identified by position.
+        onDone: (d) => patchAssistant({ streaming: false, id: d.message_id }),
         onError: (message) => patchAssistant({ streaming: false, error: message }),
       },
+      ctrl.signal,
     );
 
+    // An abort leaves the placeholder mid-stream. If the user has since moved to
+    // another conversation, localId matches nothing and this is a no-op.
+    if (ctrl.signal.aborted) patchAssistant({ streaming: false });
+
+    if (abortRef.current === ctrl) abortRef.current = null;
     setSending(false);
     // Pull the canonical conversation title / list back from the server.
     void refreshConversations();
@@ -243,7 +338,7 @@ export default function Page() {
             + New conversation
           </button>
           <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-            {conversations.length === 0 && (
+            {conversations.length === 0 && !error && (
               <p className="px-2 py-3 text-sm text-faint">
                 No conversations yet.
               </p>
@@ -267,15 +362,27 @@ export default function Page() {
 
         {/* Thread + composer */}
         <main className="flex min-w-0 flex-1 flex-col">
-          <div ref={threadRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
+          {error && (
+            <div
+              role="alert"
+              className="border-b border-error/40 bg-error/10 px-4 py-2 text-sm text-error"
+            >
+              {error}
+            </div>
+          )}
+          <div
+            ref={threadRef}
+            aria-live="polite"
+            className="min-h-0 flex-1 overflow-y-auto px-4 py-6"
+          >
             <div className="mx-auto flex max-w-3xl flex-col space-y-6">
-              {messages.length === 0 && (
+              {messages.length === 0 && !error && (
                 <p className="py-16 text-center text-sm text-faint">
                   Send a message to start.
                 </p>
               )}
               {messages.map((m, i) => (
-                <MessageRow key={m.id ?? i} message={m} />
+                <MessageRow key={m.id ?? m.localId ?? i} message={m} />
               ))}
             </div>
           </div>
@@ -295,13 +402,46 @@ export default function Page() {
                 placeholder="Message Raphael…"
                 className="max-h-40 min-h-[44px] flex-1 resize-none bg-transparent px-3 py-2 text-sm text-on-surface placeholder:text-faint outline-none"
               />
-              <button
-                onClick={() => void handleSend()}
-                disabled={sending || draft.trim().length === 0}
-                className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
+              {/* A stream can hang with no reply and no timeout; Stop is the
+                  only way out that does not cost the in-memory session. */}
+              {sending ? (
+                <button
+                  onClick={() => abortRef.current?.abort()}
+                  className="rounded-md border border-edge px-4 py-2 text-sm font-medium text-muted transition-colors hover:bg-raised hover:text-on-surface"
+                >
+                  Stop
+                </button>
+              ) : (
+                <button
+                  onClick={() => void handleSend()}
+                  disabled={draft.trim().length === 0}
+                  className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
+                >
+                  Send
+                </button>
+              )}
+            </div>
+
+            <div className="mx-auto mt-2 flex max-w-3xl items-center gap-2 text-xs">
+              <input
+                id="web-search"
+                type="checkbox"
+                checked={searchOn}
+                disabled={!searchAvailable}
+                onChange={(e) => toggleSearch(e.target.checked)}
+                className="accent-accent disabled:opacity-40"
+              />
+              <label
+                htmlFor="web-search"
+                className={searchAvailable ? "text-muted" : "text-faint"}
               >
-                {sending ? "…" : "Send"}
-              </button>
+                Search the web (sends your question to a search provider)
+              </label>
+              {!searchAvailable && (
+                <span className="text-faint">
+                  — search is not available on this deployment
+                </span>
+              )}
             </div>
           </div>
         </main>
@@ -400,13 +540,19 @@ function SettingsView({ token }: { token: string }) {
         </div>
 
         {error && (
-          <div className="border-l-2 border-error bg-error/10 px-3 py-2 text-sm text-error">
+          <div
+            role="alert"
+            className="border-l-2 border-error bg-error/10 px-3 py-2 text-sm text-error"
+          >
             {error}
           </div>
         )}
 
         {!lifeboat && creds && creds.length > 0 && (
-          <div className="border-l-2 border-warning bg-warning/10 px-3 py-2 text-sm text-warning">
+          <div
+            role="status"
+            className="border-l-2 border-warning bg-warning/10 px-3 py-2 text-sm text-warning"
+          >
             No fallback set. If your active credential is rejected, the assistant will stop instead of
             degrading. Designate a fallback below — a local or OpenRouter provider.
           </div>
@@ -673,7 +819,10 @@ function MessageRow({ message }: { message: UiMessage }) {
 
         {/* Degraded banner — the lifeboat fired. Product requirement. */}
         {message.degraded && (
-          <div className="mt-2 border-l-2 border-warning bg-warning/10 px-3 py-2 text-xs text-warning">
+          <div
+            role="status"
+            className="mt-2 border-l-2 border-warning bg-warning/10 px-3 py-2 text-xs text-warning"
+          >
             Answered by local{" "}
             <span className="font-semibold">
               {message.degraded.model || message.degraded.provider}
@@ -685,7 +834,10 @@ function MessageRow({ message }: { message: UiMessage }) {
 
         {/* Error state. */}
         {message.error && (
-          <div className="mt-2 border-l-2 border-error bg-error/10 px-3 py-2 text-xs text-error">
+          <div
+            role="alert"
+            className="mt-2 border-l-2 border-error bg-error/10 px-3 py-2 text-xs text-error"
+          >
             {message.error}
           </div>
         )}
