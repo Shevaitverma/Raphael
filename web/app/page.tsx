@@ -198,9 +198,9 @@ export default function Page() {
 
   return (
     <div className="flex h-screen flex-col bg-surface font-sans text-on-surface">
-      <header className="z-10 flex items-center justify-between border-b border-white/10 bg-surface/80 px-4 py-3 backdrop-blur">
+      <header className="z-10 flex items-center justify-between border-b border-edge bg-panel px-4 py-3">
         <div className="flex items-center gap-5">
-          <h1 className="font-display text-lg font-semibold tracking-widest text-primary">
+          <h1 className="text-lg font-semibold tracking-tight text-accent">
             Raphael
           </h1>
           <nav className="flex items-center gap-1 text-sm">
@@ -208,10 +208,10 @@ export default function Page() {
               <button
                 key={v}
                 onClick={() => setView(v)}
-                className={`rounded-full px-3.5 py-1 capitalize transition-colors ${
+                className={`rounded-md px-3.5 py-1 capitalize transition-colors ${
                   view === v
-                    ? "bg-secondary-container/20 font-medium text-secondary"
-                    : "text-on-surface-variant hover:bg-white/5 hover:text-on-surface"
+                    ? "bg-raised font-medium text-on-surface"
+                    : "text-muted hover:text-on-surface"
                 }`}
               >
                 {v}
@@ -219,11 +219,11 @@ export default function Page() {
             ))}
           </nav>
         </div>
-        <div className="flex items-center gap-3 text-sm text-on-surface-variant">
+        <div className="flex items-center gap-3 text-sm text-muted">
           <span>{user?.email ?? user?.id}</span>
           <button
             onClick={handleLogout}
-            className="rounded-md border border-outline-variant px-2.5 py-1 text-xs text-on-surface-variant transition-colors hover:bg-white/5 hover:text-on-surface"
+            className="rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface"
           >
             Sign out
           </button>
@@ -235,16 +235,16 @@ export default function Page() {
       ) : (
       <div className="flex min-h-0 flex-1">
         {/* Conversation list */}
-        <aside className="flex w-64 flex-col border-r border-white/5 bg-surface-container-lowest/60">
+        <aside className="flex w-64 flex-col border-r border-edge bg-panel">
           <button
             onClick={handleNewConversation}
-            className="celestial-gradient m-3 rounded-lg px-3 py-2 text-sm font-medium text-on-primary transition-shadow hover:shadow-[0_0_15px_rgba(173,198,255,0.35)]"
+            className="m-3 rounded-md bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent transition-colors hover:bg-accent/25"
           >
             + New conversation
           </button>
           <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
             {conversations.length === 0 && (
-              <p className="px-2 py-3 text-sm text-on-surface-variant/70">
+              <p className="px-2 py-3 text-sm text-faint">
                 No conversations yet.
               </p>
             )}
@@ -252,10 +252,10 @@ export default function Page() {
               <button
                 key={c.id}
                 onClick={() => setActiveId(c.id)}
-                className={`mb-1 block w-full truncate rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+                className={`mb-1 block w-full truncate rounded-md px-3 py-2 text-left text-sm transition-colors ${
                   c.id === activeId
-                    ? "bg-secondary-container/20 text-secondary"
-                    : "text-on-surface-variant hover:bg-white/5 hover:text-on-surface"
+                    ? "bg-raised text-on-surface"
+                    : "text-muted hover:bg-raised/60 hover:text-on-surface"
                 }`}
                 title={c.title ?? c.id}
               >
@@ -268,20 +268,20 @@ export default function Page() {
         {/* Thread + composer */}
         <main className="flex min-w-0 flex-1 flex-col">
           <div ref={threadRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
-            <div className="mx-auto flex max-w-3xl flex-col gap-4">
+            <div className="mx-auto flex max-w-3xl flex-col space-y-6">
               {messages.length === 0 && (
-                <p className="py-16 text-center text-sm text-on-surface-variant/70">
+                <p className="py-16 text-center text-sm text-faint">
                   Send a message to start.
                 </p>
               )}
               {messages.map((m, i) => (
-                <MessageBubble key={m.id ?? i} message={m} />
+                <MessageRow key={m.id ?? i} message={m} />
               ))}
             </div>
           </div>
 
-          <div className="border-t border-white/5 px-4 py-3">
-            <div className="glass-panel mx-auto flex max-w-3xl items-end gap-2 rounded-xl p-2">
+          <div className="border-t border-edge px-4 py-3">
+            <div className="mx-auto flex max-w-3xl items-end gap-2 rounded-xl border border-edge bg-raised p-2 transition-colors focus-within:border-accent">
               <textarea
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
@@ -293,12 +293,12 @@ export default function Page() {
                 }}
                 rows={1}
                 placeholder="Message Raphael…"
-                className="max-h-40 min-h-[44px] flex-1 resize-none rounded-lg border border-transparent bg-transparent px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/60 outline-none transition-[border-color,box-shadow] focus:border-primary focus:shadow-[0_0_15px_rgba(173,198,255,0.15)]"
+                className="max-h-40 min-h-[44px] flex-1 resize-none bg-transparent px-3 py-2 text-sm text-on-surface placeholder:text-faint outline-none"
               />
               <button
                 onClick={() => void handleSend()}
                 disabled={sending || draft.trim().length === 0}
-                className="celestial-gradient rounded-lg px-4 py-2 text-sm font-medium text-on-primary transition-shadow hover:shadow-[0_0_15px_rgba(173,198,255,0.35)] disabled:opacity-40"
+                className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
               >
                 {sending ? "…" : "Send"}
               </button>
@@ -321,29 +321,18 @@ function LoginScreen({
   error: string | null;
 }) {
   return (
-    <div className="relative flex h-screen flex-col items-center justify-center overflow-hidden bg-surface px-4 font-sans text-on-surface">
-      {/* Soft radial primary glow behind the card — pure decoration. */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute left-1/2 top-1/2 h-[36rem] w-[36rem] -translate-x-1/2 -translate-y-1/2"
-        style={{
-          background:
-            "radial-gradient(circle, rgba(173,198,255,0.12) 0%, rgba(208,188,255,0.06) 40%, transparent 70%)",
-        }}
-      />
-      <div className="glass-panel luminous-border relative flex w-full max-w-sm flex-col items-center gap-4 rounded-xl px-8 py-10 text-center">
-        {/* Logo mark */}
-        <div className="celestial-gradient h-10 w-10 rounded-xl shadow-[0_0_20px_rgba(173,198,255,0.4)]" />
-        <h1 className="font-display text-3xl font-semibold tracking-wide text-primary">
+    <div className="flex h-screen flex-col items-center justify-center bg-surface px-4 font-sans text-on-surface">
+      <div className="flex w-full max-w-sm flex-col items-center gap-4 rounded-xl border border-edge bg-panel px-8 py-10 text-center">
+        <h1 className="font-display text-3xl font-semibold tracking-wide text-accent">
           Raphael
         </h1>
-        <p className="text-[11px] uppercase tracking-[0.2em] text-on-surface-variant">
+        <p className="text-[11px] uppercase tracking-widest text-faint">
           Dev mode — sign in as {DEV_EMAIL}
         </p>
         <button
           onClick={onLogin}
           disabled={loading}
-          className="mt-2 w-full rounded-lg bg-primary-container px-5 py-2.5 text-sm font-medium text-on-primary-container transition-shadow hover:shadow-[0_0_20px_rgba(77,142,255,0.4)] disabled:opacity-40"
+          className="mt-2 w-full rounded-md bg-accent px-5 py-2.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
         >
           {loading ? "Signing in…" : "Dev login"}
         </button>
@@ -399,10 +388,10 @@ function SettingsView({ token }: { token: string }) {
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
       <div className="mx-auto flex max-w-2xl flex-col gap-6">
         <div>
-          <h2 className="font-display text-2xl font-semibold tracking-wide text-on-surface">
+          <h2 className="text-2xl font-semibold text-on-surface">
             Model providers
           </h2>
-          <p className="mt-2 text-sm text-on-surface-variant">
+          <p className="mt-2 text-sm text-muted">
             The <span className="font-medium text-on-surface">active</span> provider answers your messages. The{" "}
             <span className="font-medium text-on-surface">fallback</span> takes over only if the active provider&apos;s
             credential is rejected — an expired key or an unpaid bill — and the reply is marked as
@@ -411,43 +400,43 @@ function SettingsView({ token }: { token: string }) {
         </div>
 
         {error && (
-          <div className="glass-panel rounded-lg border border-error/40 bg-error/10 px-3 py-2 text-sm text-error">
+          <div className="border-l-2 border-error bg-error/10 px-3 py-2 text-sm text-error">
             {error}
           </div>
         )}
 
         {!lifeboat && creds && creds.length > 0 && (
-          <div className="glass-panel rounded-lg border border-tertiary/40 bg-tertiary/10 px-3 py-2 text-sm text-tertiary">
+          <div className="border-l-2 border-warning bg-warning/10 px-3 py-2 text-sm text-warning">
             No fallback set. If your active credential is rejected, the assistant will stop instead of
             degrading. Designate a fallback below — a local or OpenRouter provider.
           </div>
         )}
 
         <div className="flex flex-col gap-2">
-          {creds === null && <p className="text-sm text-on-surface-variant/70">Loading…</p>}
+          {creds === null && <p className="text-sm text-faint">Loading…</p>}
           {creds?.length === 0 && (
-            <p className="text-sm text-on-surface-variant/70">No providers yet. Add one below.</p>
+            <p className="text-sm text-faint">No providers yet. Add one below.</p>
           )}
           {creds?.map((c) => (
             <div
               key={c.id}
-              className="glass-panel flex items-center justify-between rounded-xl px-4 py-3"
+              className="flex items-center justify-between rounded-xl border border-edge bg-panel px-4 py-3"
             >
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-on-surface">{PROVIDER_LABEL[c.provider]}</span>
                   {c.is_active && (
-                    <span className="rounded-full border border-primary/20 bg-primary/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest text-primary">
+                    <span className="rounded-md bg-accent/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest text-accent">
                       Active
                     </span>
                   )}
                   {c.is_lifeboat && (
-                    <span className="rounded-full border border-secondary/20 bg-secondary/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest text-secondary">
+                    <span className="rounded-md bg-raised px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest text-muted">
                       Fallback
                     </span>
                   )}
                 </div>
-                <div className="truncate text-xs text-on-surface-variant">
+                <div className="truncate text-xs text-muted">
                   {c.model_id} · {c.auth_type}
                   {c.base_url ? ` · ${c.base_url}` : ""}
                 </div>
@@ -458,7 +447,7 @@ function SettingsView({ token }: { token: string }) {
                   <button
                     disabled={busy === c.id}
                     onClick={() => void run(c.id, () => activateProvider(token, c.id))}
-                    className="rounded-md border border-outline-variant px-2.5 py-1 text-xs text-on-surface-variant transition-colors hover:bg-white/5 hover:text-on-surface disabled:opacity-40"
+                    className="rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40"
                   >
                     Use this
                   </button>
@@ -467,7 +456,7 @@ function SettingsView({ token }: { token: string }) {
                   <button
                     disabled={busy === c.id}
                     onClick={() => void run(c.id, () => clearLifeboat(token, c.id))}
-                    className="rounded-md border border-outline-variant px-2.5 py-1 text-xs text-on-surface-variant transition-colors hover:bg-white/5 hover:text-on-surface disabled:opacity-40"
+                    className="rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40"
                   >
                     Clear fallback
                   </button>
@@ -477,7 +466,7 @@ function SettingsView({ token }: { token: string }) {
                     <button
                       disabled={busy === c.id}
                       onClick={() => void run(c.id, () => setLifeboat(token, c.id))}
-                      className="rounded-md border border-secondary/40 px-2.5 py-1 text-xs text-secondary transition-colors hover:bg-secondary/10 disabled:opacity-40"
+                      className="rounded-md bg-accent/15 px-2.5 py-1 text-xs text-accent transition-colors hover:bg-accent/25 disabled:opacity-40"
                     >
                       Set as fallback
                     </button>
@@ -545,13 +534,13 @@ function AddProviderForm({
   }
 
   return (
-    <div className="glass-panel rounded-xl p-4">
-      <h3 className="mb-4 font-display text-base font-semibold tracking-wide text-on-surface">
+    <div className="rounded-xl border border-edge bg-panel p-4">
+      <h3 className="mb-4 text-base font-semibold text-on-surface">
         Add a provider
       </h3>
       <div className="grid grid-cols-2 gap-3 text-sm">
         <label className="flex flex-col gap-1.5">
-          <span className="text-[10px] uppercase tracking-widest text-on-surface-variant">Provider</span>
+          <span className="text-[11px] uppercase tracking-widest text-faint">Provider</span>
           <select
             value={provider}
             onChange={(e) => {
@@ -559,7 +548,7 @@ function AddProviderForm({
               setProvider(p);
               if (p !== "anthropic" && authType === "oauth") setAuthType("api_key");
             }}
-            className="rounded-lg border border-outline-variant bg-surface-container-low px-2 py-1.5 text-on-surface outline-none transition-colors focus:border-primary"
+            className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface outline-none transition-colors focus:border-accent"
           >
             <option value="anthropic">Claude (Anthropic)</option>
             <option value="openai_compat">OpenRouter</option>
@@ -568,11 +557,11 @@ function AddProviderForm({
         </label>
 
         <label className="flex flex-col gap-1.5">
-          <span className="text-[10px] uppercase tracking-widest text-on-surface-variant">Auth</span>
+          <span className="text-[11px] uppercase tracking-widest text-faint">Auth</span>
           <select
             value={authType}
             onChange={(e) => setAuthType(e.target.value as "api_key" | "oauth")}
-            className="rounded-lg border border-outline-variant bg-surface-container-low px-2 py-1.5 text-on-surface outline-none transition-colors focus:border-primary"
+            className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface outline-none transition-colors focus:border-accent"
           >
             <option value="api_key">API key</option>
             {oauthAllowed && <option value="oauth">OAuth (Claude subscription)</option>}
@@ -580,7 +569,7 @@ function AddProviderForm({
         </label>
 
         <label className="col-span-2 flex flex-col gap-1.5">
-          <span className="text-[10px] uppercase tracking-widest text-on-surface-variant">Model</span>
+          <span className="text-[11px] uppercase tracking-widest text-faint">Model</span>
           <input
             value={modelId}
             onChange={(e) => setModelId(e.target.value)}
@@ -591,13 +580,13 @@ function AddProviderForm({
                   ? "qwen2.5:7b"
                   : "meta-llama/llama-3.1-70b-instruct"
             }
-            className="rounded-lg border border-outline-variant bg-surface-container-low px-2 py-1.5 text-on-surface placeholder:text-on-surface-variant/50 outline-none transition-colors focus:border-primary"
+            className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent"
           />
         </label>
 
         {needsBaseUrl && (
           <label className="col-span-2 flex flex-col gap-1.5">
-            <span className="text-[10px] uppercase tracking-widest text-on-surface-variant">
+            <span className="text-[11px] uppercase tracking-widest text-faint">
               Base URL {provider === "local" && "(blank = deployment default)"}
             </span>
             <input
@@ -606,25 +595,25 @@ function AddProviderForm({
               placeholder={
                 provider === "local" ? "http://ollama:11434/v1" : "https://openrouter.ai/api/v1"
               }
-              className="rounded-lg border border-outline-variant bg-surface-container-low px-2 py-1.5 text-on-surface placeholder:text-on-surface-variant/50 outline-none transition-colors focus:border-primary"
+              className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent"
             />
           </label>
         )}
 
         {authType === "api_key" && provider !== "local" && (
           <label className="col-span-2 flex flex-col gap-1.5">
-            <span className="text-[10px] uppercase tracking-widest text-on-surface-variant">API key</span>
+            <span className="text-[11px] uppercase tracking-widest text-faint">API key</span>
             <input
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder="stored encrypted; never shown again"
-              className="rounded-lg border border-outline-variant bg-surface-container-low px-2 py-1.5 text-on-surface placeholder:text-on-surface-variant/50 outline-none transition-colors focus:border-primary"
+              className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent"
             />
           </label>
         )}
 
-        <label className="col-span-2 flex items-center gap-2 text-xs text-on-surface-variant">
+        <label className="col-span-2 flex items-center gap-2 text-xs text-muted">
           <input
             type="checkbox"
             checked={activate}
@@ -637,7 +626,7 @@ function AddProviderForm({
       <button
         onClick={() => void submit()}
         disabled={saving || !modelId.trim()}
-        className="celestial-gradient mt-4 rounded-lg px-3 py-1.5 text-sm font-medium text-on-primary transition-shadow hover:shadow-[0_0_15px_rgba(173,198,255,0.35)] disabled:opacity-40"
+        className="mt-4 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
       >
         {saving ? "Adding…" : "Add provider"}
       </button>
@@ -645,28 +634,46 @@ function AddProviderForm({
   );
 }
 
-function MessageBubble({ message }: { message: UiMessage }) {
+function MessageRow({ message }: { message: UiMessage }) {
   const isUser = message.role === "user";
 
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div className={`max-w-[85%] ${isUser ? "items-end" : "items-start"}`}>
-        <div
-          className={`whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm ${
-            isUser
-              ? "bg-primary-container text-on-primary-container"
-              : "glass-panel text-on-surface"
-          }`}
-        >
+    <div className="flex gap-3">
+      {/* Avatar */}
+      <div
+        className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
+          isUser ? "bg-raised text-muted" : "bg-accent/20 text-accent"
+        }`}
+      >
+        {isUser ? "Y" : "R"}
+      </div>
+
+      <div className="min-w-0 flex-1">
+        {/* Name + timestamp line */}
+        <div className="flex items-baseline gap-2">
+          <span className="text-sm font-semibold text-on-surface">
+            {isUser ? "you" : "raphael"}
+          </span>
+          {message.created_at && (
+            <span className="text-xs text-muted">
+              {new Date(message.created_at).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </span>
+          )}
+        </div>
+
+        <div className="mt-1 whitespace-pre-wrap text-sm text-on-surface">
           {message.content}
           {message.streaming && !message.content && (
-            <span className="pulse-glow text-on-surface-variant">…</span>
+            <span className="text-muted">…</span>
           )}
         </div>
 
         {/* Degraded banner — the lifeboat fired. Product requirement. */}
         {message.degraded && (
-          <div className="glass-panel mt-1.5 rounded-lg border border-tertiary/40 bg-tertiary/10 px-3 py-2 text-xs text-tertiary">
+          <div className="mt-2 border-l-2 border-warning bg-warning/10 px-3 py-2 text-xs text-warning">
             Answered by local{" "}
             <span className="font-semibold">
               {message.degraded.model || message.degraded.provider}
@@ -678,7 +685,7 @@ function MessageBubble({ message }: { message: UiMessage }) {
 
         {/* Error state. */}
         {message.error && (
-          <div className="glass-panel mt-1.5 rounded-lg border border-error/40 bg-error/10 px-3 py-2 text-xs text-error">
+          <div className="mt-2 border-l-2 border-error bg-error/10 px-3 py-2 text-xs text-error">
             {message.error}
           </div>
         )}
