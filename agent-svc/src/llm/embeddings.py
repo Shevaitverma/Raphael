@@ -27,9 +27,15 @@ class LocalEmbeddingProvider:
     def __init__(self, model):
         self._model = model
 
-    def embed(self, texts) -> list:
+    def embed(self, texts, prefix: str = "search_document: ") -> list:
+        """nomic-embed-text-v1.5 was TRAINED with task instruction prefixes:
+        'search_document: ' on stored content, 'search_query: ' on queries.
+        They are what make asymmetric search work — omitting them degrades
+        retrieval. Default is the storage prefix; queries must pass
+        prefix="search_query: ".
+        """
         vecs = self._model.encode(
-            list(texts),
+            [prefix + t for t in texts],
             convert_to_numpy=True,
             normalize_embeddings=True,
         )

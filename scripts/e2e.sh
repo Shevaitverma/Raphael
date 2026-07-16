@@ -38,7 +38,7 @@ echo "== 0b. select an available local Ollama model =="
 TAGS=$(curl -s --max-time 10 "${OLLAMA%/v1}/api/tags")
 MODEL="${LOCAL_MODEL:-}"
 if [ -z "$MODEL" ]; then
-  for cand in "qwen2.5:7b" "qwen3.5:latest" "llama2:latest" "gemma3:12b"; do
+  for cand in "qwen3.5:latest" "qwen3.6:latest" "llama2:latest" "gemma3:12b"; do
     echo "$TAGS" | grep -q "\"$cand\"" && MODEL="$cand" && break
   done
 fi
@@ -65,8 +65,13 @@ CID=$(jget "$TMP/conv.json" id)
 pass "conversation $CID"
 
 echo "== 3. chat SSE (expect incremental tokens + exactly one done) =="
+# The message MUST state something durable about the user. Step 4 asserts a
+# fresh embedded row, and the only writer is LLM extraction — for a bare "what
+# is the capital of France?" extract.py yields {"items": []} and is CORRECT to
+# (extract.py:22). Phrased like extract.py's own worked example so a 7B has the
+# best shot at it.
 "$PY" "$HERE/sse_client.py" "$GATEWAY" "$TOKEN" "$CID" \
-  "In one short sentence, what is the capital of France?" > "$TMP/chat.json"
+  "I moved to Berlin last month and I work at Acme. In one short sentence, what is the capital of France?" > "$TMP/chat.json"
 cat "$TMP/chat.json"
 "$PY" - "$TMP/chat.json" <<'PYEOF' || fail "chat SSE assertions failed"
 import json,sys
@@ -85,14 +90,80 @@ ROLES=$(psql -Atc "SELECT string_agg(role,',' ORDER BY created_at) FROM messages
 echo "$ROLES" | grep -q "user" || fail "no user message persisted"
 echo "$ROLES" | grep -q "assistant" || fail "no assistant message persisted"
 pass "messages persisted: $ROLES"
-MEMDIMS=$(psql -Atc "SELECT DISTINCT vector_dims(embedding) FROM memories WHERE user_id='$DEV_UID' AND created_at > now() - interval '2 minutes';")
-[ "$MEMDIMS" = "768" ] || fail "memory embedding dims = '$MEMDIMS' (want 768)"
-MEMMODEL=$(psql -Atc "SELECT DISTINCT embedding_model FROM memories WHERE user_id='$DEV_UID' AND created_at > now() - interval '2 minutes';")
-[ -n "$MEMMODEL" ] || fail "memory embedding_model empty"
-pass "memories row 768-dim, embedding_model=$MEMMODEL"
+# Both tables, because extraction splits the exchange across them: triples land
+# in `facts`, notes in `memories`, and which one a 7B produces is not ours to
+# pin. Either proves the embed+write path.
+# Keyed on last_seen, NOT first_seen/created_at: this suite is not run against a
+# virgin DB. On a re-run the same facts already exist, so facts_triple_unique's
+# ON CONFLICT DO UPDATE correctly REINFORCES (times_seen+1, last_seen=now()) and
+# inserts nothing — leaving first_seen at its original value. Asserting on
+# first_seen therefore only passes the very first time and fails forever after,
+# on correct behaviour. last_seen moves on both insert and reinforce, so it means
+# what we actually want to assert: extraction ran and wrote this turn.
+FRESH="SELECT DISTINCT vector_dims(embedding)::text || '|' || embedding_model FROM (
+         SELECT embedding, embedding_model, last_seen FROM memories WHERE user_id='$DEV_UID'
+         UNION ALL
+         SELECT embedding, embedding_model, last_seen FROM facts WHERE user_id='$DEV_UID'
+       ) r WHERE last_seen > now() - interval '2 minutes';"
+# Extraction runs AFTER the SSE stream closes (workflow.py:9-12), so step 3
+# returning does not mean the row exists yet. Poll; a single query races it.
+MEM=""
+for _ in $(seq 1 30); do
+  MEM=$(psql -Atc "$FRESH")
+  [ -n "$MEM" ] && break
+  sleep 1
+done
+[ -n "$MEM" ] || fail "no memory/fact row written within 30s of the turn"
+[ "${MEM%%|*}" = "768" ] || fail "memory embedding dims = '${MEM%%|*}' (want 768)"
+[ -n "${MEM#*|}" ] || fail "memory embedding_model empty"
+pass "memory row 768-dim, embedding_model=${MEM#*|}"
+
+echo "== 4b. search turn: the tool call must land as OUR neutral shape =="
+# Driven at agent-svc directly, not the gateway: proxy.go rebuilds the upstream
+# body from a typed struct, so this asserts the tool-call path without waiting
+# on a field passthrough it does not need.
+# Gated on agent-svc's OWN answer, never on e2e's env: `web_search` means a key
+# is configured AND the tool is actually wired (main.py:52-63), `native_tools`
+# means the model can be told about it. Both true is exactly the Tier 1
+# precondition, so this section arms itself the moment search lands and skips
+# loudly until then — instead of going red for a feature nobody built yet.
+CAPS=$(curl -s --max-time 8 "$AGENT/capabilities?user_id=$DEV_UID")
+WEBSEARCH=$(echo "$CAPS" | "$PY" -c "import json,sys;print(json.load(sys.stdin).get('web_search'))" 2>/dev/null)
+NATIVE=$(echo "$CAPS" | "$PY" -c "import json,sys;print(json.load(sys.stdin).get('native_tools'))" 2>/dev/null)
+if [ "$WEBSEARCH" != "True" ]; then
+  echo "  SKIP: agent-svc reports web_search=$WEBSEARCH — search off, no tool call to assert"
+elif [ "$NATIVE" != "True" ]; then
+  echo "  SKIP: $MODEL reports native_tools=$NATIVE — Tier 2 has no tool call"
+else
+  curl -s -N --max-time 180 -X POST "$AGENT/chat" -H 'Content-Type: application/json' \
+    -d "{\"user_id\":\"$DEV_UID\",\"conversation_id\":\"$CID\",\"message\":\"Search the web and tell me one thing that happened in the news today.\",\"search\":true}" \
+    > "$TMP/search.sse"
+  grep -q "^event: done" "$TMP/search.sse" || fail "search turn never completed: $(head -c 400 "$TMP/search.sse")"
+  # count(col) counts NON-NULL, so this is 0 the moment _post_message goes back
+  # to posting {role, content} only — which is the whole point of the assertion.
+  TC=$(psql -Atc "SELECT count(tool_calls) FROM messages WHERE conversation_id='$CID';")
+  [ "${TC:-0}" -ge 1 ] || fail "search turn wrote no tool_calls — conv-svc got role/content only"
+  pass "neutral tool_calls persisted and accepted by conv-svc (count=$TC)"
+fi
 
 echo "== 5. no provider wire-format in the DB =="
-VIOL=$(psql -Atc "SELECT count(*) FROM messages WHERE content ~ '(toolu_|call_[A-Za-z0-9]|\"thinking\"|cache_control|redacted_thinking)' OR (tool_calls IS NOT NULL AND tool_calls::text ~ '(toolu_|call_[A-Za-z0-9]|\"thinking\"|\"id\"|cache_control)');")
+# The content half must stay broad: it is the ONLY guard on a thinking block
+# leaking into messages.content, and that path is live — anthropic_api.py asks
+# for thinking={"type":"adaptive"} and drops the blocks by hand. Length-anchoring
+# the ids does not work either: `call_abc123` and `call_1` are the real fixtures
+# in tests/test_tools_forward.py, which asserts the stricter `"call_" not in
+# blob` — e2e must not enforce less than the unit test it backstops.
+# `thinking` is anchored on the JSON KEY rather than the bare word, which keeps
+# both properties: it catches thinking + redacted_thinking blocks, and does NOT
+# match the title `Do AI models really do "thinking"?` (verified against this DB).
+# ponytail: `call_[A-Za-z0-9]` still matches https://x.com/call_1, harmless today
+# because no untrusted third-party text reaches content (main.py hardcodes
+# caps["web_search"]=False). When citations land, anchor call_ on its JSON key
+# too — do NOT fix it by shortening the pattern's reach.
+# ponytail: the tool_calls half stringifies the column and bans the literal
+# "id", so a tool argument (or a search query) of exactly `id` trips it. Name
+# arguments accordingly; a JSON-key-aware checker is the upgrade if that bites.
+VIOL=$(psql -Atc "SELECT count(*) FROM messages WHERE content ~ '(\"type\":\s*\"(redacted_)?thinking\"|toolu_|call_[A-Za-z0-9]|cache_control)' OR (tool_calls IS NOT NULL AND tool_calls::text ~ '(toolu_|call_[A-Za-z0-9]|\"thinking\"|\"redacted_thinking\"|\"id\"|cache_control)');")
 [ "$VIOL" = "0" ] || fail "$VIOL messages contain provider wire-format"
 pass "no toolu_/call_/thinking/cache_control in messages"
 

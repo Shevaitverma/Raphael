@@ -105,6 +105,7 @@ func (s *Server) BuildApp() *fiber.App {
 	api := app.Group("/api", s.authMiddleware, s.rateLimitMiddleware)
 
 	api.Post("/chat", s.handleChat)
+	api.Get("/capabilities", s.proxyCapabilities)
 
 	// Conversations: exactly the three routes in the contract. Message *writes*
 	// are agent-svc's job (it posts to conv-svc directly), so there is no

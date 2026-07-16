@@ -33,10 +33,14 @@ credential; a transient 429 does not).
 - **Python 3.13** with `venv` + `pip` (`uv` not required).
 - **Node + pnpm** (only for the `web` UI).
 - **Ollama** running at `http://localhost:11434` with at least one chat model
-  pulled. `qwen2.5:7b` is preferred (`native_tools: true`). If it is not present
-  the tooling falls back to `llama2:latest` or `gemma3:12b` (`native_tools:
-  false`). Note `gemma3:12b` needs ~11 GB free RAM; on a smaller box use
+  pulled. `qwen3.5:latest` is preferred; `e2e.sh` auto-selects whatever is
+  present. Tool support is **discovered per model**, never assumed from a table —
+  a model without it still answers, it just cannot use web search (Tier 2 covers
+  it). Note `gemma3:12b` needs ~11 GB free RAM; on a smaller box use
   `ollama pull llama2`.
+- If your Ollama runs a `num_ctx` other than the 4096 default, set
+  `OLLAMA_NUM_CTX` in `.env` to match it. Under-claiming truncates nothing;
+  over-claiming makes Ollama truncate in silence.
 
 ## Setup
 
@@ -95,7 +99,9 @@ bash scripts/e2e.sh            # full acceptance test, asserts on real output
 dev-login → create conversation → chat (asserts tokens stream **incrementally**,
 ≥1 `token`, exactly one `done`) → checks Postgres (user + assistant messages, a
 768-dim `memories` row with `embedding_model`, and **no** provider wire-format)
-→ **lifeboat**: activates an invalid `anthropic` key, asserts a `degraded` event
+→ a **search turn** asserting the tool call persists in our neutral shape
+(skipped with a loud reason unless `/capabilities` reports both `web_search`
+and `native_tools`) → **lifeboat**: activates an invalid `anthropic` key, asserts a `degraded` event
 + a local answer + `is_active` unchanged → **transient**: points an active
 provider at a 429 stub and asserts an `error` event with **no** lifeboat → then
 restores the local credential as active.
@@ -128,6 +134,9 @@ at rest and never returned by any public route.
   turn under the model that actually answered, and **never** flips `is_active`.
 - Active credential hit a **transient** fault — 429, 5xx, timeout, connection —
   the request surfaces an `error` event. No silent downgrade.
+- `degraded` means **only** that, and is never used for a web-search failure —
+  search is off by default, and when it fails the answer says so in-band rather
+  than pretending it was grounded. See `docs/CONTRACT.md`.
 
 ## Troubleshooting
 

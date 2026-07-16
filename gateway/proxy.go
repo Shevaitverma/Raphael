@@ -130,9 +130,20 @@ func (s *Server) proxyProviders(c *fiber.Ctx) error {
 	return s.forward(c, c.Method(), target, body)
 }
 
+// --- capabilities proxy → agent-svc ----------------------------------------
+//
+// GET /api/capabilities → agent-svc GET /capabilities?user_id=<jwt sub>. What
+// the active model can do, plus whether this deployment has a search key at
+// all — a bool, never the key.
+func (s *Server) proxyCapabilities(c *fiber.Ctx) error {
+	uid := c.Locals(userIDKey).(string)
+	target := s.cfg.AgentSvcURL + "/capabilities?user_id=" + url.QueryEscape(uid)
+	return s.forward(c, http.MethodGet, target, nil)
+}
+
 // --- chat proxy → agent-svc (SSE passthrough) ------------------------------
 //
-// POST /api/chat {conversation_id, message} → agent-svc POST /chat
+// POST /api/chat {conversation_id, message, search} → agent-svc POST /chat
 // {user_id, conversation_id, message}. The text/event-stream response is
 // streamed straight through, flushing every chunk so tokens arrive
 // incrementally rather than all at once at the end.
@@ -142,14 +153,18 @@ func (s *Server) handleChat(c *fiber.Ctx) error {
 	var in struct {
 		ConversationID string `json:"conversation_id"`
 		Message        string `json:"message"`
+		Search         bool   `json:"search"`
 	}
 	if err := c.BodyParser(&in); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid body")
 	}
+	// The body is rebuilt field by field, not copied: anything not named here is
+	// dropped before it reaches agent-svc.
 	payload, _ := json.Marshal(map[string]any{
 		"user_id":         uid, // from the JWT, never the body
 		"conversation_id": in.ConversationID,
 		"message":         in.Message,
+		"search":          in.Search,
 	})
 
 	// A cancellable background context: it must outlive the handler return

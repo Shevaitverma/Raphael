@@ -91,6 +91,21 @@ def lifeboat(user_id: str):
     return build_provider(cred)
 
 
+def extractor(user_id: str):
+    """The credential for BACKGROUND extraction: active if it is local, else the
+    lifeboat, else None.
+
+    NEVER the user's paid credential. Extraction is work the user did not ask
+    for, and billing it to their chat key silently doubles their spend on every
+    turn. embeddings.py:8-11 already made this exact ruling for embeddings —
+    extraction is the same category. None -> no extraction -> store nothing.
+    """
+    cred = _fetch_active(user_id)
+    if cred and cred.get("provider") == "local":
+        return build_provider(cred)
+    return lifeboat(user_id)
+
+
 def embed():
     """Always the in-process encoder. Never a chat provider."""
     from llm.embeddings import get_encoder

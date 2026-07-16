@@ -50,14 +50,21 @@ class AnthropicAPIProvider:
         self._client = anthropic.Anthropic(**kwargs)
 
     def capabilities(self) -> Capabilities:
+        # source="static": no Anthropic endpoint reports per-model context or
+        # modalities, so this is a hardcoded claim — a guess, not a fact.
         return Capabilities(
             max_context_tokens=1_000_000,
             native_tools=True,
             streaming=True,
-            json_schema=True,
+            # Anthropic has NO response_format. Coercion is forced tool-use, and
+            # nothing here implements it. False until earned.
+            json_schema=False,
+            vision=True,
+            model_id=self.model,
+            source="static",
         )
 
-    def _params(self, messages, system, max_tokens) -> dict:
+    def _params(self, messages, system, max_tokens, tools=None) -> dict:
         params = dict(
             model=self.model,
             max_tokens=max_tokens,
@@ -67,10 +74,18 @@ class AnthropicAPIProvider:
         )
         if system:
             params["system"] = system
+        if tools:
+            # `parameters` is the neutral name for the JSON Schema; Anthropic
+            # calls the same object input_schema. An ABSENT key and an empty
+            # list are not the same request, so no tools means no key.
+            params["tools"] = [
+                {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
+                for t in tools
+            ]
         return params
 
     def chat(self, messages, system=None, tools=None, max_tokens=1024) -> ChatResponse:
-        resp = self._client.messages.create(**self._params(messages, system, max_tokens))
+        resp = self._client.messages.create(**self._params(messages, system, max_tokens, tools))
         # Check stop_reason before reading content; handle a refusal.
         if getattr(resp, "stop_reason", None) == "refusal":
             return ChatResponse(

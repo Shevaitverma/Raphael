@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from config import DATABASE_URL
 from graph import workflow
 from llm import embeddings, resolver
+from tools import search as search_tool
 
 app = FastAPI(title="agent-svc")
 
@@ -49,6 +50,15 @@ def capabilities(user_id: str):
     caps = provider.capabilities().to_dict()
     caps["provider"] = provider.provider
     caps["model"] = provider.model
+    # Deployment config, not a model capability — but it is the only bit the UI
+    # needs to know whether the search toggle can do anything. A bool; the key
+    # itself never leaves the process.
+    #
+    # search_tool.enabled() rather than reading SEARCH_API_KEY here: "is the tool
+    # registered" and "may this toggle light up" must be ONE authority, or the UI
+    # eventually promises a tool the workflow never runs. No key -> false, the
+    # tool is never offered to a model, and no query leaves the box.
+    caps["web_search"] = search_tool.enabled()
     return caps
 
 
@@ -56,6 +66,8 @@ class ChatBody(BaseModel):
     user_id: str
     conversation_id: str
     message: str
+    # Default off IS the privacy posture: absent field -> no query ever leaves.
+    search: bool = False
 
 
 @app.post("/chat")
@@ -75,6 +87,7 @@ def chat(body: ChatBody):
         "user_id": body.user_id,
         "conversation_id": body.conversation_id,
         "message": body.message,
+        "search": body.search,
         "provider": provider,
         "emit": emit,
     }
@@ -85,7 +98,14 @@ def chat(body: ChatBody):
         except Exception as e:  # last-resort guard
             emit("error", {"message": str(e) or type(e).__name__})
         finally:
-            q.put(None)
+            q.put(None)  # the stream closes HERE, before any post-done work.
+        # Only now is post-done work free. With the sentinel in run()'s finally
+        # covering this too, the SSE generator would loop on q.get() until
+        # extraction returned — a 3-40s LLM call holding the HTTP response open,
+        # and sse_client.py reads to EOF, so the e2e would block on it.
+        # Consequence: no SSE event can ever report extraction. There is no
+        # reader left. workflow.extract() swallows everything for that reason.
+        workflow.extract(state)
 
     threading.Thread(target=run, daemon=True).start()
 

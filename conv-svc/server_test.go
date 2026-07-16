@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,41 +200,22 @@ func TestCreateAndListMessages(t *testing.T) {
 	convID := createConv(t, srv)
 
 	// a plain user message
-	rr := do(t, srv, "POST", msgsURL(convID, devUserID), map[string]any{
-		"role": "user", "content": "hi there",
-	})
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("create msg = %d, want 201; body=%s", rr.Code, rr.Body)
-	}
+	postMsg(t, srv, convID, map[string]any{"role": "user", "content": "hi there"})
 
 	// an assistant message with neutral tool_calls
-	rr = do(t, srv, "POST", msgsURL(convID, devUserID), map[string]any{
+	m := postMsg(t, srv, convID, map[string]any{
 		"role":    "assistant",
 		"content": "",
 		"tool_calls": []map[string]any{
 			{"name": "search", "arguments": map[string]any{"q": "weather"}},
 		},
 	})
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("create tool msg = %d, want 201; body=%s", rr.Code, rr.Body)
-	}
-	var m Message
-	if err := json.Unmarshal(rr.Body.Bytes(), &m); err != nil {
-		t.Fatalf("decode msg: %v", err)
-	}
 	if len(m.ToolCalls) == 0 {
 		t.Fatalf("tool_calls not round-tripped")
 	}
 
 	// list them back, oldest first
-	rr = do(t, srv, "GET", msgsURL(convID, devUserID), nil)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("list msgs = %d, want 200; body=%s", rr.Code, rr.Body)
-	}
-	var msgs []Message
-	if err := json.Unmarshal(rr.Body.Bytes(), &msgs); err != nil {
-		t.Fatalf("decode msgs: %v", err)
-	}
+	msgs := listMsgs(t, srv, msgsURL(convID, devUserID))
 	if len(msgs) != 2 {
 		t.Fatalf("got %d messages, want 2", len(msgs))
 	}
@@ -273,10 +256,10 @@ func TestCreateMessageProviderWireFormatRejected(t *testing.T) {
 	cases := []any{
 		[]map[string]any{{"id": "toolu_123", "name": "search", "input": map[string]any{"q": "x"}}},
 		[]map[string]any{{"type": "function", "name": "search", "arguments": map[string]any{}}},
-		[]map[string]any{{"name": "search"}},                                    // missing arguments
-		[]map[string]any{{"arguments": map[string]any{}}},                       // missing name
-		[]map[string]any{{"name": "", "arguments": map[string]any{}}},           // empty name
-		map[string]any{"name": "search", "arguments": map[string]any{}},         // object, not array
+		[]map[string]any{{"name": "search"}},                            // missing arguments
+		[]map[string]any{{"arguments": map[string]any{}}},               // missing name
+		[]map[string]any{{"name": "", "arguments": map[string]any{}}},   // empty name
+		map[string]any{"name": "search", "arguments": map[string]any{}}, // object, not array
 	}
 	for i, tc := range cases {
 		rr := do(t, srv, "POST", msgsURL(convID, devUserID), map[string]any{
@@ -403,6 +386,159 @@ func TestMessagesRequireUserID(t *testing.T) {
 	}); rr.Code != http.StatusBadRequest {
 		t.Fatalf("post without user_id = %d, want 400; body=%s", rr.Code, rr.Body)
 	}
+}
+
+// ---- limit ----------------------------------------------------------------
+
+// queryLimit is a pure function, so the cap and the rejections are provable
+// without a database — and the cap is 501 rows cheaper to check here.
+func TestQueryLimit(t *testing.T) {
+	cases := []struct {
+		query   string
+		want    any
+		wantErr bool
+	}{
+		{"", nil, false},        // absent => no limit => the whole conversation
+		{"?limit=", nil, false}, // present but empty reads as absent
+		{"?limit=1", 1, false},
+		{"?limit=5", 5, false},
+		{"?limit=500", 500, false},
+		{"?limit=501", 500, false}, // capped, not rejected
+		{"?limit=99999999", 500, false},
+		{"?limit=0", nil, true},
+		{"?limit=-1", nil, true},
+		{"?limit=abc", nil, true},
+		{"?limit=1.5", nil, true},
+		{"?limit=+", nil, true},
+	}
+	for _, tc := range cases {
+		got, err := queryLimit(httptest.NewRequest("GET", "/x"+tc.query, nil))
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("queryLimit(%q) err = %v, wantErr = %v", tc.query, err, tc.wantErr)
+		}
+		if err == nil && got != tc.want {
+			t.Fatalf("queryLimit(%q) = %v, want %v", tc.query, got, tc.want)
+		}
+	}
+}
+
+func TestListMessagesBadLimit(t *testing.T) {
+	srv, cleanup := newTestServer(t)
+	defer cleanup()
+	convID := createConv(t, srv)
+	for _, bad := range []string{"0", "-3", "abc", "1.5", "1e2"} {
+		rr := do(t, srv, "GET", msgsURL(convID, devUserID)+"&limit="+bad, nil)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("limit=%s = %d, want 400; body=%s", bad, rr.Code, rr.Body)
+		}
+	}
+}
+
+// agent-svc fetches history every turn and wants the last N turns, oldest first.
+// The tail must be the RECENT end and the order must survive the reversal: hand
+// the model the head, or the turns backwards, and it answers the wrong question.
+func TestListMessagesLimit(t *testing.T) {
+	srv, cleanup := newTestServer(t)
+	defer cleanup()
+	convID := createConv(t, srv)
+
+	const n = 12
+	for i := 0; i < n; i++ {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		postMsg(t, srv, convID, map[string]any{"role": role, "content": strconv.Itoa(i)})
+	}
+
+	// absent limit => unchanged behavior: everything, oldest first
+	assertTurns(t, listMsgs(t, srv, msgsURL(convID, devUserID)), 0, n)
+
+	// limit => the tail, still oldest first
+	assertTurns(t, listMsgs(t, srv, msgsURL(convID, devUserID)+"&limit=5"), 7, 5)
+	assertTurns(t, listMsgs(t, srv, msgsURL(convID, devUserID)+"&limit=1"), 11, 1)
+
+	// limit past the end is not an error, it is just everything
+	assertTurns(t, listMsgs(t, srv, msgsURL(convID, devUserID)+"&limit=100"), 0, n)
+	assertTurns(t, listMsgs(t, srv, msgsURL(convID, devUserID)+"&limit=99999"), 0, n)
+
+	// the limit does not become a way around ownership
+	if rr := do(t, srv, "GET", msgsURL(convID, otherUserID)+"&limit=5", nil); rr.Code != http.StatusNotFound {
+		t.Fatalf("limited read of another user's messages = %d, want 404; body=%s", rr.Code, rr.Body)
+	}
+}
+
+// assertTurns checks msgs is exactly the contents start..start+count-1 in that
+// order, with roles still alternating user/assistant from the first turn.
+func assertTurns(t *testing.T, msgs []Message, start, count int) {
+	t.Helper()
+	if len(msgs) != count {
+		t.Fatalf("got %d messages, want %d", len(msgs), count)
+	}
+	for i, m := range msgs {
+		want := strconv.Itoa(start + i)
+		if m.Content != want {
+			t.Fatalf("message %d = %q, want %q (full order: %s)", i, m.Content, want, contents(msgs))
+		}
+		wantRole := "user"
+		if (start+i)%2 == 1 {
+			wantRole = "assistant"
+		}
+		if m.Role != wantRole {
+			t.Fatalf("message %d role = %s, want %s", i, m.Role, wantRole)
+		}
+	}
+}
+
+func contents(msgs []Message) string {
+	out := make([]string, len(msgs))
+	for i, m := range msgs {
+		out[i] = m.Content
+	}
+	return strings.Join(out, ",")
+}
+
+func listMsgs(t *testing.T, srv *Server, target string) []Message {
+	t.Helper()
+	rr := do(t, srv, "GET", target, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200; body=%s", target, rr.Code, rr.Body)
+	}
+	var msgs []Message
+	if err := json.Unmarshal(rr.Body.Bytes(), &msgs); err != nil {
+		t.Fatalf("decode msgs: %v", err)
+	}
+	return msgs
+}
+
+// postMsg posts a message, then pushes its created_at 1ms past the newest
+// message already in the conversation.
+//
+// This is not cosmetic. now() is the TRANSACTION timestamp and the whole test
+// runs inside ONE transaction, so every message posted here is stamped with the
+// identical created_at — a tie production never produces, because each real
+// write is its own transaction milliseconds apart. Left tied, turn order is
+// decided by the id tiebreak, and id is a random uuid: the assertions become a
+// coin flip. Spacing the timestamps makes the fixture look like production.
+func postMsg(t *testing.T, srv *Server, convID string, body any) Message {
+	t.Helper()
+	rr := do(t, srv, "POST", msgsURL(convID, devUserID), body)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("setup post msg = %d; body=%s", rr.Code, rr.Body)
+	}
+	var m Message
+	if err := json.Unmarshal(rr.Body.Bytes(), &m); err != nil {
+		t.Fatalf("setup decode msg: %v", err)
+	}
+	_, err := srv.db.Exec(context.Background(),
+		`UPDATE messages SET created_at = (
+		   SELECT coalesce(max(created_at), now()) + interval '1 millisecond'
+		   FROM messages WHERE conversation_id = $1 AND id <> $2
+		 ) WHERE id = $2`, convID, m.ID)
+	if err != nil {
+		t.Fatalf("setup space created_at: %v", err)
+	}
+	return m
 }
 
 // createConv creates a conversation via the API and returns its id.

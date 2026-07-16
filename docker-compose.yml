@@ -82,6 +82,11 @@ services:
       CONV_SVC_URL: http://conv-svc:8082
       OLLAMA_BASE_URL: http://ollama:11434/v1
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN in .env}
+      # The knobs .env.example documents. Without these, compose silently ignores
+      # them and only scripts/dev.sh's `set -a` ever delivers them.
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-4096}
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+      SEARCH_BASE_URL: ${SEARCH_BASE_URL:-https://api.search.brave.com/res/v1/web/search}
     depends_on:
       postgres:
         condition: service_healthy

@@ -10,10 +10,27 @@ from typing import Any, Iterator, Optional, Protocol, runtime_checkable
 
 @dataclass
 class Capabilities:
-    max_context_tokens: int
-    native_tools: bool
-    streaming: bool
-    json_schema: bool
+    """What the MODEL can do — never what the provider brochure claims.
+
+    Every default is the CONSERVATIVE floor, so a field someone forgets to set
+    can only ever under-promise. The asymmetry is the whole point: an optimistic
+    wrong answer costs the TURN (a 400 mid-stream on openai_compat, or SILENT
+    truncation on Ollama — worse, because it never errors and the user just gets
+    a dumber answer). A conservative wrong answer costs only quality.
+
+    `source` is how a reader tells a fact from a guess:
+      "discovered" — the server told us (/api/tags, /api/v1/models)
+      "static"     — a hardcoded table in this repo
+      "default"    — nobody told us anything; this is the floor
+    """
+
+    max_context_tokens: int = 8192
+    native_tools: bool = False
+    streaming: bool = True
+    json_schema: bool = False
+    vision: bool = False
+    model_id: str = ""
+    source: str = "default"
 
     def to_dict(self) -> dict:
         return asdict(self)

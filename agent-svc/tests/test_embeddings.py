@@ -25,6 +25,16 @@ def test_embed_768_dims_and_no_network_at_inference():
                 os.environ[k] = val
 
 
+def test_prefix_reaches_the_model():
+    enc = embeddings.get_encoder()
+    # Default is the storage prefix; a query prefix must produce a different vector.
+    doc = enc.embed(["the capital of France"])[0]
+    qry = enc.embed(["the capital of France"], prefix="search_query: ")[0]
+    assert doc != qry
+    # Default really is search_document:, not "no prefix".
+    assert enc.embed(["the capital of France"], prefix="search_document: ")[0] == doc
+
+
 def test_embedding_model_name_recorded():
     enc = embeddings.get_encoder()
     assert enc.model_name == "nomic-embed-text-v1.5"

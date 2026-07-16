@@ -1,10 +1,15 @@
-"""The linear pipeline: retrieve -> generate -> persist -> remember.
+"""The linear pipeline: context -> generate -> persist -> done.
 
-- retrieve: local query embedding + pgvector top-k, budgeted to the active
-  provider's window.
+- context: budgets from the ACTIVE model's window, then conv-svc history and
+  pgvector/FTS retrieval CONCURRENTLY.
 - generate: stream tokens, with the lifeboat wrapped around a dead credential.
 - persist: neutral messages -> conv-svc (:8082).
-- remember: embed + write memories to Postgres.
+- done: emit the terminal event and return.
+
+Extraction is NOT a step. `extract()` is a module-level function main.py calls
+AFTER the SSE stream has closed, so a 3-40s extraction cannot hold the HTTP
+response open. The consequence is a rule: no SSE event can ever report
+extraction — by the time it runs there is no reader.
 
 Each step reads the shared state dict and returns a partial update. The steps
 run in fixed order with no branches or cycles, so `run()` is a straight
@@ -14,22 +19,51 @@ callable (`emit`) carried in state, so main.py can drain them in real time.
 from __future__ import annotations
 
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypedDict
 
 import httpx
 
 from config import CONV_SVC_URL
 from llm import resolver
-from memory import retriever
+from memory import budget, extract as extractor_mod, history, retriever
+from tools import search as search_tool
 
 SYSTEM_BASE = "You are Raphael, a helpful personal assistant. Answer concisely."
 
+# Two, so the model can refine a query that found nothing — exactly once. A
+# module constant, not config: this is a shape decision (a pre-flight, not an
+# agent loop), and an operator who can set it to 20 has an agent loop.
+_MAX_PREFLIGHT_ROUNDS = 2
 
-def build_system(context) -> str:
-    if not context:
-        return SYSTEM_BASE
-    mem = "\n".join(f"- {c}" for c in context)
-    return SYSTEM_BASE + "\n\nRelevant memories about the user:\n" + mem
+# Not "Relevant memories" — retrieval cannot back that claim. top-k always
+# fills, so rank 5 of 5 is "the closest thing I found", and asserting relevance
+# is how a 0.3-confidence guess gets believed like a directive. Say what the
+# list actually is, and rank the live turn above all of it.
+_PRECEDENCE = (
+    "These notes are retrieved from past conversations and may be stale, "
+    "wrong, or irrelevant to this turn. What the user says NOW always wins."
+)
+
+
+def build_system(profile: list, memories: list, search: str = "") -> str:
+    """Stable prefix first: base, then profile, then memories, then search.
+
+    Ordered for prompt caching — the base never changes, the profile changes
+    rarely, retrieved memories change every turn, and search results change
+    every turn AND are the biggest block. A cache prefix only pays if the
+    volatile part is last.
+    """
+    out = [SYSTEM_BASE]
+    if profile or memories:
+        out += ["", _PRECEDENCE]
+        if profile:
+            out += ["", "What we believe about the user:"] + [f"- {p}" for p in profile]
+        if memories:
+            out += ["", "Notes retrieved for this message:"] + [f"- {m}" for m in memories]
+    if search:
+        out += ["", search]
+    return "\n".join(out)
 
 
 def stream_with_lifeboat(user_id, provider, messages, system, emit, lifeboat_fn=None) -> dict:
@@ -95,39 +129,168 @@ class GState(TypedDict, total=False):
     user_id: str
     conversation_id: str
     message: str
+    search: bool
+    tool_calls: list
     emit: Any
     provider: Any
-    context: list
+    history: list
+    summary: list
+    memories: list
+    profile: list
+    injected_ids: list
     answer: str
     model: str
     provider_name: str
     degraded: bool
     failed: bool
     message_id: str
+    persisted_message_id: str | None
 
 
-def retrieve_node(state: GState) -> dict:
+def context_node(state: GState) -> dict:
     caps = state["provider"].capabilities()
-    ctx = retriever.retrieve(state["user_id"], state["message"], caps.max_context_tokens)
-    return {"context": ctx}
+    prof_budget, mem_budget, hist_budget = budget.budgets(caps.max_context_tokens)
+
+    # Concurrent, not sequential: the history fetch is an HTTP round-trip and
+    # retrieve() is embed + three queries — both I/O- or torch-bound and both
+    # release the GIL, so latency is the slower of the two, not the sum. Putting
+    # the fetch first would serialize it behind the embed for no reason.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        h = pool.submit(history.fetch, state["conversation_id"], hist_budget, state["user_id"])
+        r = pool.submit(retriever.retrieve, state["user_id"], state["message"], mem_budget, prof_budget)
+        kept, dropped = h.result()
+        mem = r.result()
+
+    return {
+        "history": kept,
+        "summary": dropped,
+        "memories": mem["memories"],
+        "profile": mem["profile"],
+        "injected_ids": mem["injected_ids"],
+    }
+
+
+# ponytail: a keyword gate, and it is the WHOLE Tier 2 decision — there is no
+# model to ask, so guessing is all we have. Deliberately narrow: a miss costs an
+# ungrounded answer (today's behaviour), a false hit spends a query on someone
+# who never asked for one. Upgrade path: a cheap yes/no classify() on the
+# extractor credential if this proves too blunt to be useful.
+_TIER2_HINTS = (
+    "search", "look up", "google", "latest", "current", "today", "yesterday",
+    "this week", "recent", "news", "right now", "price of", "who won",
+    "what happened", "as of",
+)
+
+
+def _tier2_query(message: str) -> str:
+    """The fallback for a provider that structurally cannot tool-call (notably
+    anthropic+oauth: max_turns=1, allowed_tools=[]). The raw message IS the
+    query — a bad query, but it converges on the same injection point, so this
+    stays five lines instead of a second implementation."""
+    m = (message or "").strip()
+    if not m or len(m) > 300 or not any(h in m.lower() for h in _TIER2_HINTS):
+        return ""
+    return m
+
+
+def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
+    """ONE chat() call before streaming; returns (system-prompt block, tool_calls).
+
+    Tier 1 is a pre-flight, NOT a streaming tool loop, for three reasons:
+      - stream() is never touched. chat() already owns the _UNSUPPORTED probing
+        ladder and the BadRequestError retry, so a deployment that 400s on tools
+        demotes to Tier 2 for free.
+      - stream_with_lifeboat still runs EXACTLY ONCE per turn, so e2e.sh's
+        n_degraded==1 holds by construction, not by a guard someone can delete.
+        Never move this inside stream_with_lifeboat.
+      - no LLM call is nested in a tool handler; the handler is one httpx.get.
+        main.py drains a queue.Queue from a daemon thread — nesting deadlocks.
+
+    Never raises. Every failure here is non-fatal and lands the turn ungrounded
+    but HONEST, because the failure block tells the model the search failed.
+    """
+    if not state.get("search") or not search_tool.enabled():
+        return "", []  # no key, or the user did not ask: nothing leaves the box.
+
+    provider = state["provider"]
+    try:
+        native = provider.capabilities().native_tools
+    except Exception:
+        native = False  # the conservative floor, same as everywhere else.
+
+    if not native:
+        q = _tier2_query(state["message"])
+        return (search_tool.block(q, search_tool.search(q)) if q else ""), []
+
+    convo = list(messages)
+    for _ in range(_MAX_PREFLIGHT_ROUNDS):
+        try:
+            resp = provider.chat(convo, system=system, tools=[search_tool.WEB_SEARCH], max_tokens=512)
+        except Exception:
+            return "", []  # the model never asked to search; do not claim it failed.
+        call = next((c for c in (resp.tool_calls or []) if c.get("name") == search_tool.WEB_SEARCH["name"]), None)
+        if call is None:
+            return "", []  # the model declined — that is the tool working, not failing.
+        q = str((call.get("arguments") or {}).get("query") or "").strip()
+        if not q:
+            return "", []
+        # {name, arguments} only — the neutral shape conv-svc validates.
+        tool_calls = [{"name": call["name"], "arguments": {"query": q}}]
+        results = search_tool.search(q)
+        if results is None:
+            return search_tool.block(q, None), tool_calls  # failed: say so, do not retry.
+        if results:
+            return search_tool.block(q, results), tool_calls
+        # Zero hits: hand the miss back and let it refine ONCE. Plain role/content
+        # turns — every adapter reads those, and no provider tool-result shape has
+        # to be invented for the two adapters that disagree about it.
+        convo = convo + [
+            {"role": "assistant", "content": f'I searched the web for "{q}".'},
+            {
+                "role": "user",
+                "content": (
+                    "That search returned no results. Call web_search once more with a "
+                    "different query, or answer without it if searching will not help."
+                ),
+            },
+        ]
+    return search_tool.block(q, []), tool_calls
 
 
 def generate_node(state: GState) -> dict:
-    system = build_system(state.get("context") or [])
-    messages = [{"role": "user", "content": state["message"]}]
-    return stream_with_lifeboat(state["user_id"], state["provider"], messages, system, state["emit"])
+    profile, memories = state.get("profile") or [], state.get("memories") or []
+    # LUCKY ORDERING, stated because it breaks silently: run() calls context,
+    # generate, persist IN THAT ORDER, so at generate time the current message
+    # is not yet in conv-svc. history is exactly the prior turns and we append
+    # the current one ourselves — no double-count, no filtering. This breaks the
+    # day someone moves persist_node above generate_node.
+    messages = [*(state.get("history") or []), {"role": "user", "content": state["message"]}]
+    try:
+        block, tool_calls = _preflight(state, messages, build_system(profile, memories))
+    except Exception:
+        block, tool_calls = "", []  # a search problem may never break the turn.
+    out = stream_with_lifeboat(
+        state["user_id"], state["provider"], messages, build_system(profile, memories, block), state["emit"]
+    )
+    out["tool_calls"] = tool_calls
+    return out
 
 
-def _post_message(client, conversation_id, user_id, role, content):
+def _post_message(client, conversation_id, user_id, role, content, tool_calls=None):
     # user_id rides in the query, not the body: conv-svc's message body is
     # {role, content, tool_calls?} and rejects anything else. It authorizes the
     # write against the conversation's owner and 404s if they do not match, so a
     # conversation_id from the client cannot be used to write into someone
     # else's history. user_id originates from the gateway's verified JWT.
+    body = {"role": role, "content": content}
+    if tool_calls:
+        # Absent, not null, when there was no call: conv-svc validates the column
+        # and the shape is {name, arguments} only — no provider wire format.
+        body["tool_calls"] = tool_calls
     return client.post(
         f"{CONV_SVC_URL}/conversations/{conversation_id}/messages",
         params={"user_id": user_id},
-        json={"role": role, "content": content},
+        json=body,
     )
 
 
@@ -139,23 +302,27 @@ def persist_node(state: GState) -> dict:
         with httpx.Client(timeout=10.0) as client:
             uid = state["user_id"]
             _post_message(client, state["conversation_id"], uid, "user", state["message"])
-            r = _post_message(client, state["conversation_id"], uid, "assistant", state.get("answer", ""))
+            r = _post_message(
+                client, state["conversation_id"], uid, "assistant", state.get("answer", ""),
+                state.get("tool_calls"),
+            )
             if r.status_code < 300:
                 data = r.json()
                 mid = data.get("id") or data.get("message_id")
     except Exception:
         mid = None
-    # Fall back to a local id so the turn still completes if conv-svc is down.
-    return {"message_id": mid or str(uuid.uuid4())}
+    # Two ids, deliberately. message_id is client-facing and may be a locally
+    # minted uuid so the turn still completes when conv-svc is down.
+    # persisted_message_id is the REAL row or None: it is an FK
+    # (facts.source_message_id -> messages.id), and a fabricated uuid there
+    # violates it and loses the whole batch precisely when conv-svc is already
+    # down. None is a valid FK; a lie is not.
+    return {"message_id": mid or str(uuid.uuid4()), "persisted_message_id": mid}
 
 
-def remember_node(state: GState) -> dict:
+def done_node(state: GState) -> dict:
     if state.get("failed"):
         return {}
-    try:
-        retriever.remember(state["user_id"], [state["message"], state.get("answer", "")])
-    except Exception:
-        pass
     state["emit"](
         "done",
         {
@@ -167,13 +334,45 @@ def remember_node(state: GState) -> dict:
     return {}
 
 
-def run(state: dict) -> None:
-    """Run the four steps in order, merging each step's partial update back into
-    the shared state — the same last-value-wins channel behavior a StateGraph
-    gave us, minus the graph. Output is delivered via state["emit"], so the
-    return value is intentionally unused.
+def extract(state: GState) -> None:
+    """Post-stream work: touch the injected rows, then distil the exchange.
+
+    Called by main.py AFTER the SSE stream has closed — it is NOT a node. Never
+    raises: there is no reader left to receive an exception, and nothing above
+    it to catch one.
+
+    THE LIFEBOAT TRAP: on a degraded turn stream_with_lifeboat rewrote
+    model/provider_name but state["provider"] still points at the credential
+    that just 401'd, so reusing it here would fail on every degraded turn.
+    resolver.extractor() picks the credential that is allowed to do unasked-for
+    work — never the user's paid one.
     """
-    state.update(retrieve_node(state))
+    try:
+        # Off the critical path on purpose: retrieval is what the user waits on
+        # and it must not pay for a write.
+        retriever.touch(state["user_id"], state.get("injected_ids") or [])
+        if state.get("failed"):
+            return
+        provider = resolver.extractor(state["user_id"])
+        if provider is None:
+            return  # no credential may pay for this. Store nothing.
+        items = extractor_mod.extract(provider, state["message"], state.get("answer", ""))
+        mid = state.get("persisted_message_id")
+        retriever.write_facts(state["user_id"], [i for i in items if i["kind"] == "triple"], mid)
+        retriever.write_notes(state["user_id"], [i for i in items if i["kind"] == "note"], mid)
+    except Exception:
+        pass
+
+
+def run(state: dict) -> None:
+    """Run the steps in order, merging each step's partial update back into the
+    shared state — the same last-value-wins channel behavior a StateGraph gave
+    us, minus the graph. Output is delivered via state["emit"], so the return
+    value is intentionally unused.
+
+    Extraction is NOT here: it runs after main.py closes the stream.
+    """
+    state.update(context_node(state))
     state.update(generate_node(state))
     state.update(persist_node(state))
-    state.update(remember_node(state))
+    state.update(done_node(state))

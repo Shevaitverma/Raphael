@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -120,10 +121,15 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, out)
 }
 
-// GET /conversations/{id}/messages?user_id=
+// GET /conversations/{id}/messages?user_id=&limit=
 func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	convID := r.PathValue("id")
 	userID, err := queryUserID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	limit, err := queryLimit(r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -148,12 +154,26 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The N most recent messages, still oldest-first: take the tail with a DESC
+	// sort, then reverse it. LIMIT NULL is "no limit" in Postgres, so the
+	// unlimited case is the same statement with no extra branch.
+	//
+	// Both sorts tiebreak on id because created_at is not unique: now() is the
+	// TRANSACTION timestamp, so any two messages written in one transaction share
+	// it exactly. Without a tiebreak the tail and the reversal are free to
+	// disagree about which rows they picked. With it they agree — but see
+	// TestListMessagesLimitOrdering: id is a random uuid, so the order it settles
+	// on among tied rows is stable, NOT insertion order.
 	rows, err := s.db.Query(ctx,
-		`SELECT id, conversation_id, role, content, tool_calls, created_at
-		 FROM messages
-		 WHERE conversation_id = $1
-		 ORDER BY created_at ASC`,
-		convID,
+		`SELECT id, conversation_id, role, content, tool_calls, created_at FROM (
+		   SELECT id, conversation_id, role, content, tool_calls, created_at
+		   FROM messages
+		   WHERE conversation_id = $1
+		   ORDER BY created_at DESC, id DESC
+		   LIMIT $2
+		 ) tail
+		 ORDER BY created_at ASC, id ASC`,
+		convID, limit,
 	)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "could not list messages")
@@ -280,6 +300,27 @@ func queryUserID(r *http.Request) (string, error) {
 		return "", errors.New("user_id query parameter must appear exactly once")
 	}
 	return v[0], nil
+}
+
+// maxMessageLimit caps ?limit=. agent-svc wants the last handful of turns; a
+// client asking for more than this gets the cap, not the world.
+const maxMessageLimit = 500
+
+// queryLimit reads ?limit=N. Absent (or ?limit=) means nil => SQL LIMIT NULL =>
+// no limit: the whole conversation, exactly as before this parameter existed.
+// Present but not a positive integer is a client bug, not a default — silently
+// serving 500 messages to a caller who asked for "ten" is how a context window
+// blows up in production.
+func queryLimit(r *http.Request) (any, error) {
+	v := r.URL.Query().Get("limit")
+	if v == "" {
+		return nil, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return nil, errors.New("limit must be a positive integer")
+	}
+	return min(n, maxMessageLimit), nil
 }
 
 func decodeBody(r *http.Request, v any) error {

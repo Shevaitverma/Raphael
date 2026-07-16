@@ -16,8 +16,14 @@ browser → gateway → agent-svc → resolver → Ollama → streamed reply
 
 **In scope:** dev-mode auth, chat persistence, provider resolution, local in-process
 embeddings, pgvector retrieval, SSE streaming, the lifeboat error path.
-**Out of scope (stub or omit):** tools/tool-calling, background workers, subagents,
-branching beyond a linear pipeline.
+**Out of scope (stub or omit):** background workers, subagents, branching beyond a
+linear pipeline.
+
+**Tool-calling was out of scope and is no longer.** This document said "stub or omit"
+and web search reversed it: a grounded answer needs the model to choose the query, and
+that needs one tool call. Scoped narrowly — ONE pre-flight `chat()` call carrying one
+tool, then the normal stream. There is no streaming tool loop, `stream()` is untouched,
+and `stream_with_lifeboat()` is still called exactly once per turn.
 
 ## Layout — one directory per service. Never write outside yours.
 
@@ -57,10 +63,20 @@ to and from their vendor's shape; that shape never leaves the adapter.
 ## Capabilities
 
 ```json
-{ "max_context_tokens": 32768, "native_tools": true, "streaming": true, "json_schema": true }
+{ "max_context_tokens": 131072, "native_tools": true, "streaming": true, "json_schema": true }
 ```
 
-`qwen2.5:7b` → `native_tools: true`. `gemma3:12b` → `native_tools: false`.
+Illustrative, **not** a table to code against. This section used to pin a fixed window and
+a per-model tools flag; both were fiction, and asserting that table is the exact bug
+`test_capabilities.py` exists to stop.
+
+**Capability is a property of the MODEL, not the provider — never hardcode a table.**
+OpenRouter serves both 8k Llamas and 1M Geminis under one provider, so a per-provider
+constant is a lie by construction. Capabilities are DISCOVERED per model and under-claimed
+when unknown — over-claiming makes the server truncate in silence.
+`OLLAMA_NUM_CTX` is the calibration knob for the local served window; set it to the
+`num_ctx` your Ollama really runs.
+
 Memory retrieval budgets against `max_context_tokens` of the **active** provider, computed
 per request, never at boot.
 
@@ -75,7 +91,7 @@ per request, never at boot.
 | GET | `/api/conversations` | proxy → conv-svc, `user_id` from JWT |
 | POST | `/api/conversations` | proxy → conv-svc |
 | GET | `/api/conversations/:id/messages` | proxy → conv-svc |
-| POST | `/api/chat` | `{"conversation_id":"…","message":"…"}` → **SSE passthrough** from agent-svc |
+| POST | `/api/chat` | `{"conversation_id":"…","message":"…","search":false}` → **SSE passthrough** from agent-svc |
 | GET | `/api/providers` | proxy → user-svc. **Never returns a key.** |
 | POST | `/api/providers` | proxy → user-svc |
 
@@ -113,7 +129,9 @@ returned by a public route.
 ```
 src/
   main.py            FastAPI
-  graph/workflow.py  linear pipeline: retrieve → generate → persist → remember
+  graph/workflow.py  linear pipeline: context → generate → persist → done.
+                     Extraction is NOT a node: main.py calls extract() AFTER the
+                     SSE stream closes, so no SSE event can ever report it.
   llm/base.py        ChatProvider / EmbeddingProvider protocols + Capabilities
   llm/anthropic_api.py   anthropic SDK, messages.create
   llm/anthropic_cli.py   claude-agent-sdk via OAuth token, completion-only (native_tools: false)
@@ -123,18 +141,18 @@ src/
   memory/retriever.py    embed query → pgvector cosine top-k
 ```
 
-| method | path |
-|---|---|
-| GET | `/healthz` |
-| GET | `/capabilities?user_id=` |
-| POST | `/chat` `{user_id,conversation_id,message}` → SSE |
+| method | path | notes |
+|---|---|---|
+| GET | `/healthz` | |
+| GET | `/capabilities?user_id=` | discovered per model, plus `web_search` — a key is configured **and** the tool is wired |
+| POST | `/chat` `{user_id,conversation_id,message,search?}` | → SSE. `search` defaults to false; an absent field means no query ever leaves |
 
 **SSE events** (`text/event-stream`):
 
 ```
 event: token     data: {"text":"He"}
-event: degraded  data: {"reason":"credential rejected","provider":"local","model":"qwen2.5:7b"}
-event: done      data: {"provider":"local","model":"qwen2.5:7b","message_id":"…"}
+event: degraded  data: {"reason":"credential rejected","provider":"local","model":"qwen3.5:latest"}
+event: done      data: {"provider":"local","model":"qwen3.5:latest","message_id":"…"}
 event: error     data: {"message":"…"}
 ```
 
@@ -149,6 +167,48 @@ No active row → `409` with a message telling the user to add a key.
 `/internal/.../lifeboat`; if present, re-run on it, emit a `degraded` SSE event, and
 record the answering model. **Never** on `429`, `5xx`, timeout, or connection error —
 those propagate as an `error` event. The lifeboat never flips `is_active`.
+
+**Web search.** Default OFF: no `BRAVE_API_KEY` → the tool is never registered and the
+model is never told it could search. The search key is deployment config, **not** a
+`provider_credentials` row — it has no model, cannot stream, and must never be a
+lifeboat. Only a query string ever leaves the box; never the conversation, history,
+memories, or profile. Snippets only — no URL from a result is ever dereferenced, which
+is why there is no SSRF allowlist to get wrong.
+
+Two tiers, one injection point (a fenced block appended last by `build_system`, then a
+normal stream). Tier 1 = native tools: one pre-flight `chat()` picks the query. Tier 2 =
+no native tools (`anthropic+oauth` structurally, per `max_turns=1`): the toggle is the
+gate and the user's raw message is the query — more data leaving, which the toggle label
+says out loud. The tier is never announced; **both tiers ground and cite**, so a silent
+Tier 1 → Tier 2 demotion still yields a grounded, cited answer.
+
+**`degraded` is NOT used for search failure. Ever.** It means one thing — a dead
+credential fell back to the lifeboat — and search failure is not that. The chat brain is
+fine; a rejected *search* key (401) is not credential death, never touches `is_active`,
+and never fires the lifeboat. The pre-flight call emits **neither `degraded` nor
+`error`** — it can only add an in-band notice. That rule is what keeps `n_degraded == 1`
+on the lifeboat path and `n_error == 0` true by construction.
+
+| failure | Tier 1 | Tier 2 |
+|---|---|---|
+| no key | tool never registered; no notice, no egress | toggle disabled; no notice |
+| search 429/5xx/timeout | notice, ungrounded, no citations | notice, ungrounded |
+| zero results | notice, ungrounded | notice, ungrounded |
+| search key rejected (401) | log, disable for the process, notice. No `degraded` | same |
+| model declines the tool | no notice — it judged search unnecessary | n/a |
+| malformed tool call | one retry, then notice + ungrounded. Never fabricate a citation | n/a |
+| pre-flight hits a DEAD chat credential | skip search silently; the stream fires exactly one `degraded` as always | n/a |
+| pre-flight hits a TRANSIENT fault | skip search, notice, stream normally | n/a |
+
+The notice, verbatim, as ordinary `token` events: `(Live search was requested but
+unavailable — this answer is from training data and may be out of date.)`
+
+**Citations are in-band `token` events — no fifth SSE event.** After the stream returns,
+agent-svc appends a sources block built from the URLs it actually fetched and persists it
+with the answer, so **a citation URL cannot be fabricated**. Snippets never enter
+`content` (they live in the system prompt and die with the turn); only title + URL do.
+Sources present ⇔ real fetched sources. Notice present ⇔ search was wanted and did not
+happen. There is no third state where a hallucinated answer looks grounded.
 
 **Embeddings.** In-process only. `sentence-transformers` loading
 `nomic-ai/nomic-embed-text-v1.5`, 768 dims, CPU. Warm the model at startup, not on the
