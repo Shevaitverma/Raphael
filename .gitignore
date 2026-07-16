@@ -41,6 +41,9 @@ volumes/
 # editors / os
 .DS_Store
 Thumbs.db
+# Per-machine Claude Code settings (absolute paths). Shared config belongs
+# in .claude/settings.json; workflows in .claude/workflows/ are tracked.
+.claude/settings.local.json
 
 # runtime
 logs/
