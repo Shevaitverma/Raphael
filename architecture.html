@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Agentic AI Personal Assistant — System Architecture</title>
-<meta name="description" content="System architecture for an agentic AI personal assistant: Next.js client, Go API gateway, Python LangGraph agent tier, Postgres/pgvector memory, Redis workers.">
+<meta name="description" content="System architecture for an agentic AI personal assistant: Next.js client, Go API gateway, Python agent tier, Postgres/pgvector memory, Redis workers.">
 <style>
 /* ═══════════════════════════════════════════════════════════════
    TOKENS — dark is the base; light overrides below.
@@ -457,14 +457,14 @@ html{scroll-behavior:smooth}
   <h1>Agentic AI Personal Assistant</h1>
   <p class="lede">
     A Next.js client speaking to a Go API gateway, which fans out to Go domain services and a
-    Python LangGraph agent tier — with pgvector for long-term memory, Redis streams for background
+    Python agent tier — with pgvector for long-term memory, Redis streams for background
     work, and five external tool integrations. The brain is pluggable: Claude when you have a token,
     OpenRouter or a local Ollama model when you don't. Seven phases, three weeks to MVP.
   </p>
   <div class="headmeta">
     <span class="chip tier-client"><i class="dot"></i>Next.js · TypeScript</span>
     <span class="chip tier-gw"><i class="dot"></i>Go Fiber</span>
-    <span class="chip tier-py"><i class="dot"></i>FastAPI · LangGraph</span>
+    <span class="chip tier-py"><i class="dot"></i>FastAPI · in-process pipeline</span>
     <span class="chip tier-model"><i class="dot"></i>Claude · OpenRouter · Ollama</span>
     <span class="chip tier-data"><i class="dot"></i>Postgres · pgvector</span>
     <span class="chip tier-aws"><i class="dot"></i>AWS ECS · Terraform</span>
@@ -606,7 +606,7 @@ html{scroll-behavior:smooth}
       <g class="arch-node tier-py" tabindex="0" role="button"
          data-node="hero-n5"
          data-detail-title="Agent Orchestrator"
-         data-detail-body="Python service that owns agent execution.&#10;- Python 3.12&#10;- FastAPI&#10;- LangGraph&#10;- Pydantic AI&#10;- uv for dependency management">
+         data-detail-body="Python service that owns agent execution.&#10;- Python 3.12&#10;- FastAPI&#10;- Plain in-process pipeline (no graph framework)&#10;- uv for dependency management">
         <rect class="node-box" x="600" y="270" width="210" height="66" rx="10"/>
         <text class="node-title" x="705" y="298">Agent Orchestrator</text>
         <text class="node-sub"   x="705" y="317">Python · FastAPI</text>
@@ -614,10 +614,10 @@ html{scroll-behavior:smooth}
 
       <g class="arch-node tier-py" tabindex="0" role="button"
          data-node="hero-n6"
-         data-detail-title="LangGraph Engine"
-         data-detail-body="The one harness. It owns the agent loop: call the model, run the tool, feed the result back, repeat.&#10;- graph/workflow.py, graph/nodes.py&#10;- Planner and Executor never import a vendor SDK&#10;Claude's Tool Runner, Managed Agents and Agent SDK are not used - none of them accept a local model.">
+         data-detail-title="Agent Pipeline"
+         data-detail-body="The one harness, and it is ours: a plain in-process Python pipeline. No graph framework, no vendor loop.&#10;BUILT: `src/graph/workflow.py`, run() at line 163 calls four functions in order - retrieve, generate, persist, remember. A straight line.&#10;PLANNED: planner / executor / tool-selection branching. Today nothing branches and no tool runs.&#10;- Agent code never imports a vendor SDK; it calls the Model Router&#10;Claude's Tool Runner, Managed Agents and Agent SDK are not used - none of them accept a local model.">
         <rect class="node-box" x="600" y="400" width="210" height="66" rx="10"/>
-        <text class="node-title" x="705" y="428">LangGraph Engine</text>
+        <text class="node-title" x="705" y="428">Agent Pipeline</text>
         <text class="node-sub"   x="705" y="447">the one agent loop</text>
       </g>
 
@@ -642,7 +642,7 @@ html{scroll-behavior:smooth}
       <g class="arch-node tier-py" tabindex="0" role="button"
          data-node="hero-n8"
          data-detail-title="Tool Executor"
-         data-detail-body="Runs typed tool calls (name, description, parameters).&#10;- Gmail Agent&#10;- Google Calendar Agent&#10;- Google Drive Agent&#10;- Web Search Agent&#10;- GitHub Agent">
+         data-detail-body="Runs typed tool calls (name, description, parameters).&#10;- Gmail Agent&#10;- Google Calendar Agent&#10;- Google Drive Agent&#10;- Web Search Agent&#10;- GitHub Agent&#10;STATUS: the tool shape is defined and enforced end-to-end, but no code path populates it yet. `tools=None` on every provider signature (`src/llm/base.py:39`), every adapter ignores it, and every chat() returns `tool_calls=[]`. This executor is PLANNED.">
         <rect class="node-box" x="830" y="530" width="190" height="66" rx="10"/>
         <text class="node-title" x="925" y="558">Tool Executor</text>
         <text class="node-sub"   x="925" y="577">Typed tool calls</text>
@@ -712,7 +712,7 @@ html{scroll-behavior:smooth}
   <div class="stack-strip">
     <span class="chip tier-client">Next.js · TypeScript · Tailwind · shadcn/ui</span>
     <span class="chip tier-gw">Go API Gateway · Fiber / Gin</span>
-    <span class="chip tier-py">Python · FastAPI · LangGraph · Pydantic AI</span>
+    <span class="chip tier-py">Python · FastAPI · in-process pipeline</span>
     <span class="chip tier-model">Anthropic SDK + OpenAI SDK</span>
     <span class="chip tier-data"><i class="dot" style="background:var(--brand-postgres)"></i>PostgreSQL</span>
     <span class="chip tier-data"><i class="dot" style="background:var(--brand-pgvector)"></i>pgvector</span>
@@ -750,7 +750,7 @@ html{scroll-behavior:smooth}
       <g class="arch-node tier-client" tabindex="0" role="button"
          data-node="flow-n1"
          data-detail-title="User Request"
-         data-detail-body="The incoming user message that enters the agent service.&#10;- Handled by the FastAPI entrypoint `src/main.py`&#10;- Kicks off the LangGraph workflow state machine">
+         data-detail-body="The incoming user message that enters the agent service.&#10;- Handled by the FastAPI entrypoint `src/main.py`&#10;- Kicks off the pipeline via run() in `src/graph/workflow.py:163`">
         <rect class="node-box" x="20" y="90" width="150" height="66" rx="10"/>
         <circle class="node-idx-bg" cx="36" cy="106" r="13"/>
         <text class="node-idx" x="36" y="106">1</text>
@@ -761,7 +761,7 @@ html{scroll-behavior:smooth}
       <g class="arch-node tier-py" tabindex="0" role="button"
          data-node="flow-n2"
          data-detail-title="Planner Agent"
-         data-detail-body="Decomposes the request into a tool plan.&#10;- `src/agents/planner.py`&#10;- Runs inside the LangGraph state machine (`src/graph/workflow.py`)&#10;- Produces the sequence of tool steps to execute&#10;- Never imports a vendor SDK. It calls the Model Router.">
+         data-detail-body="PLANNED. Decomposes the request into a tool plan.&#10;- `src/agents/planner.py` does not exist yet&#10;- Will run inside the pipeline (`src/graph/workflow.py`), which today is a straight line with no planning step&#10;- Produces the sequence of tool steps to execute&#10;- Never imports a vendor SDK. It calls the Model Router.">
         <rect class="node-box" x="190" y="90" width="150" height="66" rx="10"/>
         <circle class="node-idx-bg" cx="206" cy="106" r="13"/>
         <text class="node-idx" x="206" y="106">2</text>
@@ -772,7 +772,7 @@ html{scroll-behavior:smooth}
       <g class="arch-node tier-py" tabindex="0" role="button"
          data-node="flow-n3"
          data-detail-title="Tool Selection"
-         data-detail-body="Chooses which tools to run from the Phase 5 tool registry.&#10;- Tool format: `{ name, description, parameters }`&#10;- Registry includes Gmail, Calendar, Drive, Web Search, GitHub agents">
+         data-detail-body="PLANNED. Chooses which tools to run from the Phase 5 tool registry.&#10;- Tool format: `{ name, description, parameters }`&#10;- Registry includes Gmail, Calendar, Drive, Web Search, GitHub agents&#10;- Nothing selects tools today: every provider call passes `tools=None` (`src/llm/base.py:39`)">
         <rect class="node-box" x="360" y="90" width="150" height="66" rx="10"/>
         <circle class="node-idx-bg" cx="376" cy="106" r="13"/>
         <text class="node-idx" x="376" y="106">3</text>
@@ -783,7 +783,7 @@ html{scroll-behavior:smooth}
       <g class="arch-node tier-py" tabindex="0" role="button"
          data-node="flow-n4"
          data-detail-title="Executor Agent"
-         data-detail-body="Invokes the selected tools and collects their results.&#10;- `src/agents/executor.py`&#10;- Calls tools under `src/tools/` (gmail, calendar, browser)&#10;- Returns results back into the workflow graph&#10;- Never imports a vendor SDK. It calls the Model Router.">
+         data-detail-body="PLANNED. Invokes the selected tools and collects their results.&#10;- `src/agents/executor.py` does not exist yet&#10;- Will call tools under `src/tools/` (gmail, calendar, browser)&#10;- Returns results back into the pipeline&#10;- Never imports a vendor SDK. It calls the Model Router.">
         <rect class="node-box" x="530" y="90" width="150" height="66" rx="10"/>
         <circle class="node-idx-bg" cx="546" cy="106" r="13"/>
         <text class="node-idx" x="546" y="106">4</text>
@@ -805,7 +805,7 @@ html{scroll-behavior:smooth}
       <g class="arch-node tier-client" tabindex="0" role="button"
          data-node="flow-n6"
          data-detail-title="Response"
-         data-detail-body="The final answer streamed back to the user.&#10;- Returned through the API gateway to the Next.js client&#10;- Completes one pass of the LangGraph workflow">
+         data-detail-body="The final answer streamed back to the user.&#10;- Returned through the API gateway to the Next.js client&#10;- Completes one pass of the pipeline">
         <rect class="node-box" x="870" y="90" width="150" height="66" rx="10"/>
         <circle class="node-idx-bg" cx="886" cy="106" r="13"/>
         <text class="node-idx" x="886" y="106">6</text>
@@ -847,16 +847,17 @@ src/
  &#9474;    &#9492;&#9472;&#9472; embeddings.py
  &#9474;
  &#9492;&#9472;&#9472; config/</pre>
+      <p class="note">The target tree. <strong>Built today</strong>, verified against <span class="mono">agent-svc/src</span>: <span class="mono">config.py</span>, <span class="mono">main.py</span>, <span class="mono">graph/workflow.py</span>, <span class="mono">llm/</span> (all six adapters), <span class="mono">memory/retriever.py</span>. <strong>Planned, not present:</strong> <span class="mono">agents/planner.py</span>, <span class="mono">agents/executor.py</span>, <span class="mono">tools/</span>, <span class="mono">graph/nodes.py</span>, <span class="mono">memory/embeddings.py</span> — the encoder lives in <span class="mono">llm/embeddings.py</span> instead.</p>
     </div>
     <div class="card">
       <h3>Stack</h3>
       <div class="chip-wrap">
         <span class="chip tier-py">Python 3.12</span>
         <span class="chip tier-py">FastAPI</span>
-        <span class="chip tier-py">LangGraph</span>
-        <span class="chip tier-py">Pydantic AI</span>
+        <span class="chip tier-py">httpx</span>
         <span class="chip tier-py">uv</span>
       </div>
+      <p class="note">No graph or agent framework. The loop is ours: <span class="mono">run()</span> in <span class="mono">src/graph/workflow.py:163</span> calls retrieve → generate → persist → remember in order. LangGraph was dropped — the pipeline is a straight line, so it did not earn a dependency.</p>
     </div>
   </div>
 </section>
@@ -995,7 +996,7 @@ src/
   -->
   <div class="diagram-scroll">
     <svg class="arch-svg" viewBox="0 0 1040 430" preserveAspectRatio="xMidYMid meet" role="img"
-         aria-label="Model resolution: LangGraph Engine to Resolver. Chat splits by auth_type into the Anthropic API adapter (api_key) and the Anthropic CLI adapter (oauth), both reaching Claude, plus the OpenAI-compat adapter reaching OpenRouter and Ollama. Local Embeddings run in-process and are always available.">
+         aria-label="Model resolution: Agent Pipeline to Resolver. Chat splits by auth_type into the Anthropic API adapter (api_key) and the Anthropic CLI adapter (oauth), both reaching Claude, plus the OpenAI-compat adapter reaching OpenRouter and Ollama. Local Embeddings run in-process and are always available.">
 
       <!-- edges -->
       <path class="arch-edge" data-from="model-n1" data-to="model-n2" d="M155 96 L155 170"/>
@@ -1008,13 +1009,13 @@ src/
       <path class="arch-edge" data-from="model-n4" data-to="model-n7" d="M580 243 L650 243 L650 233 L720 233"/>
       <path class="arch-edge" data-from="model-n4" data-to="model-n8" d="M580 243 L650 243 L650 343 L720 343"/>
 
-      <!-- n1 LangGraph Engine -->
+      <!-- n1 Agent Pipeline -->
       <g class="arch-node tier-py" tabindex="0" role="button"
          data-node="model-n1"
-         data-detail-title="LangGraph Engine"
-         data-detail-body="The agent loop that owns tool calling.&#10;- Asks the layer for a completion&#10;- Never imports a vendor SDK&#10;- Runs identically on Claude, OpenRouter, or Ollama">
+         data-detail-title="Agent Pipeline"
+         data-detail-body="Our own in-process loop - `src/graph/workflow.py`, run() at line 163.&#10;- Asks the layer for a completion&#10;- Never imports a vendor SDK&#10;- Runs identically on Claude, OpenRouter, or Ollama&#10;PLANNED: tool calling. It is designed for but does not yet own a tool loop - `tools=None` on every call.">
         <rect class="node-box" x="60" y="30" width="190" height="66" rx="10"/>
-        <text class="node-title" x="155" y="58">LangGraph Engine</text>
+        <text class="node-title" x="155" y="58">Agent Pipeline</text>
         <text class="node-sub"   x="155" y="77">needs a completion</text>
       </g>
 
@@ -1110,7 +1111,7 @@ src/
     <h3>Claude can never embed — whatever token you hold.</h3>
     <p>The Messages API is the whole surface. There is no <span class="mono">/v1/embeddings</span>, and no token — <span class="mono">api_key</span> or <span class="mono">oauth</span> — changes that.</p>
     <p>We do not solve this with a provider. We solve it <strong>by not needing one.</strong> Embeddings run in-process: <span class="mono">sentence-transformers</span> loading <span class="mono">nomic-ai/nomic-embed-text-v1.5</span>, 768 dims, CPU, no network, no key, no failure mode. Memory works for every user regardless of chat provider. Cost: roughly 200MB of CPU-only torch in the image — cheaper than a second credential, a second failure mode, and a Settings screen explaining why memory silently stopped.</p>
-    <cite>Not a guess. <span class="mono">ai.metastart.friday</span> does exactly this today — <span class="mono">stealth/embeddings.py</span>, <span class="mono">nomic-embed-text-v1.5</span>, 768 dims, into pgvector on pg17, with the comment "no API calls, no cost, ~20ms per text on CPU".</cite>
+    <cite>Not a guess. A production single-tenant assistant does exactly this today — <span class="mono">nomic-embed-text-v1.5</span>, 768 dims, into pgvector on pg17, with the comment "no API calls, no cost, ~20ms per text on CPU".</cite>
   </div>
 
   <div class="card">
@@ -1129,7 +1130,7 @@ src/
         <p class="warn-429">Raw Messages-API calls with this token are throttled: <strong>Opus and Sonnet return 429</strong>, only Haiku slips through.</p>
       </div>
     </div>
-    <p class="note">Evidence, from <span class="mono">ai.metastart.friday/stealth/llm_direct.py</span>: "the subscription CLAUDE_CODE_OAUTH_TOKEN gets full model access through the claude-agent-sdk / CLI door … whereas raw Messages-API calls with that token are throttled on the big models — Opus/Sonnet return 429, only Haiku slips through."</p>
+    <p class="note">Evidence, from a production single-tenant assistant: "the subscription CLAUDE_CODE_OAUTH_TOKEN gets full model access through the claude-agent-sdk / CLI door … whereas raw Messages-API calls with that token are throttled on the big models — Opus/Sonnet return 429, only Haiku slips through."</p>
   </div>
 
   <div class="card">
@@ -1177,6 +1178,7 @@ src/
 
 EmbeddingProvider
   embed(texts)            -> vectors</pre>
+      <p class="note"><strong>The tool layer is defined and enforced end-to-end, but no code path populates it yet.</strong> The <span class="mono">tools</span> parameter defaults to <span class="mono">None</span> on every provider signature (<span class="mono">src/llm/base.py:39</span>, <span class="mono">:41</span>) and every adapter ignores it (<span class="mono">anthropic_api.py:72</span>, <span class="mono">anthropic_cli.py:116</span>, <span class="mono">openai_compat.py:47</span>); <span class="mono">ChatResponse.tool_calls</span> exists (<span class="mono">base.py:30</span>) and every <span class="mono">chat()</span> hardcodes <span class="mono">tool_calls=[]</span> (<span class="mono">anthropic_api.py:80</span>, <span class="mono">anthropic_cli.py:145</span>, <span class="mono">openai_compat.py:58</span>). The translation is real — <span class="mono">neutral_from_anthropic()</span> (<span class="mono">anthropic_api.py:18-37</span>) turns Anthropic <span class="mono">tool_use</span> blocks into our <span class="mono">{name, arguments}</span> shape and strips <span class="mono">toolu_</span> ids — it is simply never called with tools. The design is sound; it does not run.</p>
       <div class="tbl-scroll">
         <table class="adp">
           <thead>
@@ -1230,8 +1232,9 @@ EmbeddingProvider
   </div>
 
   <div class="decision">
-    <p>None of them accept an Ollama or OpenRouter endpoint — there is no <span class="mono">base_url</span> that makes them talk to a local model. LangGraph is also a harness, and two harnesses cannot both own the loop.</p>
-    <span class="verdict">Decision: LangGraph owns the loop. Claude is a provider.</span>
+    <p>None of them accept an Ollama or OpenRouter endpoint — there is no <span class="mono">base_url</span> that makes them talk to a local model. Any harness we adopt would want to own the loop, and two harnesses cannot both own it.</p>
+    <span class="verdict">Decision: our own loop owns the loop. Claude is a provider.</span>
+    <p class="note">Originally this said LangGraph. It no longer does — the pipeline turned out to be a straight line, so the framework earned nothing and was dropped. The loop is now a plain in-process Python pipeline, <span class="mono">run()</span> in <span class="mono">src/graph/workflow.py:163</span>, calling retrieve → generate → persist → remember in order. The architectural point is unchanged and is the whole reason for it: the harness is <strong>ours</strong>, so it is vendor-neutral.</p>
     <div class="grid-2 cols">
       <div>
         <h4>What this costs</h4>
@@ -1250,13 +1253,13 @@ EmbeddingProvider
       </div>
     </div>
     <div class="prior-art">
-      <h4>Prior art — ai.metastart.friday</h4>
+      <h4>Prior art</h4>
       <p>A real system runs the Claude Agent SDK as its harness and gets, for free, everything we now build ourselves in <span class="mono">graph/nodes.py</span>: built-in Read / Write / Edit / Bash / Glob / Grep / WebSearch tools, subagents, MCP servers (an in-process one holding 155 tools), a permission gate (<span class="mono">can_use_tool</span> &rarr; allow / deny), and native session resume across restarts. It is Claude-only and single-tenant — its chat brain cannot be swapped and it needs the <span class="mono">claude</span> CLI in the image running as non-root. That is exactly why the SDK is right there and wrong here: same SDK, different answer, because the requirements differ.</p>
     </div>
     <p class="note">Revisit only if the local-model path is ever dropped.</p>
   </div>
 
-  <p class="note">Per-user tokens: pass the key explicitly — <span class="mono">anthropic.Anthropic(api_key=cred.api_key)</span>. Never let the SDK fall back to the process environment in a multi-user service; an unset <span class="mono">ANTHROPIC_API_KEY</span> does not mean no credentials — the SDK also reads <span class="mono">ANTHROPIC_AUTH_TOKEN</span> and an on-disk auth profile, so one user's request can silently bill the host's key. friday gets away with mutating one process-global <span class="mono">CLAUDE_CODE_OAUTH_TOKEN</span> in <span class="mono">os.environ</span> — fine single-tenant, fatal multi-user.</p>
+  <p class="note">Per-user tokens: pass the key explicitly — <span class="mono">anthropic.Anthropic(api_key=cred.api_key)</span>. Never let the SDK fall back to the process environment in a multi-user service; an unset <span class="mono">ANTHROPIC_API_KEY</span> does not mean no credentials — the SDK also reads <span class="mono">ANTHROPIC_AUTH_TOKEN</span> and an on-disk auth profile, so one user's request can silently bill the host's key. The reference implementation gets away with mutating one process-global <span class="mono">CLAUDE_CODE_OAUTH_TOKEN</span> in <span class="mono">os.environ</span> — fine single-tenant, fatal multi-user.</p>
 </section>
 <section id="portab" class="arch-section">
   <style>
@@ -1370,8 +1373,8 @@ EmbeddingProvider
         </tr>
         <tr>
           <td class="v v-go">Portable</td>
-          <td>The LangGraph graph itself</td>
-          <td>It is our code, not the provider's.</td>
+          <td>The agent pipeline itself</td>
+          <td>It is our code, not a framework's and not the provider's.</td>
         </tr>
         <tr>
           <td class="v v-not">Not portable</td>
@@ -1398,6 +1401,11 @@ EmbeddingProvider
   </div>
 
   <ol class="rules">
+    <li><b>Every feature ships on all three provider paths.</b> A feature is not done until it works
+      properly on <span class="mono">local</span> (Ollama), <span class="mono">openai_compat</span>
+      (OpenRouter) and <span class="mono">anthropic</span> (Claude). Not identical behaviour — each
+      feature declares the capability tier it needs and the fallback it takes when a path cannot meet
+      it, and it degrades <b>visibly</b>, never silently. "Claude-only" is not a shipping state.</li>
     <li><b>Never persist a provider's wire format.</b> The wire format lives inside the adapter and
       dies there.</li>
     <li><b>The encoder ships with the app.</b> If embeddings came from OpenRouter, an unpaid bill
@@ -1539,7 +1547,7 @@ except (AuthenticationError, PermissionDeniedError, InsufficientCredits):
       <g class="arch-node tier-py" tabindex="0" role="button"
          data-node="mem-n5"
          data-detail-title="Agent Context"
-         data-detail-body="Retrieved memories injected into the agent's prompt.&#10;- Phase 5 flow end: Semantic Retrieval → Agent Context&#10;- Grounds LangGraph agent responses&#10;- Fills the model's prompt window">
+         data-detail-body="Retrieved memories injected into the agent's prompt.&#10;- Phase 5 flow end: Semantic Retrieval → Agent Context&#10;- Grounds the agent's responses&#10;- Fills the model's prompt window&#10;TODAY: retrieved memories are the ONLY context. Conversation history is not read back into the prompt - `src/graph/workflow.py:117` sends the current message alone.">
         <rect class="node-box" x="840" y="80" width="180" height="66" rx="10"/>
         <text class="node-title" x="930" y="108">Agent Context</text>
         <text class="node-sub"   x="930" y="127">prompt window</text>
@@ -1573,6 +1581,38 @@ except (AuthenticationError, PermissionDeniedError, InsufficientCredits):
       </ul>
       <p class="note"><span class="mono">embedding</span> is <span class="mono">vector(768)</span> for <span class="mono">nomic-embed-text-v1.5</span>. The dimension is fixed by the model, so changing models means altering the column and re-embedding every row. Embeddings: <span class="mono">src/llm/embeddings.py</span> · retrieval: <span class="mono">src/memory/retriever.py</span>.</p>
     </div>
+  </div>
+
+  <div class="card" style="margin-top:var(--sp-4);border-left:3px solid var(--data-accent)">
+    <h3>As built today — four gaps between that picture and the code</h3>
+    <ul>
+      <li><strong>There is no short-term memory.</strong> Only the current message reaches the model:
+        <span class="mono">src/graph/workflow.py:117</span> builds
+        <span class="mono">messages = [{"role": "user", "content": state["message"]}]</span>. History
+        <em>is</em> persisted to conv-svc (<span class="mono">persist_node</span>,
+        <span class="mono">workflow.py:128-142</span>) but is never read back into the prompt. Ask
+        "what did I just say?" today and it fails. The diagram above is the long-term half; the
+        short-term half does not exist yet.</li>
+      <li><strong>It stores raw transcript turns, not facts.</strong>
+        <span class="mono">remember()</span> (<span class="mono">src/memory/retriever.py:55</span>)
+        embeds the user message and the answer verbatim — called from
+        <span class="mono">workflow.py:149</span> with
+        <span class="mono">[state["message"], state.get("answer","")]</span>. No extraction, no
+        dedup, no decay, no importance, no expiry: the table grows unbounded.</li>
+      <li><strong>There is no relevance threshold.</strong>
+        <span class="mono">retrieve(..., k: int = 5)</span>
+        (<span class="mono">retriever.py:23</span>) runs
+        <span class="mono">ORDER BY embedding &lt;=&gt; %s::vector LIMIT %s</span> with no distance
+        cutoff, so it always fills top-5 — a barely-related row is injected to the model as
+        relevant memory. The only trim is a token budget
+        (<span class="mono">retriever.py:44-52</span>).</li>
+      <li><strong>The nomic task prefixes are missing.</strong>
+        <span class="mono">nomic-ai/nomic-embed-text-v1.5</span>
+        (<span class="mono">src/llm/embeddings.py:3</span>) is trained with
+        <span class="mono">search_document:</span> / <span class="mono">search_query:</span> task
+        prefixes. Neither string appears in <span class="mono">embeddings.py</span> or
+        <span class="mono">retriever.py</span>. Omitting them measurably degrades retrieval quality.</li>
+    </ul>
   </div>
 </section>
 <section id="work" class="arch-section">
@@ -1790,6 +1830,16 @@ except (AuthenticationError, PermissionDeniedError, InsufficientCredits):
     <span class="mono">conversations</span> + <span class="mono">messages</span> — Conversation Service (Go) ·
     <span class="mono">memories</span> — Memory Engine (Python), whose <span class="mono">embedding</span> column is the pgvector vector and whose <span class="mono">embedding_model</span> records the encoder that produced it.
     In <span class="mono">provider_credentials</span>, <span class="mono">api_key_enc</span> is encrypted at rest and never returned by the API, and exactly one active row is allowed per user. At most one row is allowed per <span class="mono">(user_id, provider)</span>, so an inactive <span class="mono">local</span> row can sit alongside an active Claude one and serve as the lifeboat.
+  </p>
+  <p class="note">
+    <strong><span class="mono">messages.tool_calls</span> is defined and enforced end-to-end, but no code path populates it yet.</strong>
+    The column exists (<span class="mono">db/001_init.sql:33</span>, <span class="mono">jsonb</span>, documented as our neutral shape) and
+    <span class="mono">conv-svc/toolcalls.go</span> is a complete neutral-shape validator
+    (<span class="mono">validateToolCalls</span>, <span class="mono">toolcalls.go:21</span>) with a passing test at
+    <span class="mono">conv-svc/server_test.go:263</span>. It has never been written to:
+    <span class="mono">persist_node</span> posts only <span class="mono">{role, content}</span>
+    (<span class="mono">agent-svc/src/graph/workflow.py:121-125</span>). The contract is real and holds the day a tool call
+    arrives — nothing produces one yet.
   </p>
 </section>
 <section id="infra" class="arch-section">
@@ -2186,8 +2236,8 @@ except (AuthenticationError, PermissionDeniedError, InsufficientCredits):
       </div>
       <ul class="phase-items">
         <li>Python 3.12 + FastAPI agent service</li>
-        <li>LangGraph workflow with Pydantic AI tools</li>
-        <li>Planner &amp; Executor agents, managed with uv</li>
+        <li>In-process pipeline: retrieve → generate → persist → remember</li>
+        <li>Planner &amp; Executor agents (planned — the pipeline is a straight line today)</li>
       </ul>
     </li>
     <li class="phase-card tier-model">
@@ -2245,11 +2295,11 @@ except (AuthenticationError, PermissionDeniedError, InsufficientCredits):
     <p class="harness-lead">A harness is the agent loop: call the model, run the tool it asked for, feed the result back, repeat.</p>
     <ul class="harness-list">
       <li>Anthropic ships three harnesses &mdash; Tool Runner, Managed Agents, and the Claude Agent SDK &mdash; and all three are Claude only. None accept an Ollama or OpenRouter endpoint.</li>
-      <li>LangGraph is also a harness. Two harnesses cannot both own the loop.</li>
-      <li>A real system, <span class="mono">ai.metastart.friday</span>, runs the Claude Agent SDK and gets built-in tools, subagents, MCP servers, a permission gate, and session resume for free &mdash; work we now do ourselves.</li>
+      <li>Any harness we adopt would also want to own the loop, and two harnesses cannot both own it. We wrote our own instead — <span class="mono">run()</span> in <span class="mono">src/graph/workflow.py:163</span>. (LangGraph was tried and dropped: a straight-line pipeline does not need a graph framework.)</li>
+      <li>A real production system runs the Claude Agent SDK and gets built-in tools, subagents, MCP servers, a permission gate, and session resume for free &mdash; work we now do ourselves.</li>
       <li>It is Claude-only and single-tenant, which is why the SDK is right there and wrong here.</li>
     </ul>
-    <span class="harness-decision">Decision: LangGraph owns the loop; Claude is a provider.</span>
+    <span class="harness-decision">Decision: our own in-process loop owns the loop; Claude is a provider.</span>
     <div class="harness-cols">
       <div>
         <p class="block-label">What it costs</p>
@@ -2311,7 +2361,7 @@ except (AuthenticationError, PermissionDeniedError, InsufficientCredits):
         <span class="week-marker">2</span>
         <h3>Week 2</h3>
         <ul class="week-items">
-          <li>LangGraph workflows</li>
+          <li>Agent pipeline</li>
           <li>Model Router + resolver</li>
           <li>provider_credentials + settings UI</li>
           <li>Local embeddings (sentence-transformers)</li>
@@ -2393,7 +2443,7 @@ except (AuthenticationError, PermissionDeniedError, InsufficientCredits):
   </style>
 
   <div class="sec-head">
-    <h2>Cross-check — ai.metastart.friday</h2>
+    <h2>Cross-check — a production single-tenant assistant</h2>
     <p class="sec-sub">
       A working Claude system was read against this plan. It confirmed two decisions, corrected two,
       and made the cost of a third concrete.
@@ -2405,42 +2455,36 @@ except (AuthenticationError, PermissionDeniedError, InsufficientCredits):
       <h4>Harness</h4>
       <p>The <strong>Claude Agent SDK</strong>. A streaming <span class="mono">ClaudeSDKClient</span>
       spawns a local <span class="mono">claude</span> CLI subprocess; the tool loop runs in-process.
-      No manual loop, no Tool Runner, no Managed Agents.
-      <span class="src">stealth/session.py:3778, :3785, :4876</span></p>
+      No manual loop, no Tool Runner, no Managed Agents.</p>
     </div>
     <div class="fact">
       <h4>Credential</h4>
       <p>One process-global <span class="mono">CLAUDE_CODE_OAUTH_TOKEN</span>, mutated in
       <span class="mono">os.environ</span> by a token manager, with a secondary failover slot.
-      Never passed to a constructor.
-      <span class="src">stealth/config.py:81 · stealth/_token_manager.py:86</span></p>
+      Never passed to a constructor.</p>
     </div>
     <div class="fact">
       <h4>Embeddings</h4>
       <p><strong>In-process.</strong> <span class="mono">sentence_transformers</span> loading
       <span class="mono">nomic-embed-text-v1.5</span>, 768 dims, CPU, into pgvector on pg17.
-      Its own comment: “no API calls, no cost, ~20ms per text on CPU”.
-      <span class="src">stealth/embeddings.py · docker-compose.yml:102</span></p>
+      Its own comment: “no API calls, no cost, ~20ms per text on CPU”.</p>
     </div>
     <div class="fact">
       <h4>Tools</h4>
       <p>SDK built-ins plus an in-process MCP server holding <strong>155 custom tools</strong>,
       external MCP servers, subagents from markdown, and a permission gate returning
-      Allow/Deny per tool call.
-      <span class="src">stealth/session.py:3417, :5257 · stealth/agents.py:125</span></p>
+      Allow/Deny per tool call.</p>
     </div>
     <div class="fact">
       <h4>Deployment</h4>
       <p>The <span class="mono">claude</span> CLI binary ships in the image
       (<span class="mono">npm install -g @anthropic-ai/claude-code</span>) and the container runs
-      as a non-root user, because the CLI refuses root.
-      <span class="src">Dockerfile:28, :101</span></p>
+      as a non-root user, because the CLI refuses root.</p>
     </div>
     <div class="fact">
       <h4>Other providers</h4>
       <p>None for chat. OpenRouter appears, but only for <strong>image generation</strong>. The
-      reasoning brain is Claude and cannot be swapped.
-      <span class="src">stealth/image_gen.py:28</span></p>
+      reasoning brain is Claude and cannot be swapped.</p>
     </div>
   </div>
 
@@ -2449,13 +2493,13 @@ except (AuthenticationError, PermissionDeniedError, InsufficientCredits):
     the claude-agent-sdk / CLI door (the same path the chat agent uses), whereas raw Messages-API
     calls with that token are throttled on the big models — Opus/Sonnet return 429, only Haiku
     slips through.
-    <cite>ai.metastart.friday/stealth/llm_direct.py:1-12</cite>
+    <cite>From the reference implementation's direct-LLM module.</cite>
   </blockquote>
 
   <div class="tablewrap">
     <table>
       <thead>
-        <tr><th>This plan said</th><th>Friday does</th><th>Verdict</th></tr>
+        <tr><th>This plan said</th><th>Reference implementation</th><th>Verdict</th></tr>
       </thead>
       <tbody>
         <tr>
@@ -2479,7 +2523,7 @@ except (AuthenticationError, PermissionDeniedError, InsufficientCredits):
           <td class="v v-fix">Corrected</td>
         </tr>
         <tr>
-          <td>LangGraph owns the agent loop</td>
+          <td>Our own in-process loop owns the agent loop</td>
           <td>The Claude Agent SDK owns it</td>
           <td class="v v-div">Diverged</td>
         </tr>
@@ -2498,16 +2542,16 @@ except (AuthenticationError, PermissionDeniedError, InsufficientCredits):
   </div>
 
   <p class="note verdict" style="margin-bottom:var(--sp-6)">
-    The divergences are deliberate, not accidental. Friday is single-tenant and Claude-only, so the
-    Agent SDK and a global token are right there. This system is multi-user and brain-agnostic, so
-    they are wrong here. Same SDK, opposite answer, because the requirements differ. What Friday
-    gets free — built-in tools, subagents, MCP servers, a permission gate, session resume — is work
-    this plan signs up for in <span class="mono">graph/nodes.py</span>.
+    The divergences are deliberate, not accidental. The reference implementation is single-tenant and
+    Claude-only, so the Agent SDK and a global token are right there. This system is multi-user and
+    brain-agnostic, so they are wrong here. Same SDK, opposite answer, because the requirements differ.
+    What it gets free — built-in tools, subagents, MCP servers, a permission gate, session resume — is
+    work this plan signs up for in <span class="mono">graph/nodes.py</span>.
   </p>
 
-  <h3 style="font-size:1.0625rem;font-weight:600;margin-bottom:var(--sp-4)">Findings in Friday</h3>
+  <h3 style="font-size:1.0625rem;font-weight:600;margin-bottom:var(--sp-4)">Findings in the reference implementation</h3>
   <p class="note" style="margin-bottom:var(--sp-4)">
-    All but the last are in <span class="mono">stealth/ocr.py</span>, the one place that calls the raw
+    All but the last are in its OCR module, the one place that calls the raw
     Anthropic API. Nothing here affects this plan; it surfaced during the read.
   </p>
 

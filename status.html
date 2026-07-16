@@ -139,13 +139,14 @@ footer{max-width:76rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
     <a href="#phases">Phases</a>
     <a href="#roadmap">Roadmap</a>
     <a href="#gaps">Not built</a>
+    <a href="#issues">Known issues</a>
     <a href="#log">Verified</a>
   </nav>
   <button id="theme" type="button" aria-label="Toggle theme">◐</button>
 </div>
 
 <header class="hero">
-  <div class="eyebrow">Development Status · 2026-07-09</div>
+  <div class="eyebrow">Development Status · 2026-07-17</div>
   <h1>What&rsquo;s built, tested, and running</h1>
   <p class="lede">
     A brain-agnostic, memory-backed chat assistant runs end to end today — five services, provider
@@ -155,16 +156,18 @@ footer{max-width:76rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
   </p>
   <div class="meta">
     <span class="chip"><i class="dot" style="color:var(--accent)"></i>Milestone: walking skeleton</span>
-    <span class="chip"><i class="dot" style="color:var(--done)"></i>7 commits</span>
-    <span class="chip"><i class="dot" style="color:var(--accent2)"></i>55 unit tests + e2e</span>
-    <span class="chip"><i class="dot" style="color:var(--data)"></i>latest: gateway CORS fix</span>
+    <span class="chip"><i class="dot" style="color:var(--done)"></i>14 commits</span>
+    <span class="chip"><i class="dot" style="color:var(--accent2)"></i>53 unit tests + e2e</span>
+    <span class="chip"><i class="dot" style="color:var(--data)"></i>latest: local runbook (<span class="mono">423f8be</span>)</span>
   </div>
 </header>
 
 <div class="banner"><div class="inner">
   Milestone scope: this is a <b>walking skeleton</b> — one real request path through every seam. Tools,
   background workers, real OAuth login, and cloud infra are described in the plan but not built yet
-  (see <a href="#gaps" style="color:inherit;text-decoration:underline">Not built yet</a>).
+  (see <a href="#gaps" style="color:inherit;text-decoration:underline">Not built yet</a>). Some seams
+  that <em>do</em> exist are hollow or broken — those are listed under
+  <a href="#issues" style="color:inherit;text-decoration:underline">Known issues</a>, not hidden.
 </div></div>
 
 <!-- NOW -->
@@ -210,13 +213,16 @@ footer{max-width:76rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
           <td>Encrypted provider credentials; shared-secret internal key routes; lifeboat designation</td>
           <td class="mono">9</td><td><span class="pill done">Done</span></td></tr>
         <tr><td>conv-svc</td><td class="mono">8082</td><td>Go</td>
-          <td>Conversations + messages; rejects any non-neutral <span class="mono">tool_calls</span> on write</td>
-          <td class="mono">14</td><td><span class="pill done">Done</span></td></tr>
-        <tr><td>agent-svc</td><td class="mono">8000</td><td>Python · FastAPI · LangGraph</td>
-          <td>Resolver, 4 adapters, in-process embeddings, retrieve→generate→persist→remember, SSE + lifeboat</td>
+          <td>Conversations + messages; rejects any non-neutral <span class="mono">tool_calls</span> on write
+          (validator is real but nothing writes that column yet — see <a href="#issues">Known issues</a>)</td>
+          <td class="mono">12</td><td><span class="pill done">Done</span></td></tr>
+        <tr><td>agent-svc</td><td class="mono">8000</td><td>Python · FastAPI</td>
+          <td>Resolver, 4 adapters, in-process embeddings, retrieve→generate→persist→remember as a plain
+          function call chain (<span class="mono">graph/workflow.py:163</span>), SSE + lifeboat</td>
           <td class="mono">18</td><td><span class="pill done">Done</span></td></tr>
         <tr><td>web</td><td class="mono">3000</td><td>Next.js · TS · Tailwind</td>
-          <td>Chat SPA (JWT in memory), degraded banner, Settings tab with lifeboat designation</td>
+          <td>Chat SPA (JWT in memory), degraded banner, Settings tab with lifeboat designation.
+          A flat-theme restyle is in the working tree, uncommitted</td>
           <td class="mono">7</td><td><span class="pill done">Done</span></td></tr>
       </tbody>
     </table>
@@ -228,8 +234,8 @@ footer{max-width:76rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
   <h2>Tests &amp; verification</h2>
   <p class="sub">Unit suites plus an 8-stage end-to-end acceptance run — driven and observed, not trusted from reports.</p>
   <div class="cards">
-    <div class="card"><div class="big">55</div><div class="note">unit tests: gateway 7 · user-svc 9 · conv-svc 14 · agent-svc 18 · web 7</div></div>
-    <div class="card"><div class="big">8 / 8</div><div class="note">e2e stages: chat streams, memory row, lifeboat on real 401, silent on 429, no wire-format in DB</div></div>
+    <div class="card"><div class="big">53</div><div class="note">unit tests: gateway 7 · user-svc 9 · conv-svc 12 · agent-svc 18 · web 7 — counted from a run at <span class="mono">423f8be</span></div></div>
+    <div class="card"><div class="big">8 / 8</div><div class="note">e2e stages: chat streams, memory row, lifeboat on real 401, silent on 429. Stage 5&rsquo;s <span class="mono">tool_calls</span> half is vacuous — <a href="#issues">see below</a></div></div>
     <div class="card"><div class="big">6 / 6</div><div class="note">lifeboat-designation flow verified through the gateway against containers</div></div>
     <div class="card"><div class="big">2×</div><div class="note">adversarial audit lenses that returned <em>claim_holds:false</em> — both fixed</div></div>
   </div>
@@ -279,7 +285,8 @@ footer{max-width:76rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
   </div>
   <div class="two" style="margin-top:16px">
     <div class="card accent"><h3>Clean-room run</h3><p>Fresh volumes, all images built from source, Postgres+pgvector, Redis, Ollama + one-shot model pull, all five services on one network. Every service came up healthy; gateway reports all deps ok. The 4.7&nbsp;GB <span class="mono">qwen2.5:7b</span> pull is the only slow first-boot step.</p></div>
-    <div class="card"><h3>Config &amp; secrets</h3><p>Secrets live in <span class="mono">.env</span> (gitignored), never baked into images: <span class="mono">CREDENTIAL_ENC_KEY</span>, <span class="mono">INTERNAL_TOKEN</span>, <span class="mono">JWT_SECRET</span>. Overrides: <span class="mono">verify</span> (host infra) and <span class="mono">cleanroom</span> (ollama port).</p></div>
+    <div class="card"><h3>Config &amp; secrets</h3><p>Secrets live in <span class="mono">.env</span> (gitignored), never baked into images: <span class="mono">CREDENTIAL_ENC_KEY</span>, <span class="mono">INTERNAL_TOKEN</span>, <span class="mono">JWT_SECRET</span>. The <span class="mono">verify</span> / <span class="mono">cleanroom</span> override files are gone —
+    <span class="mono">docker-compose.yml</span> is now the single compose file (<span class="mono">bd7d42e</span>, <span class="mono">f014210</span>).</p></div>
   </div>
 </section>
 
@@ -293,12 +300,12 @@ footer{max-width:76rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
       <tbody>
         <tr><td>1 · Core Platform</td><td><span class="pill partial">Partial</span></td><td>Gateway + dev-login + chat SPA exist; no auth pages, no OpenTelemetry/WebSocket (chat is SSE)</td></tr>
         <tr><td>2 · Backend Services</td><td><span class="pill done">Done</span></td><td>user-svc + conv-svc with tests; full users/conversations/messages schema</td></tr>
-        <tr><td>3 · Agent System</td><td><span class="pill partial">Partial</span></td><td>Linear LangGraph (retrieve→generate→persist→remember); no planner/executor/tool loop</td></tr>
+        <tr><td>3 · Agent System</td><td><span class="pill partial">Partial</span></td><td>Linear 4-step pipeline (retrieve→generate→persist→remember), plain Python since <span class="mono">595db74</span>; no planner/executor/tool loop</td></tr>
         <tr><td>4 · Model Provider Layer</td><td><span class="pill done">Done</span></td><td>All 4 adapters real; resolver + lifeboat + capabilities; the most complete phase</td></tr>
-        <tr><td>5 · Memory System</td><td><span class="pill done">Done</span></td><td>Local embed + pgvector cosine top-k, budgeted; <span class="mono">memories</span> + HNSW index</td></tr>
+        <tr><td>5 · Memory System</td><td><span class="pill partial">Partial</span></td><td>Local embed + pgvector cosine top-k, budgeted; <span class="mono">memories</span> + HNSW index. Downgraded from Done: no short-term memory, raw turns not facts, no relevance floor, no nomic task prefixes — <a href="#issues">Known issues</a></td></tr>
         <tr><td>6 · Tools</td><td><span class="pill todo">Not started</span></td><td>No <span class="mono">tools/</span> dir; wire-format plumbing exists but nothing populates or executes tools</td></tr>
         <tr><td>7 · Background Workers</td><td><span class="pill todo">Not started</span></td><td>No worker service, no Redis Streams consumer</td></tr>
-        <tr><td>Harness Decision</td><td><span class="pill done">Done</span></td><td>LangGraph owns the loop; Claude is a provider — honored in code</td></tr>
+        <tr><td>Harness Decision</td><td><span class="pill done">Done</span></td><td>The loop is ours and vendor-neutral; Claude is just a provider — honored in code. LangGraph was dropped at <span class="mono">595db74</span>: a straight line needed no graph engine</td></tr>
         <tr><td>Provider Independence</td><td><span class="pill partial">Partial</span></td><td>Neutral persistence, in-process encoder, capability branching all real; Rule 5 (CI vs Ollama) absent — no <span class="mono">.github/</span></td></tr>
         <tr><td>Infrastructure</td><td><span class="pill partial">Partial</span></td><td>All Dockerfiles + full compose; AWS/Terraform/CI-CD described but not built</td></tr>
       </tbody>
@@ -318,7 +325,7 @@ footer{max-width:76rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
         <li><span class="pill done">Done</span> <b>Go Gateway</b></li>
         <li><span class="pill partial">Partial</span> <b>Authentication</b> — dev-login only</li>
         <li><span class="pill done">Done</span> <b>Chat Service</b></li>
-        <li><span class="pill partial">Partial</span> <b>Basic Agent</b> — linear graph, no tools</li>
+        <li><span class="pill partial">Partial</span> <b>Basic Agent</b> — linear pipeline, no tools</li>
         <li><span class="pill done">Done</span> <b>Claude provider</b></li>
         <li><span class="pill done">Done</span> <b>Ollama provider</b></li>
       </ul>
@@ -326,11 +333,11 @@ footer{max-width:76rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
     <div class="card">
       <h3>Week 2 &nbsp;<span class="pill done" style="vertical-align:middle">mostly done</span></h3>
       <ul class="list" style="margin-top:10px">
-        <li><span class="pill partial">Partial</span> <b>LangGraph workflows</b> — one linear graph</li>
+        <li><span class="pill partial">Partial</span> <b>Agent workflow</b> — one linear pipeline, no graph engine</li>
         <li><span class="pill done">Done</span> <b>Model Router + resolver</b></li>
         <li><span class="pill done">Done</span> <b>provider_credentials + settings UI</b></li>
         <li><span class="pill done">Done</span> <b>Local embeddings</b></li>
-        <li><span class="pill done">Done</span> <b>Memory service</b></li>
+        <li><span class="pill partial">Partial</span> <b>Memory service</b> — stores &amp; retrieves; hollow spots in <a href="#issues">Known issues</a></li>
         <li><span class="pill done">Done</span> <b>pgvector</b></li>
         <li><span class="pill todo">Todo</span> <b>Gmail integration</b></li>
       </ul>
@@ -362,12 +369,42 @@ footer{max-width:76rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
   <h2>Not built yet</h2>
   <p class="sub">Described in the plan, no code today. Being explicit so the status isn&rsquo;t read as more finished than it is.</p>
   <ul class="list gaps">
-    <li><b>Tools &amp; integrations</b><span class="why">No <span class="mono">tools/</span> directory. Gmail, Calendar, Drive, Web Search, GitHub — zero implementation. The neutral tool-call plumbing exists; the graph never passes tools.</span></li>
+    <li><b>Tools &amp; integrations</b><span class="why">No <span class="mono">tools/</span> directory. Gmail, Calendar, Drive, Web Search, GitHub — zero implementation. The neutral tool-call plumbing exists; the pipeline never passes tools.</span></li>
     <li><b>Background workers</b><span class="why">No worker service, no Redis Streams consumer. Email monitoring / scheduled tasks / daily summaries absent.</span></li>
     <li><b>Real OAuth login</b><span class="why">Only <span class="mono">POST /auth/dev-login</span> gated by <span class="mono">DEV_AUTH_ENABLED</span>. No identity provider, no Google OAuth connections.</span></li>
-    <li><b>Planner / executor / tool loop</b><span class="why">The graph is a fixed 4-node line; no capability-based branching or subagents.</span></li>
+    <li><b>Planner / executor / tool loop</b><span class="why">The pipeline is a fixed 4-step line; no capability-based branching or subagents.</span></li>
     <li><b>Monitoring &amp; CI/CD</b><span class="why">No OpenTelemetry/metrics beyond <span class="mono">/healthz</span> &amp; <span class="mono">/readyz</span>; no <span class="mono">.github/</span> workflow, so &ldquo;CI runs the suite against Ollama&rdquo; is not yet true.</span></li>
     <li><b>Cloud infrastructure</b><span class="why">No Terraform, no ECS task defs. The full compose is the only deployment artifact; AWS is described, not provisioned.</span></li>
+  </ul>
+
+  <h3 style="font-size:1.05rem;font-weight:640;margin:28px 0 4px">In design</h3>
+  <p class="sub" style="margin-bottom:14px">Being designed right now. <b>None of this is written</b> — no code, no schema, no
+  branch. Listed so the direction is legible, not so it reads as progress.</p>
+  <ul class="list gaps">
+    <li><span class="pill todo">Proposed</span> <b style="margin-left:6px">Memory-layer overhaul</b><span class="why">Typed facts with confidence/importance; a knowledge graph as a triples table; LLM extraction from ordinary chat; decay, reinforcement, consolidation; hybrid FTS+vector retrieval fused with RRF. Aimed at the memory gaps listed under Known issues.</span></li>
+    <li><span class="pill todo">Proposed</span> <b style="margin-left:6px">Vendor-neutral tool-calling loop</b><span class="why">Would activate the plumbing that already exists but is dead today. Estimated ~1.5 days.</span></li>
+    <li><span class="pill todo">Proposed</span> <b style="margin-left:6px">Fitness feature</b><span class="why"><span class="mono">fitness_events</span> (JSONB) + <span class="mono">fitness_goals</span>, roughly 3 tools, coach-context computed on read. Estimated ~4 days total, including the tool loop it depends on.</span></li>
+    <li><span class="pill todo">Proposed</span> <b style="margin-left:6px">Standing constraint: every feature works on all three provider paths</b><span class="why">A requirement from the user, not a claim about code. <span class="mono">local</span> (Ollama), <span class="mono">openai_compat</span> (OpenRouter), <span class="mono">anthropic</span> (Claude). Not identical behavior — each feature declares a capability tier and a stated fallback, and degrades visibly rather than silently. The durable version lives in <a href="architecture.html">architecture.html</a>.</span></li>
+  </ul>
+</section>
+
+<!-- ISSUES -->
+<section id="issues">
+  <h2>Known issues</h2>
+  <p class="sub">Different from &ldquo;not built&rdquo;: these seams <em>exist</em> and are broken, hollow, or lying.
+  Verified against source at <span class="mono">423f8be</span>. All unfixed.</p>
+  <ul class="list gaps">
+    <li><b>No short-term memory</b><span class="why">Only the current message reaches the model — <span class="mono">graph/workflow.py:117</span> builds <span class="mono">messages = [{"role": "user", "content": state["message"]}]</span> and nothing else. History <em>is</em> persisted to conv-svc (<span class="mono">workflow.py:128-142</span>) but is never read back into the prompt. &ldquo;What did I just say?&rdquo; fails.</span></li>
+    <li><b>The tool-calling layer is ~60% built and completely dead</b><span class="why">Every signature takes <span class="mono">tools=None</span> (<span class="mono">llm/base.py:39,41</span>) and every adapter ignores it (<span class="mono">anthropic_api.py:72,85</span> · <span class="mono">anthropic_cli.py:116,135</span> · <span class="mono">openai_compat.py:47,62</span>). <span class="mono">ChatResponse.tool_calls</span> exists (<span class="mono">base.py:30</span>) and every <span class="mono">chat()</span> hardcodes <span class="mono">tool_calls=[]</span> (<span class="mono">anthropic_api.py:80</span> · <span class="mono">anthropic_cli.py:145</span> · <span class="mono">openai_compat.py:58</span>). The real translator <span class="mono">neutral_from_anthropic()</span> (<span class="mono">anthropic_api.py:18-37</span>) does strip <span class="mono">toolu_</span> ids correctly, but no tools are ever sent, so no tool_use ever comes back. <span class="mono">conv-svc/toolcalls.go</span> is a complete 52-line validator with a passing test — guarding a column that has never been written.</span></li>
+    <li><b>e2e stage 5 is half a vacuous test</b><span class="why"><span class="mono">scripts/e2e.sh:94-97</span>. The first clause — scanning <span class="mono">content</span> for <span class="mono">toolu_</span>/<span class="mono">call_</span>/<span class="mono">"thinking"</span>/<span class="mono">cache_control</span> — is meaningful and does real work. The second clause scans <span class="mono">messages.tool_calls</span> (<span class="mono">db/001_init.sql:33</span>), a column that is always NULL because <span class="mono">persist_node</span> posts only <span class="mono">{role, content}</span> (<span class="mono">workflow.py:121-125</span>). That half has never had a chance to fail.</span></li>
+    <li><b>Memory stores raw transcript turns, not facts</b><span class="why"><span class="mono">memory/retriever.py:55</span> <span class="mono">remember()</span> embeds the user message and the answer verbatim (called from <span class="mono">workflow.py:149</span>). No extraction, no dedup, no decay, no importance, no expiry — the table grows unbounded.</span></li>
+    <li><b>Missing nomic task prefixes</b><span class="why">The encoder is <span class="mono">nomic-embed-text-v1.5</span> (<span class="mono">llm/embeddings.py:3</span>), trained with <span class="mono">search_document:</span> / <span class="mono">search_query:</span> prefixes. Neither string appears anywhere in <span class="mono">embeddings.py</span> or <span class="mono">retriever.py</span>. Omitting both measurably degrades retrieval.</span></li>
+    <li><b>No relevance threshold on retrieval</b><span class="why"><span class="mono">retriever.py:23</span> <span class="mono">retrieve(..., k: int = 5)</span> runs <span class="mono">ORDER BY embedding &lt;=&gt; %s::vector LIMIT %s</span> with no distance cutoff, so it always fills top-5 — a barely-related row still gets injected under a &ldquo;Relevant memories about the user&rdquo; framing. Only a token budget trims it (<span class="mono">retriever.py:44-52</span>).</span></li>
+    <li><b>Fresh clone fatals on a missing internal token</b><span class="why"><span class="mono">INTERNAL_TOKEN=</span> is empty in <span class="mono">.env.example:35</span> and never auto-generated — user-svc fatals on first boot.</span></li>
+    <li><b>Dormant: gateway injects a field conv-svc rejects</b><span class="why"><span class="mono">gateway/proxy.go:88-96</span> injects <span class="mono">user_id</span> into any JSON write body, including <span class="mono">POST /conversations/:id/messages</span>, but <span class="mono">conv-svc/handlers.go:252</span> sets <span class="mono">dec.DisallowUnknownFields()</span> — that route would 400. Dormant only because nothing exercises it.</span></li>
+    <li><b>Dead config vars</b><span class="why">Never read: <span class="mono">WEB_PORT</span> (<span class="mono">.env.example:13</span>), <span class="mono">OLLAMA_MODEL</span> (<span class="mono">:44</span>), <span class="mono">SEED_ANTHROPIC_API_KEY</span> / <span class="mono">SEED_OPENROUTER_API_KEY</span> (<span class="mono">:52-53</span>).</span></li>
+    <li><b>A migration comment that lies</b><span class="why"><span class="mono">db/002_lifeboat.sql:18</span> reads &ldquo;STATUS: staged, NOT YET APPLIED&rdquo;. False: <span class="mono">docker-compose.yml:19</span> mounts <span class="mono">./db:/docker-entrypoint-initdb.d:ro</span>, so all of <span class="mono">db/</span> including 002 is applied automatically on a fresh Postgres init. Still true at <span class="mono">423f8be</span>; corrected to &ldquo;STATUS: applied&rdquo; in the working tree, uncommitted.</span></li>
+    <li><b><span class="mono">make test</span> breaks off Windows</b><span class="why"><span class="mono">Makefile:38</span> hardcodes <span class="mono">.venv/Scripts/python.exe</span>. Still true at <span class="mono">423f8be</span>; a fallback fix exists in the working tree, uncommitted.</span></li>
   </ul>
 </section>
 
@@ -376,6 +413,10 @@ footer{max-width:76rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
   <h2>Recently verified &amp; fixed</h2>
   <p class="sub">Each ran and was observed, not assumed.</p>
   <div class="log">
+    <div class="row"><span class="ok">✓</span><span class="txt"><b>Local runbook</b> — <span class="mono">docs/RUNNING.md</span> added; compiled Go binaries gitignored. <span class="src">423f8be</span></span></div>
+    <div class="row"><span class="ok">✓</span><span class="txt"><b>Scripts run on macOS</b> — <span class="mono">dev.sh</span>/<span class="mono">e2e.sh</span> resolve <span class="mono">python3 || python</span> and fall back to <span class="mono">npx -y pnpm</span>. Previously <span class="mono">dev.sh</span> silently skipped the agent-svc venv and never started web on a stock Mac. <span class="src">0262aff</span></span></div>
+    <div class="row"><span class="ok">✓</span><span class="txt"><b>One compose file</b> — the <span class="mono">verify</span>/<span class="mono">cleanroom</span> overrides folded into <span class="mono">docker-compose.yml</span>; unused env vars dropped. <span class="src">bd7d42e</span> <span class="src">f014210</span></span></div>
+    <div class="row"><span class="ok">✓</span><span class="txt"><b>LangGraph dropped</b> — the pipeline was already a straight line, so the graph engine was ceremony. <span class="mono">workflow.py:163</span> is now a plain <span class="mono">run(state)</span> calling four functions in order; zero <span class="mono">langgraph</span> matches left in source. <span class="src">595db74</span></span></div>
     <div class="row"><span class="ok">✓</span><span class="txt"><b>Dev-login CORS</b> — browser preflight was 405; added gateway CORS, now 204 with the right headers. <span class="src">51742c1</span></span></div>
     <div class="row"><span class="ok">✓</span><span class="txt"><b>Lifeboat designation UI</b> — Settings tab set/clear fallback; 6/6 through the gateway; active-as-fallback → 409. <span class="src">c309f3f</span></span></div>
     <div class="row"><span class="ok">✓</span><span class="txt"><b>Dockerized</b> — 5 images build; full stack driven end-to-end in containers. <span class="src">6c78fec</span></span></div>
@@ -387,8 +428,10 @@ footer{max-width:76rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
 </section>
 
 <footer>
-  Snapshot generated 2026-07-09 from a read-only audit of the repository. Facts (endpoints, tests,
-  constraints, image sizes) were verified against source, not recalled. Companion documents:
+  Snapshot generated 2026-07-17 from a read-only audit of the repository at <span class="mono">423f8be</span>.
+  Facts (endpoints, tests, constraints) were verified against source, not recalled; test counts come from an
+  actual run. Image sizes are carried over from the 2026-07-09 snapshot and were <em>not</em> re-measured.
+  Working-tree changes are marked as such where mentioned. Companion documents:
   <a href="plan.md">plan.md</a> (design) · <a href="architecture.html">architecture.html</a> (system diagrams).
 </footer>
 

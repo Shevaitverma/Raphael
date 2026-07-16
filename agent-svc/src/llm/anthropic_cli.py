@@ -11,9 +11,9 @@ path, by design (plan.md: "if we ever have to cut scope, cut oauth").
 
 Multi-user safety: the token is handed to the CLI subprocess via
 ClaudeAgentOptions(env=...), NEVER written into os.environ. A process-global
-token — what a single-tenant app like ai.metastart.friday uses — would let one
-user's request run under another user's credential. This is the one rule that
-makes an OAuth path safe in a multi-user service.
+token — the norm in single-tenant assistants — would let one user's request run
+under another user's credential. This is the one rule that makes an OAuth path
+safe in a multi-user service.
 
 Deployment: needs the `claude` CLI binary + Node in the image. The slim
 production agent-svc image OMITS claude-agent-sdk (see Dockerfile vs

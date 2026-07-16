@@ -16,9 +16,8 @@ browser → gateway → agent-svc → resolver → Ollama → streamed reply
 
 **In scope:** dev-mode auth, chat persistence, provider resolution, local in-process
 embeddings, pgvector retrieval, SSE streaming, the lifeboat error path.
-**Out of scope (stub or omit):** real OAuth, tools/tool-calling, background workers,
-subagents, LangGraph branching beyond a linear graph, the `anthropic_cli` adapter body
-(define it, raise `NotImplementedError`).
+**Out of scope (stub or omit):** tools/tool-calling, background workers, subagents,
+branching beyond a linear pipeline.
 
 ## Layout — one directory per service. Never write outside yours.
 
@@ -26,9 +25,9 @@ subagents, LangGraph branching beyond a linear graph, the `anthropic_cli` adapte
 gateway/    Go 1.24+  :8080   Fiber, JWT, rate limit, SSE passthrough
 user-svc/   Go 1.24+  :8081   users + provider_credentials (owns the secrets)
 conv-svc/   Go 1.24+  :8082   conversations + messages
-agent-svc/  Python    :8000   FastAPI, LangGraph, llm/ adapters, memory
+agent-svc/  Python    :8000   FastAPI, llm/ adapters, memory
 web/        Next.js   :3000   chat UI
-db/         (exists)          001_init.sql — already applied. Do not edit.
+db/         (exists)          001_init.sql, 002_lifeboat.sql — already applied. Do not edit.
 ```
 
 ## Environment
@@ -81,6 +80,7 @@ per request, never at boot.
 | POST | `/api/providers` | proxy → user-svc |
 
 Rate limit 60 req/min/user via Redis. Never call `/internal/*` on user-svc from a public route.
+CORS allow-list from `CORS_ORIGINS` (comma-separated, default `http://localhost:3000`).
 
 ## user-svc/  (Go, :8081) — owns the secrets
 
@@ -94,7 +94,7 @@ returned by a public route.
 | POST | `/users/{uid}/credentials` | `{provider,auth_type,api_key?,base_url?,model_id,activate}` |
 | POST | `/users/{uid}/credentials/{id}/activate` | flips `is_active`; DB enforces one active |
 | GET | `/internal/users/{uid}/credential/active` | **internal only** → `{provider,auth_type,api_key,base_url,model_id}` decrypted |
-| GET | `/internal/users/{uid}/credential/lifeboat` | the user's `provider='local'` row, or `204` |
+| GET | `/internal/users/{uid}/credential/lifeboat` | the row flagged `is_lifeboat` (and not active), or `204` |
 
 `auth_type='oauth'` is only valid with `provider='anthropic'` (the DB rejects otherwise).
 
@@ -113,10 +113,10 @@ returned by a public route.
 ```
 src/
   main.py            FastAPI
-  graph/workflow.py  linear LangGraph: retrieve → generate → persist → remember
+  graph/workflow.py  linear pipeline: retrieve → generate → persist → remember
   llm/base.py        ChatProvider / EmbeddingProvider protocols + Capabilities
   llm/anthropic_api.py   anthropic SDK, messages.create
-  llm/anthropic_cli.py   define, raise NotImplementedError (out of scope)
+  llm/anthropic_cli.py   claude-agent-sdk via OAuth token, completion-only (native_tools: false)
   llm/openai_compat.py   openai SDK, base_url → Ollama or OpenRouter
   llm/embeddings.py      sentence-transformers, in-process, 768d
   llm/resolver.py        chat(user) / embed() / lifeboat(user)

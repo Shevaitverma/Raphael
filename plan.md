@@ -253,7 +253,7 @@ What this buys:
 Revisit only if the local-model path is ever dropped.
 
 
-Prior art - ai.metastart.friday
+Prior art - a production single-tenant assistant
 
 That codebase runs the Claude Agent SDK as its harness. It is the road we did
 not take, and it is worth being honest about what it gives you for free that we
@@ -268,7 +268,7 @@ now have to build:
 
 Every one of those is real work we are signing up for in graph/nodes.py.
 
-What it costs friday, and what we avoid:
+What it costs that design, and what we avoid:
 
 - Claude only. There is no Ollama, no OpenRouter, no local model. Their chat
   brain cannot be swapped.
@@ -277,11 +277,11 @@ What it costs friday, and what we avoid:
 - One process-global token, mutated in os.environ by a token manager. Fine for
   a single-tenant deployment. Fatal for ours - see the note below.
 
-friday is single-tenant and Claude-only by design, so the Agent SDK is the
+That design is single-tenant and Claude-only by intent, so the Agent SDK is the
 right call there. We are multi-user and brain-agnostic, so it is the wrong call
 here. Same SDK, different answer, because the requirements differ.
 
-Two things from friday we are copying outright:
+Two things from the reference implementation we are copying outright:
 - Local in-process embeddings. Phase 5.
 - MCP as the tool interface, if we can consume it from LangGraph. Worth a
   spike before we hand-roll 155 tool definitions a second time.
@@ -368,9 +368,9 @@ Cost: roughly 200MB of CPU-only torch in the image, and the model weights.
 Worth it. The alternative was a second credential, a second failure mode, and a
 Settings screen explaining why memory silently stopped working.
 
-This is not a guess. ai.metastart.friday does exactly this today -
-stealth/embeddings.py, nomic-embed-text-v1.5, 768 dims, into pgvector on pg17,
-with the comment "no API calls, no cost, ~20ms per text on CPU".
+This is not a guess. A production single-tenant assistant does exactly this
+today - nomic-embed-text-v1.5, 768 dims, into pgvector on pg17, with the
+comment "no API calls, no cost, ~20ms per text on CPU".
 
 
 Do not point the anthropic SDK's base_url at Ollama. That parameter expects an
@@ -389,7 +389,7 @@ oauth      CLAUDE_CODE_OAUTH_TOKEN, a Claude Code subscription token.
            return 429, only Haiku gets through. Full model access requires
            going through the claude-agent-sdk / CLI door.
 
-Evidence, from ai.metastart.friday/stealth/llm_direct.py:
+Evidence from a production single-tenant assistant:
 
   the subscription CLAUDE_CODE_OAUTH_TOKEN gets full model access through the
   claude-agent-sdk / CLI door (the same path the chat agent uses), whereas raw
@@ -401,7 +401,7 @@ Caveat on the OAuth adapter. Read this before choosing it.
 
 claude-agent-sdk is a harness. We only want a completion. So anthropic_cli.py
 uses query() with tools disabled and max_turns=1 and pulls the text out - the
-same trick friday uses in llm_direct.call_json. That works, but:
+same trick that implementation uses. That works, but:
 
 - It is completion-only. It does not give LangGraph native tool_use blocks.
   Tool calling on this path means prompting for JSON and parsing it, which is
@@ -409,7 +409,7 @@ same trick friday uses in llm_direct.call_json. That works, but:
 - It spawns a `claude` CLI subprocess per call. Latency and process overhead.
 - It needs the CLI binary in the image: npm install -g @anthropic-ai/claude-code,
   plus Node. The CLI refuses to run as root, so the container needs a non-root
-  user. friday's Dockerfile does all three.
+  user. The reference implementation's Dockerfile does all three.
 
 So: api_key is the supported path. oauth is a convenience for people who
 already pay for Claude Code and accept degraded tool calling.

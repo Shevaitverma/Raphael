@@ -11,8 +11,8 @@ browser → gateway → agent-svc → resolver → Ollama → streamed reply
 
 Dev-mode auth, chat persistence, per-user provider resolution, in-process
 768-dim embeddings, pgvector retrieval, SSE streaming, and the **lifeboat**
-error path (a dead paid credential degrades to the local model; a transient 429
-does not).
+error path (a dead paid credential degrades to the designated fallback
+credential; a transient 429 does not).
 
 ## Services & ports
 
@@ -21,7 +21,7 @@ does not).
 | gateway    | Go / Fiber       | 8080 | JWT, rate limit, SSE passthrough |
 | user-svc   | Go               | 8081 | users + provider_credentials (owns the secrets) |
 | conv-svc   | Go               | 8082 | conversations + messages (vendor-neutral) |
-| agent-svc  | Python / FastAPI | 8000 | LangGraph, resolver, embeddings, memory |
+| agent-svc  | Python / FastAPI | 8000 | pipeline, resolver, embeddings, memory |
 | web        | Next.js          | 3000 | chat UI |
 | postgres   | pgvector/pg17    | 5433 | **5433, not 5432** |
 | redis      | redis:7          | 6379 | rate-limit counters |
@@ -56,7 +56,7 @@ There is **one** compose file. `docker compose up` starts the whole stack;
 naming a subset (`postgres redis`) starts just those. If your host already runs
 Ollama on 11434, set `OLLAMA_HOST_PORT=11435` in `.env`.
 
-The schema (`db/001_init.sql`) is applied on first container start and seeds the
+The schema (`db/*.sql`) is applied on first container start and seeds the
 dev user `00000000-0000-0000-0000-000000000001` with an **active local Ollama
 credential**, so the system runs with no paid keys.
 
@@ -123,9 +123,9 @@ at rest and never returned by any public route.
 ## The lifeboat (the contract that matters)
 
 - Active credential **dead** — 401 auth, 403 permission/billing, 402 — the
-  request falls back to the user's local model, streams a `degraded` SSE event,
-  writes the turn under the model that actually answered, and **never** flips
-  `is_active`.
+  request falls back to the credential flagged `is_lifeboat` (local Ollama on a
+  laptop, OpenRouter in the cloud), streams a `degraded` SSE event, writes the
+  turn under the model that actually answered, and **never** flips `is_active`.
 - Active credential hit a **transient** fault — 429, 5xx, timeout, connection —
   the request surfaces an `error` event. No silent downgrade.
 

@@ -15,8 +15,7 @@
 --
 -- resolver.lifeboat(user) no longer looks for provider='local'. It reads this flag.
 
--- STATUS: staged, NOT YET APPLIED. Applied after the walking-skeleton workflow
--- lands, together with the resolver and user-svc changes that read it.
+-- STATUS: applied, together with the resolver and user-svc changes that read it.
 
 ALTER TABLE provider_credentials
     ADD COLUMN IF NOT EXISTS is_lifeboat boolean NOT NULL DEFAULT false;
