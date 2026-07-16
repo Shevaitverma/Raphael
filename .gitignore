@@ -29,6 +29,9 @@ out/
 /gateway/bin/
 /user-svc/bin/
 /conv-svc/bin/
+/gateway/gateway
+/user-svc/user-svc
+/conv-svc/conv-svc
 *.exe
 
 # data
