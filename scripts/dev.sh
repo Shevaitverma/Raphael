@@ -33,34 +33,38 @@ export DATABASE_URL REDIS_URL JWT_SECRET DEV_AUTH_ENABLED
 export GATEWAY_PORT USER_SVC_PORT CONV_SVC_PORT AGENT_SVC_PORT
 export USER_SVC_URL CONV_SVC_URL AGENT_SVC_URL OLLAMA_BASE_URL
 
-# Credential key must be stable across restarts (it decrypts stored keys).
-# It goes in .env, which is gitignored. Never a sidecar file in the tree:
-# a filename like scripts/.dev_enc_key is one `git add -A` away from
-# committing the master key for every user's provider credentials.
-if [ -z "${CREDENTIAL_ENC_KEY:-}" ]; then
-  [ -f "$ROOT/.env" ] || cp "$ROOT/.env.example" "$ROOT/.env"
-  if ! grep -q '^CREDENTIAL_ENC_KEY=.\+' "$ROOT/.env"; then
-    echo "generating CREDENTIAL_ENC_KEY into .env ..."
-    NEWKEY="$("$PY" -c "import os,base64;print(base64.b64encode(os.urandom(32)).decode())")"
-    # replace an empty assignment if present, else append
-    if grep -q '^CREDENTIAL_ENC_KEY=' "$ROOT/.env"; then
-      "$PY" - "$ROOT/.env" "$NEWKEY" <<'PY'
+# Secrets must be stable across restarts (the enc key decrypts stored keys; the
+# internal token is shared with agent-svc). They go in .env, which is gitignored.
+# Never a sidecar file in the tree: a filename like scripts/.dev_enc_key is one
+# `git add -A` away from committing the master key for every user's credentials.
+ensure_secret() { # ensure_secret VAR PYTHON_EXPR
+  local var="$1" expr="$2" val
+  if [ -z "${!var:-}" ]; then
+    [ -f "$ROOT/.env" ] || cp "$ROOT/.env.example" "$ROOT/.env"
+    if ! grep -q "^$var=.\+" "$ROOT/.env"; then
+      echo "generating $var into .env ..."
+      val="$("$PY" -c "$expr")"
+      # replace an empty assignment if present, else append
+      if grep -q "^$var=" "$ROOT/.env"; then
+        "$PY" - "$ROOT/.env" "$var" "$val" <<'PY'
 import sys, re, pathlib
-p, key = pathlib.Path(sys.argv[1]), sys.argv[2]
-p.write_text(re.sub(r'^CREDENTIAL_ENC_KEY=.*$', 'CREDENTIAL_ENC_KEY=' + key, p.read_text(), flags=re.M))
+p, var, val = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+p.write_text(re.sub('^%s=.*$' % re.escape(var), var + '=' + val, p.read_text(), flags=re.M))
 PY
-    else
-      printf '\nCREDENTIAL_ENC_KEY=%s\n' "$NEWKEY" >> "$ROOT/.env"
+      else
+        printf '\n%s=%s\n' "$var" "$val" >> "$ROOT/.env"
+      fi
     fi
-    unset NEWKEY
+    set -a; . "$ROOT/.env"; set +a
   fi
-  set -a; . "$ROOT/.env"; set +a
-fi
-if [ -z "${CREDENTIAL_ENC_KEY:-}" ]; then
-  echo "FATAL: CREDENTIAL_ENC_KEY is unset and could not be generated." >&2
-  exit 1
-fi
-export CREDENTIAL_ENC_KEY
+  if [ -z "${!var:-}" ]; then
+    echo "FATAL: $var is unset and could not be generated." >&2
+    exit 1
+  fi
+  export "$var"
+}
+ensure_secret CREDENTIAL_ENC_KEY "import os,base64;print(base64.b64encode(os.urandom(32)).decode())"
+ensure_secret INTERNAL_TOKEN "import os;print(os.urandom(32).hex())"
 
 EXE=""; case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) EXE=".exe";; esac
 

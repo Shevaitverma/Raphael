@@ -38,7 +38,7 @@ echo "== 0b. select an available local Ollama model =="
 TAGS=$(curl -s --max-time 10 "${OLLAMA%/v1}/api/tags")
 MODEL="${LOCAL_MODEL:-}"
 if [ -z "$MODEL" ]; then
-  for cand in "qwen2.5:7b" "llama2:latest" "gemma3:12b"; do
+  for cand in "qwen2.5:7b" "qwen3.5:latest" "llama2:latest" "gemma3:12b"; do
     echo "$TAGS" | grep -q "\"$cand\"" && MODEL="$cand" && break
   done
 fi
