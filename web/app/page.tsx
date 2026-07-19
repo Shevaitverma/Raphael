@@ -8,12 +8,14 @@ import {
   createConversation,
   devLogin,
   getCapabilities,
+  getProfile,
   isAuthError,
   listConversations,
   listMessages,
   listProviders,
   setLifeboat,
   streamChat,
+  updateProfile,
   type Conversation,
   type Credential,
   type Degraded,
@@ -52,6 +54,10 @@ export default function Page() {
   const [error, setError] = useState<string | null>(null);
 
   const [view, setView] = useState<"chat" | "settings">("chat");
+
+  // Display-only assistant name. Defaults to the product name until the profile
+  // loads; the system-prompt name is set server-side and never sent from here.
+  const [assistantName, setAssistantName] = useState("Raphael");
 
   // The toggle is the only gate on search, so it must survive a reload — but a
   // sticky true means nothing if this deployment has no search key, hence both
@@ -93,6 +99,7 @@ export default function Page() {
     setMessages([]);
     setSending(false);
     setError(null);
+    setAssistantName("Raphael");
   }, []);
 
   // Every /api call funnels its failure here: an expired token ends the session,
@@ -130,6 +137,23 @@ export default function Page() {
       live = false;
     };
   }, [token]);
+
+  // Load the display name once signed in. A failure keeps the "Raphael" default
+  // and surfaces through the same banner as everything else — never swallowed.
+  useEffect(() => {
+    if (!token) return;
+    let live = true;
+    getProfile(token)
+      .then((p) => {
+        if (live && p.assistant_name) setAssistantName(p.assistant_name);
+      })
+      .catch((e) => {
+        if (live) failed(e);
+      });
+    return () => {
+      live = false;
+    };
+  }, [token, failed]);
 
   function toggleSearch(on: boolean) {
     setSearch(on);
@@ -326,7 +350,7 @@ export default function Page() {
       </header>
 
       {view === "settings" ? (
-        <SettingsView token={token} />
+        <SettingsView token={token} assistantName={assistantName} onSaved={setAssistantName} />
       ) : (
       <div className="flex min-h-0 flex-1">
         {/* Conversation list */}
@@ -382,7 +406,7 @@ export default function Page() {
                 </p>
               )}
               {messages.map((m, i) => (
-                <MessageRow key={m.id ?? m.localId ?? i} message={m} />
+                <MessageRow key={m.id ?? m.localId ?? i} message={m} assistantName={assistantName} />
               ))}
             </div>
           </div>
@@ -399,7 +423,7 @@ export default function Page() {
                   }
                 }}
                 rows={1}
-                placeholder="Message Raphael…"
+                placeholder={`Message ${assistantName}…`}
                 className="max-h-40 min-h-[44px] flex-1 resize-none bg-transparent px-3 py-2 text-sm text-on-surface placeholder:text-faint outline-none"
               />
               {/* A stream can hang with no reply and no timeout; Stop is the
@@ -492,7 +516,15 @@ const PROVIDER_LABEL: Record<Credential["provider"], string> = {
   local: "Local (Ollama)",
 };
 
-function SettingsView({ token }: { token: string }) {
+function SettingsView({
+  token,
+  assistantName,
+  onSaved,
+}: {
+  token: string;
+  assistantName: string;
+  onSaved: (name: string) => void;
+}) {
   const [creds, setCreds] = useState<Credential[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // id currently mutating
@@ -527,6 +559,8 @@ function SettingsView({ token }: { token: string }) {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
       <div className="mx-auto flex max-w-2xl flex-col gap-6">
+        <AssistantNameForm token={token} assistantName={assistantName} onSaved={onSaved} />
+
         <div>
           <h2 className="text-2xl font-semibold text-on-surface">
             Model providers
@@ -635,6 +669,102 @@ function SettingsView({ token }: { token: string }) {
             }
           }}
         />
+      </div>
+    </div>
+  );
+}
+
+function AssistantNameForm({
+  token,
+  assistantName,
+  onSaved,
+}: {
+  token: string;
+  assistantName: string;
+  onSaved: (name: string) => void;
+}) {
+  const [name, setName] = useState(assistantName);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  // Keep the field in step with the loaded/lifted name (the profile fetch may
+  // land after this panel mounts, and a save lifts the canonical value back).
+  useEffect(() => {
+    setName(assistantName);
+  }, [assistantName]);
+
+  const trimmed = name.trim();
+  const dirty = trimmed !== assistantName;
+
+  async function save() {
+    if (!trimmed || saving) return;
+    setSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      const p = await updateProfile(token, trimmed);
+      onSaved(p.assistant_name); // lift so the chat UI updates without a reload
+      setName(p.assistant_name);
+      setSaved(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-edge bg-panel p-4">
+      <h3 className="mb-1 text-base font-semibold text-on-surface">
+        Assistant name
+      </h3>
+      <p className="mb-4 text-sm text-muted">
+        The name shown on the assistant&apos;s messages and in the composer.
+      </p>
+
+      {error && (
+        <div
+          role="alert"
+          className="mb-3 border-l-2 border-error bg-error/10 px-3 py-2 text-sm text-error"
+        >
+          {error}
+        </div>
+      )}
+
+      <label className="flex flex-col gap-1.5 text-sm">
+        <span className="text-[11px] uppercase tracking-widest text-faint">Name</span>
+        <input
+          value={name}
+          onChange={(e) => {
+            setName(e.target.value);
+            setSaved(false);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void save();
+            }
+          }}
+          maxLength={40}
+          placeholder="Raphael"
+          className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent"
+        />
+      </label>
+
+      <div className="mt-4 flex items-center gap-3">
+        <button
+          onClick={() => void save()}
+          disabled={saving || !trimmed || !dirty}
+          className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
+        {saved && !dirty && (
+          <span role="status" className="text-xs text-muted">
+            Saved.
+          </span>
+        )}
       </div>
     </div>
   );
@@ -780,8 +910,16 @@ function AddProviderForm({
   );
 }
 
-function MessageRow({ message }: { message: UiMessage }) {
+function MessageRow({
+  message,
+  assistantName,
+}: {
+  message: UiMessage;
+  assistantName: string;
+}) {
   const isUser = message.role === "user";
+  // Avatar initial tracks the name; fall back to the product initial if blank.
+  const botInitial = (assistantName.trim()[0] ?? "R").toUpperCase();
 
   return (
     <div className="flex gap-3">
@@ -791,14 +929,14 @@ function MessageRow({ message }: { message: UiMessage }) {
           isUser ? "bg-raised text-muted" : "bg-accent/20 text-accent"
         }`}
       >
-        {isUser ? "Y" : "R"}
+        {isUser ? "Y" : botInitial}
       </div>
 
       <div className="min-w-0 flex-1">
         {/* Name + timestamp line */}
         <div className="flex items-baseline gap-2">
           <span className="text-sm font-semibold text-on-surface">
-            {isUser ? "you" : "raphael"}
+            {isUser ? "you" : assistantName}
           </span>
           {message.created_at && (
             <span className="text-xs text-muted">

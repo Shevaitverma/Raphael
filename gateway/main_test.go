@@ -185,6 +185,121 @@ func TestConversationsInjectsUserID(t *testing.T) {
 	}
 }
 
+// TestProfileForcesJWTUID proves GET/PUT /api/profile reach user-svc at
+// /users/<jwt-uid>/profile with the uid forced from the JWT. A client cannot
+// retarget another user's profile via the path.
+func TestProfileForcesJWTUID(t *testing.T) {
+	var gotPath, gotMethod, gotBody string
+	user := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"assistant_name":"Raphael"}`))
+	}))
+	defer user.Close()
+
+	cfg := testConfig(user.URL, "http://127.0.0.1:1", "http://127.0.0.1:1")
+	app := newServerT(t, cfg).BuildApp()
+	token, uid := login(t, app, fmt.Sprintf("prof-%d@raphael.local", time.Now().UnixNano()))
+
+	// GET must land on /users/<jwt-uid>/profile.
+	{
+		req := httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req, 5000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("GET /api/profile status = %d, want 200", resp.StatusCode)
+		}
+		if want := "/users/" + uid + "/profile"; gotPath != want {
+			t.Fatalf("GET upstream path = %q, want %q", gotPath, want)
+		}
+		if gotMethod != http.MethodGet {
+			t.Fatalf("GET upstream method = %q, want GET", gotMethod)
+		}
+	}
+
+	// PUT with a SPOOFED uid in the body must still target the JWT uid's profile.
+	// The gateway roots the path at the JWT uid; the body is forwarded verbatim to
+	// user-svc, which itself keys off the path — so the spoof cannot retarget.
+	{
+		spoof := "11111111-1111-1111-1111-111111111111"
+		body, _ := json.Marshal(map[string]any{"assistant_name": "Jarvis", "user_id": spoof})
+		req := httptest.NewRequest(http.MethodPut, "/api/profile", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req, 5000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("PUT /api/profile status = %d, want 200", resp.StatusCode)
+		}
+		if want := "/users/" + uid + "/profile"; gotPath != want {
+			t.Fatalf("PUT upstream path = %q, want %q (spoofed uid must not retarget)", gotPath, want)
+		}
+		if gotMethod != http.MethodPut {
+			t.Fatalf("PUT upstream method = %q, want PUT", gotMethod)
+		}
+		if !strings.Contains(gotBody, "Jarvis") {
+			t.Fatalf("PUT upstream body = %q, want it to carry assistant_name", gotBody)
+		}
+	}
+}
+
+// TestChatInjectsAssistantName proves handleChat adds an assistant_name to the
+// agent-svc payload, taken from the DB (JWT-keyed) and defaulting to "Raphael"
+// when the lookup finds nothing. It also proves a client-supplied assistant_name
+// in the chat body is dropped, not trusted.
+func TestChatInjectsAssistantName(t *testing.T) {
+	var gotName any
+	var namePresent bool
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in map[string]any
+		json.NewDecoder(r.Body).Decode(&in)
+		gotName, namePresent = in["assistant_name"]
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		fmt.Fprint(w, "event: done\ndata: {}\n\n")
+	}))
+	defer agent.Close()
+
+	cfg := testConfig("http://127.0.0.1:1", "http://127.0.0.1:1", agent.URL)
+	app := newServerT(t, cfg).BuildApp()
+	// A fresh dev user; db/004 defaults assistant_name to 'Raphael', so the
+	// JWT-keyed lookup returns that default.
+	token, _ := login(t, app, fmt.Sprintf("chatname-%d@raphael.local", time.Now().UnixNano()))
+
+	// Client tries to spoof a name in the body; it must be dropped and replaced by
+	// the DB value.
+	body, _ := json.Marshal(map[string]any{
+		"conversation_id": "c1", "message": "hi", "assistant_name": "EvilBot",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req, 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("chat status = %d, want 200", resp.StatusCode)
+	}
+	if !namePresent {
+		t.Fatal("agent-svc payload missing assistant_name")
+	}
+	if gotName == "EvilBot" {
+		t.Fatalf("assistant_name = %v, client body was trusted (must come from DB)", gotName)
+	}
+	if gotName != "Raphael" {
+		t.Fatalf("assistant_name = %v, want DB default \"Raphael\"", gotName)
+	}
+}
+
 // TestInternalUnreachable proves that no path through the gateway reaches
 // user-svc's /internal/* endpoints.
 func TestInternalUnreachable(t *testing.T) {

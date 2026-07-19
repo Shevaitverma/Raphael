@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
+	"unicode/utf8"
 )
 
 type server struct {
@@ -49,6 +51,8 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /users/{uid}/credentials/{id}/activate", s.activateCredential)
 	mux.HandleFunc("POST /users/{uid}/credentials/{id}/lifeboat", s.designateLifeboat)
 	mux.HandleFunc("DELETE /users/{uid}/credentials/{id}/lifeboat", s.clearLifeboat)
+	mux.HandleFunc("GET /users/{uid}/profile", s.getProfile)
+	mux.HandleFunc("PUT /users/{uid}/profile", s.putProfile)
 
 	// Internal routes — return the decrypted key. Shared-secret gated, and never
 	// routed by the gateway.
@@ -176,6 +180,58 @@ func (s *server) clearLifeboat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, cred)
+}
+
+func (s *server) getProfile(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	name, err := s.store.getAssistantName(r.Context(), uid)
+	if err != nil {
+		if errors.Is(err, errNotFound) {
+			writeErr(w, http.StatusNotFound, "user not found")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "failed to read profile")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"assistant_name": name})
+}
+
+type updateProfileReq struct {
+	AssistantName string `json:"assistant_name"`
+}
+
+func (s *server) putProfile(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+
+	var req updateProfileReq
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	// Validate in Go so the DB CHECK is only a backstop — a CHECK violation must
+	// never surface as a 500. char_length counts runes, so match with utf8.
+	name := strings.TrimSpace(req.AssistantName)
+	if name == "" {
+		writeErr(w, http.StatusBadRequest, "assistant_name must not be blank")
+		return
+	}
+	if utf8.RuneCountInString(name) > 40 {
+		writeErr(w, http.StatusBadRequest, "assistant_name must be at most 40 characters")
+		return
+	}
+
+	if err := s.store.setAssistantName(r.Context(), uid, name); err != nil {
+		if errors.Is(err, errNotFound) {
+			writeErr(w, http.StatusNotFound, "user not found")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "failed to update profile")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"assistant_name": name})
 }
 
 func (s *server) internalActive(w http.ResponseWriter, r *http.Request) {

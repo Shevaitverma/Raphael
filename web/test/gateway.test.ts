@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  ApiError,
+  getProfile,
   streamChat,
+  updateProfile,
   type ChatHandlers,
   type Degraded,
   type Done,
@@ -167,6 +170,62 @@ test("a non-409 chat failure still reports, without the raw body", async () => {
   assert.equal(c.errors.length, 1);
   assert.match(c.errors[0], /chat failed: 500/);
   assert.doesNotMatch(c.errors[0], /html/);
+});
+
+// --- profile: the customizable assistant name --------------------------------
+
+async function withFetch<T>(
+  impl: typeof globalThis.fetch,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const orig = globalThis.fetch;
+  globalThis.fetch = impl;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = orig;
+  }
+}
+
+test("getProfile parses the assistant name", async () => {
+  const p = await withFetch(
+    async () => new Response('{"assistant_name":"Ada"}', { status: 200 }),
+    () => getProfile("t"),
+  );
+  assert.equal(p.assistant_name, "Ada");
+});
+
+test("updateProfile parses the saved name", async () => {
+  const p = await withFetch(
+    async () => new Response('{"assistant_name":"Ada"}', { status: 200 }),
+    () => updateProfile("t", "Ada"),
+  );
+  assert.equal(p.assistant_name, "Ada");
+});
+
+test("updateProfile raises ApiError with the error body on 400", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response('{"error":"name too long"}', { status: 400 }),
+      () => updateProfile("t", "x".repeat(41)),
+    ),
+    (e) => {
+      assert.ok(e instanceof ApiError);
+      assert.equal((e as ApiError).status, 400);
+      assert.match((e as ApiError).message, /name too long/);
+      return true;
+    },
+  );
+});
+
+test("getProfile raises ApiError carrying the status", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response("nope", { status: 500 }),
+      () => getProfile("t"),
+    ),
+    (e) => e instanceof ApiError && (e as ApiError).status === 500,
+  );
 });
 
 // --- abort: the Stop button and switching conversations mid-stream -----------

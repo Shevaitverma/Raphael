@@ -68,6 +68,9 @@ class ChatBody(BaseModel):
     message: str
     # Default off IS the privacy posture: absent field -> no query ever leaves.
     search: bool = False
+    # Absent -> "Raphael" (back-compat: the e2e and older callers post no name).
+    # The gateway resolves the per-user name; workflow sanitizes at point of use.
+    assistant_name: str = "Raphael"
 
 
 @app.post("/chat")
@@ -88,6 +91,7 @@ def chat(body: ChatBody):
         "conversation_id": body.conversation_id,
         "message": body.message,
         "search": body.search,
+        "assistant_name": body.assistant_name,
         "provider": provider,
         "emit": emit,
     }

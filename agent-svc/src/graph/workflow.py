@@ -46,15 +46,26 @@ _PRECEDENCE = (
 )
 
 
-def build_system(profile: list, memories: list, search: str = "") -> str:
+def _sanitize_name(name: str) -> str:
+    """Trust boundary: this name lands verbatim in the system prompt. Drop
+    control chars/newlines and hard-cap length so a stored name can neither
+    inject extra prompt lines nor blow the token budget. Blank -> "Raphael"."""
+    cleaned = "".join(c for c in (name or "") if c.isprintable()).strip()
+    return cleaned[:40] or "Raphael"
+
+
+def build_system(profile: list, memories: list, search: str = "", name: str = "Raphael") -> str:
     """Stable prefix first: base, then profile, then memories, then search.
 
     Ordered for prompt caching — the base never changes, the profile changes
     rarely, retrieved memories change every turn, and search results change
     every turn AND are the biggest block. A cache prefix only pays if the
     volatile part is last.
+
+    `name` defaults to "Raphael", so the base line is byte-identical to
+    SYSTEM_BASE unless a per-user name is threaded in.
     """
-    out = [SYSTEM_BASE]
+    out = [f"You are {_sanitize_name(name)}, a helpful personal assistant. Answer concisely."]
     if profile or memories:
         out += ["", _PRECEDENCE]
         if profile:
@@ -130,6 +141,7 @@ class GState(TypedDict, total=False):
     conversation_id: str
     message: str
     search: bool
+    assistant_name: str
     tool_calls: list
     emit: Any
     provider: Any
@@ -269,8 +281,9 @@ def generate_node(state: GState) -> dict:
         block, tool_calls = _preflight(state, messages, build_system(profile, memories))
     except Exception:
         block, tool_calls = "", []  # a search problem may never break the turn.
+    name = state.get("assistant_name") or "Raphael"
     out = stream_with_lifeboat(
-        state["user_id"], state["provider"], messages, build_system(profile, memories, block), state["emit"]
+        state["user_id"], state["provider"], messages, build_system(profile, memories, block, name), state["emit"]
     )
     out["tool_calls"] = tool_calls
     return out

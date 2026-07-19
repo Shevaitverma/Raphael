@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -274,6 +275,49 @@ func (s *store) oneDecrypted(ctx context.Context, query, userID string) (*decryp
 		d.APIKey = pt
 	}
 	return &d, nil
+}
+
+// validUUID reports whether s parses as a uuid. The gateway forces uid from the
+// JWT, but a malformed one must 404 here, never reach the DB as a 22P02 → 500.
+func validUUID(s string) bool {
+	var u pgtype.UUID
+	return u.Scan(s) == nil
+}
+
+// getAssistantName returns the user's per-user assistant name (DEFAULT 'Raphael').
+// errNotFound when the user row is absent or uid is not a uuid.
+func (s *store) getAssistantName(ctx context.Context, userID string) (string, error) {
+	if !validUUID(userID) {
+		return "", errNotFound
+	}
+	var name string
+	err := s.pool.QueryRow(ctx,
+		`SELECT assistant_name FROM users WHERE id = $1`, userID).Scan(&name)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", errNotFound
+		}
+		return "", err
+	}
+	return name, nil
+}
+
+// setAssistantName updates the name scoped by id. Callers trim/validate first;
+// the DB CHECK is a backstop. errNotFound when no row matches (missing user or
+// non-uuid uid).
+func (s *store) setAssistantName(ctx context.Context, userID, name string) error {
+	if !validUUID(userID) {
+		return errNotFound
+	}
+	ct, err := s.pool.Exec(ctx,
+		`UPDATE users SET assistant_name = $1 WHERE id = $2`, name, userID)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return errNotFound
+	}
+	return nil
 }
 
 // errNotFound signals an absent row so handlers can pick 404 vs 204.

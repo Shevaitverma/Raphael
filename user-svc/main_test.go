@@ -387,6 +387,78 @@ func TestInternalRequiresToken(t *testing.T) {
 	}
 }
 
+// --- per-user assistant name -----------------------------------------------
+
+func TestGetAssistantNameDefault(t *testing.T) {
+	srv := newTestServer(t)
+	// Reset to the column default so this test is order-independent.
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE users SET assistant_name = DEFAULT WHERE id = $1`, testUserID); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	rec := do(t, srv, http.MethodGet, "/users/"+testUserID+"/profile", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get profile: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["assistant_name"] != "Raphael" {
+		t.Fatalf("default assistant_name = %q, want Raphael", got["assistant_name"])
+	}
+}
+
+func TestPutAssistantNameUpdatesAndGetReflects(t *testing.T) {
+	srv := newTestServer(t)
+	rec := do(t, srv, http.MethodPut, "/users/"+testUserID+"/profile",
+		map[string]string{"assistant_name": "  Jarvis  "})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var put map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &put)
+	if put["assistant_name"] != "Jarvis" {
+		t.Fatalf("put returned %q, want trimmed Jarvis", put["assistant_name"])
+	}
+	rec = do(t, srv, http.MethodGet, "/users/"+testUserID+"/profile", nil)
+	var got map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["assistant_name"] != "Jarvis" {
+		t.Fatalf("get after put = %q, want Jarvis", got["assistant_name"])
+	}
+}
+
+func TestPutAssistantNameValidation(t *testing.T) {
+	srv := newTestServer(t)
+	for _, name := range []string{"", "     ", strings.Repeat("a", 41)} {
+		rec := do(t, srv, http.MethodPut, "/users/"+testUserID+"/profile",
+			map[string]string{"assistant_name": name})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("put %q: got %d, want 400 body=%s", name, rec.Code, rec.Body.String())
+		}
+	}
+	// A 40-char name is the boundary and must succeed.
+	rec := do(t, srv, http.MethodPut, "/users/"+testUserID+"/profile",
+		map[string]string{"assistant_name": strings.Repeat("a", 40)})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put 40-char: got %d, want 200 body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProfileNonUUIDIs404Not500(t *testing.T) {
+	srv := newTestServer(t)
+	rec := do(t, srv, http.MethodGet, "/users/not-a-uuid/profile", nil)
+	if rec.Code == http.StatusInternalServerError {
+		t.Fatalf("non-uuid uid 500ed (22P02 leaked): %s", rec.Body.String())
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("non-uuid uid: got %d, want 404", rec.Code)
+	}
+	// Distinguish our clean JSON 404 from ServeMux's plain "404 page not found".
+	if !strings.Contains(rec.Body.String(), "user not found") {
+		t.Fatalf("expected clean JSON 404, got %s", rec.Body.String())
+	}
+}
+
 // --- one row per (user, provider) -> clean 409 -----------------------------
 
 func TestDuplicateProviderRejected(t *testing.T) {

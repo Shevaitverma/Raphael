@@ -188,6 +188,26 @@ export async function clearLifeboat(token: string, id: string): Promise<Credenti
   return res.json();
 }
 
+// --- profile (display-only assistant name) -----------------------------------
+
+export type Profile = { assistant_name: string };
+
+export async function getProfile(token: string): Promise<Profile> {
+  const res = await fetch(`${GATEWAY_URL}/api/profile`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`get profile failed: ${res.status}`, res.status);
+  return res.json();
+}
+
+export async function updateProfile(token: string, assistantName: string): Promise<Profile> {
+  const res = await fetch(`${GATEWAY_URL}/api/profile`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify({ assistant_name: assistantName }),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "save name"), res.status);
+  return res.json();
+}
+
 // --- capabilities ------------------------------------------------------------
 
 export type Capabilities = {

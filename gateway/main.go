@@ -90,7 +90,7 @@ func (s *Server) BuildApp() *fiber.App {
 	// configured web origin(s), the Authorization header, and the verbs we use.
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: s.cfg.CORSOrigins,
-		AllowMethods: "GET,POST,DELETE,OPTIONS",
+		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
 		AllowHeaders: "Authorization,Content-Type,Accept",
 	}))
 
@@ -118,6 +118,11 @@ func (s *Server) BuildApp() *fiber.App {
 	// /users/<uid>/credentials so user-svc /internal/* is unreachable.
 	api.All("/providers", s.proxyProviders)
 	api.All("/providers/*", s.proxyProviders)
+
+	// Profile: assistant_name read/write. Rooted at /users/<uid>/profile so the
+	// uid always comes from the JWT, never a client-supplied one.
+	api.Get("/profile", s.proxyProfile)
+	api.Put("/profile", s.proxyProfile)
 
 	return app
 }

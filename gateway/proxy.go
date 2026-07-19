@@ -130,6 +130,30 @@ func (s *Server) proxyProviders(c *fiber.Ctx) error {
 	return s.forward(c, c.Method(), target, body)
 }
 
+// --- profile proxy → user-svc (PUBLIC routes only) -------------------------
+//
+// The target path is ALWAYS rooted at /users/<uid>/profile, so the <uid> comes
+// from the JWT sub and a client-supplied uid in the path/body is never trusted.
+// Same machinery and guards as proxyProviders.
+//
+// GET /api/profile → GET /users/<uid>/profile
+// PUT /api/profile → PUT /users/<uid>/profile
+func (s *Server) proxyProfile(c *fiber.Ctx) error {
+	uid := c.Locals(userIDKey).(string)
+
+	rest := strings.TrimPrefix(c.Path(), "/api/profile")
+	if strings.Contains(rest, "..") || strings.Contains(strings.ToLower(rest), "internal") {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid path")
+	}
+	target := s.cfg.UserSvcURL + "/users/" + uid + "/profile" + rest
+
+	var body []byte
+	if len(c.Body()) > 0 {
+		body = c.Body()
+	}
+	return s.forward(c, c.Method(), target, body)
+}
+
 // --- capabilities proxy → agent-svc ----------------------------------------
 //
 // GET /api/capabilities → agent-svc GET /capabilities?user_id=<jwt sub>. What
@@ -158,6 +182,17 @@ func (s *Server) handleChat(c *fiber.Ctx) error {
 	if err := c.BodyParser(&in); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid body")
 	}
+	// Assistant name goes into the system prompt server-side, so it is read from
+	// the DB keyed by the JWT uid — NEVER from the client body. Best-effort: any
+	// failure (query error, no row, timeout) falls back to "Raphael" and never
+	// blocks or delays the chat turn. Single indexed PK lookup.
+	assistantName := "Raphael"
+	nctx, ncancel := context.WithTimeout(c.Context(), 2*time.Second)
+	if err := s.db.QueryRow(nctx, `SELECT assistant_name FROM users WHERE id=$1`, uid).Scan(&assistantName); err != nil {
+		assistantName = "Raphael"
+	}
+	ncancel()
+
 	// The body is rebuilt field by field, not copied: anything not named here is
 	// dropped before it reaches agent-svc.
 	payload, _ := json.Marshal(map[string]any{
@@ -165,6 +200,7 @@ func (s *Server) handleChat(c *fiber.Ctx) error {
 		"conversation_id": in.ConversationID,
 		"message":         in.Message,
 		"search":          in.Search,
+		"assistant_name":  assistantName, // from the DB (JWT-keyed), never the body
 	})
 
 	// A cancellable background context: it must outlive the handler return
