@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Dashboard from "./Dashboard";
+import MemoryGraph from "./MemoryGraph";
 import {
   activateProvider,
   addProvider,
@@ -62,7 +64,11 @@ export default function Page() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [view, setView] = useState<"chat" | "settings">("chat");
+  // Dashboard is the post-login/onboarding landing. The Google OAuth round-trip
+  // still forces "settings" in its effect below.
+  const [view, setView] = useState<"dashboard" | "chat" | "graph" | "settings">(
+    "dashboard",
+  );
 
   // Result of a Google OAuth round-trip (the gateway redirects back with
   // ?google=connected|error). `googleReload` bumps to re-fetch the connection
@@ -391,7 +397,7 @@ export default function Page() {
             Raphael
           </h1>
           <nav className="flex items-center gap-1 text-sm">
-            {(["chat", "settings"] as const).map((v) => (
+            {(["dashboard", "chat", "graph", "settings"] as const).map((v) => (
               <button
                 key={v}
                 onClick={() => setView(v)}
@@ -417,7 +423,11 @@ export default function Page() {
         </div>
       </header>
 
-      {view === "settings" ? (
+      {view === "dashboard" ? (
+        <Dashboard token={token} onNavigate={setView} onFail={failed} />
+      ) : view === "graph" ? (
+        <MemoryGraph token={token} onNavigate={setView} onFail={failed} />
+      ) : view === "settings" ? (
         <SettingsView
           token={token}
           assistantName={assistantName}

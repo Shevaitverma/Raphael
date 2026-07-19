@@ -238,13 +238,97 @@ export async function updateProfile(
 export type Capabilities = {
   provider: string;
   model: string;
+  max_context_tokens?: number;
+  // How the gateway knows the model/context window: "discovered" (asked the
+  // provider), "static" (from a lookup table), or "default" (a fallback guess).
+  source?: string;
   web_search: boolean;
+  google_connected?: boolean;
 };
 
 export async function getCapabilities(token: string): Promise<Capabilities> {
   const res = await fetch(`${GATEWAY_URL}/api/capabilities`, { headers: authHeader(token) });
   if (!res.ok) throw new ApiError(`capabilities failed: ${res.status}`, res.status);
   return res.json();
+}
+
+// --- memory: knowledge graph + stats -----------------------------------------
+// Both routes are read-only projections of what Raphael has learned. Same
+// fetch/ApiError/authHeader shape as getCapabilities.
+
+export type GraphNode = {
+  id: string;
+  label: string;
+  kind: "identity" | "entity";
+  degree: number;
+};
+
+export type GraphEdge = {
+  source: string;
+  target: string;
+  label: string;
+  confidence: number;
+  times_seen: number;
+  first_seen?: string;
+  last_seen?: string;
+};
+
+export type GraphNote = {
+  id: string;
+  content: string;
+  confidence: number;
+  last_seen?: string;
+};
+
+export type GraphData = {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  notes: GraphNote[];
+  truncated: boolean;
+};
+
+export type TopFact = {
+  subject: string;
+  predicate: string;
+  object: string;
+  confidence: number;
+  times_seen: number;
+  last_seen?: string;
+};
+
+export type MemoryStats = {
+  facts: number;
+  episodic: number;
+  conversations: number;
+  top_facts: TopFact[];
+  activity: { day: string; count: number }[];
+  truncated: boolean;
+};
+
+export async function getMemoryGraph(token: string): Promise<GraphData> {
+  const res = await fetch(`${GATEWAY_URL}/api/memory/graph`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`memory graph failed: ${res.status}`, res.status);
+  const d = await res.json();
+  return {
+    nodes: Array.isArray(d.nodes) ? d.nodes : [],
+    edges: Array.isArray(d.edges) ? d.edges : [],
+    notes: Array.isArray(d.notes) ? d.notes : [],
+    truncated: !!d.truncated,
+  };
+}
+
+export async function getMemoryStats(token: string): Promise<MemoryStats> {
+  const res = await fetch(`${GATEWAY_URL}/api/memory/stats`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`memory stats failed: ${res.status}`, res.status);
+  const d = await res.json();
+  return {
+    facts: d.facts ?? 0,
+    episodic: d.episodic ?? 0,
+    conversations: d.conversations ?? 0,
+    top_facts: Array.isArray(d.top_facts) ? d.top_facts : [],
+    activity: Array.isArray(d.activity) ? d.activity : [],
+    truncated: !!d.truncated,
+  };
 }
 
 // --- Google connector (read-only Calendar + profile) -------------------------

@@ -5,6 +5,7 @@ import asyncio
 import json
 import queue
 import threading
+import time
 
 import psycopg
 from fastapi import FastAPI
@@ -14,16 +15,29 @@ from pydantic import BaseModel
 from config import DATABASE_URL
 from graph import workflow
 from llm import embeddings, resolver
+from memory import read, retriever
 from tools import google as google_tool
 from tools import search as search_tool
 
 app = FastAPI(title="agent-svc")
+
+REAP_INTERVAL_SECONDS = 24 * 60 * 60  # daily: bounding growth, not a hot path.
+
+
+def _reaper_loop() -> None:
+    # ponytail: naive fixed-interval thread, not pg_cron. Reap is idempotent, so a
+    # double-run under multi-instance is harmless; revisit only if it ever scales out.
+    while True:
+        retriever.reap()
+        time.sleep(REAP_INTERVAL_SECONDS)
 
 
 @app.on_event("startup")
 def _startup() -> None:
     # Warm the encoder at boot, not on the first request.
     embeddings.warm()
+    # The write side of the valid_until contract: one pass now, then daily.
+    threading.Thread(target=_reaper_loop, daemon=True).start()
 
 
 @app.get("/healthz")
@@ -65,6 +79,18 @@ def capabilities(user_id: str):
     # leaves the process. connected() never raises (degrades to False).
     caps["google_connected"] = google_tool.connected(user_id)
     return caps
+
+
+@app.get("/memory/graph")
+def memory_graph(user_id: str):
+    # Query param + read-only DB projection + JSON, exactly like /capabilities.
+    # read.graph never raises: a DB hiccup returns the empty-but-valid shape.
+    return read.graph(user_id)
+
+
+@app.get("/memory/stats")
+def memory_stats(user_id: str):
+    return read.stats(user_id)
 
 
 class ChatBody(BaseModel):

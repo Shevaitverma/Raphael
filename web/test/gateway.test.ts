@@ -4,6 +4,8 @@ import {
   ApiError,
   connectGoogle,
   disconnectGoogle,
+  getMemoryGraph,
+  getMemoryStats,
   getProfile,
   googleStatus,
   listMessages,
@@ -418,6 +420,120 @@ test("storedDegraded returns undefined for a normal (non-degraded) message", () 
   assert.equal(
     storedDegraded({ role: "assistant", content: "hi", answered_model: "gpt", degraded: false }),
     undefined,
+  );
+});
+
+// --- memory: knowledge graph + stats -----------------------------------------
+
+test("getMemoryGraph parses nodes, edges, notes and truncated", async () => {
+  const g = await withFetch(
+    async () =>
+      new Response(
+        JSON.stringify({
+          nodes: [
+            { id: "u", label: "You", kind: "identity", degree: 2 },
+            { id: "e1", label: "coffee", kind: "entity", degree: 1 },
+          ],
+          edges: [
+            {
+              source: "u",
+              target: "e1",
+              label: "likes",
+              confidence: 0.9,
+              times_seen: 3,
+              first_seen: "2026-01-01",
+              last_seen: "2026-07-01",
+            },
+          ],
+          notes: [{ id: "n1", content: "prefers tea in the evening", confidence: 0.7 }],
+          truncated: true,
+        }),
+        { status: 200 },
+      ),
+    () => getMemoryGraph("t"),
+  );
+  assert.equal(g.nodes.length, 2);
+  assert.equal(g.nodes[0].kind, "identity");
+  assert.equal(g.edges[0].label, "likes");
+  assert.equal(g.edges[0].times_seen, 3);
+  assert.equal(g.notes[0].content, "prefers tea in the evening");
+  assert.equal(g.truncated, true);
+});
+
+test("getMemoryGraph defaults missing arrays and truncated", async () => {
+  const g = await withFetch(
+    async () => new Response("{}", { status: 200 }),
+    () => getMemoryGraph("t"),
+  );
+  assert.deepEqual(g.nodes, []);
+  assert.deepEqual(g.edges, []);
+  assert.deepEqual(g.notes, []);
+  assert.equal(g.truncated, false);
+});
+
+test("getMemoryGraph raises ApiError carrying the status", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response("nope", { status: 500 }),
+      () => getMemoryGraph("t"),
+    ),
+    (e) => e instanceof ApiError && (e as ApiError).status === 500,
+  );
+});
+
+test("getMemoryStats parses counts, top_facts and activity", async () => {
+  const s = await withFetch(
+    async () =>
+      new Response(
+        JSON.stringify({
+          facts: 12,
+          episodic: 5,
+          conversations: 3,
+          top_facts: [
+            {
+              subject: "You",
+              predicate: "work at",
+              object: "Metastart",
+              confidence: 0.95,
+              times_seen: 4,
+            },
+          ],
+          activity: [
+            { day: "2026-07-18", count: 2 },
+            { day: "2026-07-19", count: 3 },
+          ],
+          truncated: false,
+        }),
+        { status: 200 },
+      ),
+    () => getMemoryStats("t"),
+  );
+  assert.equal(s.facts, 12);
+  assert.equal(s.episodic, 5);
+  assert.equal(s.conversations, 3);
+  assert.equal(s.top_facts[0].object, "Metastart");
+  assert.equal(s.activity.length, 2);
+});
+
+test("getMemoryStats defaults zeros and empty arrays for a fresh account", async () => {
+  const s = await withFetch(
+    async () => new Response("{}", { status: 200 }),
+    () => getMemoryStats("t"),
+  );
+  assert.equal(s.facts, 0);
+  assert.equal(s.episodic, 0);
+  assert.equal(s.conversations, 0);
+  assert.deepEqual(s.top_facts, []);
+  assert.deepEqual(s.activity, []);
+});
+
+test("getMemoryStats raises ApiError carrying the status", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response("nope", { status: 503 }),
+      () => getMemoryStats("t"),
+    ),
+    (e) => e instanceof ApiError && (e as ApiError).status === 503,
   );
 });
 

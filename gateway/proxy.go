@@ -165,6 +165,25 @@ func (s *Server) proxyCapabilities(c *fiber.Ctx) error {
 	return s.forward(c, http.MethodGet, target, nil)
 }
 
+// --- memory read proxies → agent-svc ---------------------------------------
+//
+// GET /api/memory/graph → agent-svc GET /memory/graph?user_id=<jwt sub>
+// GET /api/memory/stats → agent-svc GET /memory/stats?user_id=<jwt sub>
+// uid comes ONLY from the JWT; a client-supplied user_id in the query is never
+// forwarded — the target query is built fresh from the JWT sub. Read-only, so
+// no body. Clones of proxyCapabilities.
+func (s *Server) proxyMemoryGraph(c *fiber.Ctx) error {
+	uid := c.Locals(userIDKey).(string)
+	target := s.cfg.AgentSvcURL + "/memory/graph?user_id=" + url.QueryEscape(uid)
+	return s.forward(c, http.MethodGet, target, nil)
+}
+
+func (s *Server) proxyMemoryStats(c *fiber.Ctx) error {
+	uid := c.Locals(userIDKey).(string)
+	target := s.cfg.AgentSvcURL + "/memory/stats?user_id=" + url.QueryEscape(uid)
+	return s.forward(c, http.MethodGet, target, nil)
+}
+
 // --- chat proxy → agent-svc (SSE passthrough) ------------------------------
 //
 // POST /api/chat {conversation_id, message, search} → agent-svc POST /chat

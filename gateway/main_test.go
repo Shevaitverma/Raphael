@@ -253,6 +253,48 @@ func TestProfileForcesJWTUID(t *testing.T) {
 	}
 }
 
+// TestMemoryGraphForcesJWTUID proves GET /api/memory/graph reaches agent-svc at
+// /memory/graph with ?user_id=<jwt uid> forced from the JWT. A spoofed user_id
+// in the request query must not change the forwarded uid. Fails against
+// pre-change code: the route did not exist (404).
+func TestMemoryGraphForcesJWTUID(t *testing.T) {
+	var gotPath, gotQuery string
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"nodes":[]}`))
+	}))
+	defer agent.Close()
+
+	cfg := testConfig("http://127.0.0.1:1", "http://127.0.0.1:1", agent.URL)
+	app := newServerT(t, cfg).BuildApp()
+	token, uid := login(t, app, fmt.Sprintf("mem-%d@raphael.local", time.Now().UnixNano()))
+
+	// Spoof a user_id in the query — it must be ignored, the JWT uid forwarded.
+	spoof := "11111111-1111-1111-1111-111111111111"
+	req := httptest.NewRequest(http.MethodGet, "/api/memory/graph?user_id="+spoof, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req, 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if gotPath != "/memory/graph" {
+		t.Fatalf("upstream path = %q, want /memory/graph", gotPath)
+	}
+	// EXACTLY the JWT uid must reach agent-svc — the spoof must not survive.
+	q, err := url.ParseQuery(gotQuery)
+	if err != nil {
+		t.Fatalf("upstream query %q unparseable: %v", gotQuery, err)
+	}
+	if got := q["user_id"]; len(got) != 1 || got[0] != uid {
+		t.Fatalf("upstream user_id = %v, want exactly [%s] (spoof leaked?)", got, uid)
+	}
+}
+
 // TestChatInjectsAssistantName proves handleChat adds an assistant_name to the
 // agent-svc payload, taken from the DB (JWT-keyed) and defaulting to "Raphael"
 // when the lookup finds nothing. It also proves a client-supplied assistant_name
