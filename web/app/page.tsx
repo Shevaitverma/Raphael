@@ -12,6 +12,7 @@ import {
   clearLifeboat,
   connectGoogle,
   createConversation,
+  deleteConversation,
   devLogin,
   disconnectGoogle,
   getCapabilities,
@@ -272,6 +273,30 @@ export default function Page() {
     return () => abortRef.current?.abort();
   }, [token, activeId, loadMessages]);
 
+  // Two-step inline confirm: the trash icon arms this, a second click deletes.
+  // Cheaper than a modal and never fires on one stray click.
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  async function handleDeleteConversation(id: string) {
+    if (!token) return;
+    setConfirmDeleteId(null);
+    try {
+      await deleteConversation(token, id);
+      const remaining = conversations.filter((c) => c.id !== id);
+      setConversations(remaining);
+      // Don't strand the user on a thread that no longer exists: pick another
+      // conversation, or fall back to the empty "start a conversation" state.
+      if (activeId === id) {
+        const next = remaining[0]?.id ?? null;
+        setActiveId(next);
+        if (!next) setMessages([]);
+      }
+      setError(null);
+    } catch (e) {
+      failed(e);
+    }
+  }
+
   async function handleNewConversation() {
     if (!token) return;
     try {
@@ -432,20 +457,65 @@ export default function Page() {
                 No conversations yet.
               </p>
             )}
-            {conversations.map((c) => (
-              <button
-                key={c.id}
-                onClick={() => setActiveId(c.id)}
-                className={`mb-1 block w-full truncate rounded-md px-3 py-2 text-left text-sm transition-colors ${
-                  c.id === activeId
-                    ? "bg-raised text-on-surface"
-                    : "text-muted hover:bg-raised/60 hover:text-on-surface"
-                }`}
-                title={c.title ?? c.id}
-              >
-                {c.title?.trim() || "Untitled"}
-              </button>
-            ))}
+            {conversations.map((c) => {
+              const title = c.title?.trim() || "Untitled";
+              return (
+                <div
+                  key={c.id}
+                  className={`group relative mb-1 flex items-center rounded-md text-sm transition-colors ${
+                    c.id === activeId
+                      ? "bg-raised text-on-surface"
+                      : "text-muted hover:bg-raised/60 hover:text-on-surface"
+                  }`}
+                >
+                  <button
+                    onClick={() => setActiveId(c.id)}
+                    className="min-w-0 flex-1 truncate px-3 py-2 text-left"
+                    title={c.title ?? c.id}
+                  >
+                    {title}
+                  </button>
+                  {confirmDeleteId === c.id ? (
+                    <span className="flex shrink-0 items-center gap-1 pr-2">
+                      <button
+                        onClick={() => void handleDeleteConversation(c.id)}
+                        className="rounded px-1.5 py-0.5 text-xs font-medium text-error hover:bg-error/10"
+                      >
+                        Delete?
+                      </button>
+                      <button
+                        onClick={() => setConfirmDeleteId(null)}
+                        className="rounded px-1.5 py-0.5 text-xs text-muted hover:bg-raised hover:text-on-surface"
+                      >
+                        Cancel
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => setConfirmDeleteId(c.id)}
+                      aria-label={"Delete conversation: " + title}
+                      className="mr-1 shrink-0 rounded p-1 text-muted opacity-0 transition-opacity hover:text-error focus:opacity-100 group-hover:opacity-100"
+                    >
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6" />
+                        <line x1="10" y1="11" x2="10" y2="17" />
+                        <line x1="14" y1="11" x2="14" y2="17" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </nav>
         </aside>
 

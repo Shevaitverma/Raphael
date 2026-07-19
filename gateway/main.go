@@ -130,6 +130,10 @@ func (s *Server) BuildApp() *fiber.App {
 	api.Get("/conversations", s.proxyConversations)
 	api.Post("/conversations", s.proxyConversations)
 	api.Get("/conversations/:id/messages", s.proxyConversations)
+	// Delete a conversation (cascades its messages in conv-svc). Reuses the same
+	// uid-forcing proxy: user_id is Set from the JWT, ".." is rejected. Only DELETE
+	// on this exact path is mounted — message writes stay agent-svc's job.
+	api.Delete("/conversations/:id", s.proxyConversations)
 
 	// Providers: exact and wildcard. The proxy roots every target at
 	// /users/<uid>/credentials so user-svc /internal/* is unreachable.

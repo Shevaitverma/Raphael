@@ -449,6 +449,112 @@ func TestMessagesRequireUserID(t *testing.T) {
 	}
 }
 
+// ---- delete ---------------------------------------------------------------
+
+// Deleting an owned conversation returns 200 {"deleted":true} and the CASCADE
+// takes its messages with it — proven by counting the rows directly, since the
+// messages endpoint 404s once the conversation is gone regardless.
+func TestDeleteConversation(t *testing.T) {
+	srv, cleanup := newTestServer(t)
+	defer cleanup()
+	convID := createConv(t, srv)
+	postMsg(t, srv, convID, map[string]any{"role": "user", "content": "hi"})
+	postMsg(t, srv, convID, map[string]any{"role": "assistant", "content": "hello"})
+
+	rr := do(t, srv, "DELETE", "/conversations/"+convID+"?user_id="+devUserID, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("delete = %d, want 200; body=%s", rr.Code, rr.Body)
+	}
+	var out map[string]bool
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil || !out["deleted"] {
+		t.Fatalf("delete body = %s, want {\"deleted\":true}", rr.Body)
+	}
+
+	// The conversation is gone from its owner's list.
+	for _, c := range listConvs(t, srv) {
+		if c.ID == convID {
+			t.Fatalf("deleted conversation still listed: %s", convID)
+		}
+	}
+	// And the CASCADE removed its messages.
+	if n := countMessages(t, srv, convID); n != 0 {
+		t.Fatalf("cascade left %d message(s) behind", n)
+	}
+}
+
+// Deleting another user's conversation id is a 404 (never 403 — that would
+// confirm the id is real) and must not touch the row or its messages.
+func TestDeleteConversationOtherUserGets404(t *testing.T) {
+	srv, cleanup := newTestServer(t)
+	defer cleanup()
+	convID := createConv(t, srv)
+	postMsg(t, srv, convID, map[string]any{"role": "user", "content": "a private secret"})
+
+	rr := do(t, srv, "DELETE", "/conversations/"+convID+"?user_id="+otherUserID, nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("delete another user's conv = %d, want 404; body=%s", rr.Code, rr.Body)
+	}
+
+	// The 404 must mean nothing was deleted: the conversation and its message survive.
+	found := false
+	for _, c := range listConvs(t, srv) {
+		if c.ID == convID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("rejected delete still removed the owner's conversation")
+	}
+	if n := countMessages(t, srv, convID); n != 1 {
+		t.Fatalf("rejected delete disturbed messages: count = %d, want 1", n)
+	}
+}
+
+func TestDeleteConversationBadUUID(t *testing.T) {
+	srv, cleanup := newTestServer(t)
+	defer cleanup()
+	rr := do(t, srv, "DELETE", "/conversations/not-a-uuid?user_id="+devUserID, nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("delete non-uuid = %d, want 400; body=%s", rr.Code, rr.Body)
+	}
+}
+
+func TestDeleteConversationMissingUser(t *testing.T) {
+	srv, cleanup := newTestServer(t)
+	defer cleanup()
+	convID := createConv(t, srv)
+	rr := do(t, srv, "DELETE", "/conversations/"+convID, nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("delete without user_id = %d, want 400; body=%s", rr.Code, rr.Body)
+	}
+}
+
+// listConvs returns the owner's conversations via the list endpoint.
+func listConvs(t *testing.T, srv *Server) []Conversation {
+	t.Helper()
+	rr := do(t, srv, "GET", "/conversations?user_id="+devUserID, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list conversations = %d; body=%s", rr.Code, rr.Body)
+	}
+	var list []Conversation
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode conversations: %v", err)
+	}
+	return list
+}
+
+// countMessages reads the message count for a conversation straight from the DB,
+// so the cascade is observed independently of the (ownership-gated) API.
+func countMessages(t *testing.T, srv *Server, convID string) int {
+	t.Helper()
+	var n int
+	if err := srv.db.QueryRow(context.Background(),
+		`SELECT count(*) FROM messages WHERE conversation_id = $1`, convID).Scan(&n); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	return n
+}
+
 // ---- limit ----------------------------------------------------------------
 
 // queryLimit is a pure function, so the cap and the rejections are provable

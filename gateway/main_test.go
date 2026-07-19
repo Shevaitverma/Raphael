@@ -187,6 +187,53 @@ func TestConversationsInjectsUserID(t *testing.T) {
 	}
 }
 
+// TestDeleteConversationForcesJWTUID proves DELETE /api/conversations/<id>
+// reaches conv-svc at /conversations/<id> with method DELETE and ?user_id=<jwt
+// uid> forced — a spoofed user_id in the query must not survive. Fails against
+// pre-change code: the route did not exist (405).
+func TestDeleteConversationForcesJWTUID(t *testing.T) {
+	var gotPath, gotMethod, gotQuery string
+	conv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"deleted":true}`))
+	}))
+	defer conv.Close()
+
+	cfg := testConfig("http://127.0.0.1:1", conv.URL, "http://127.0.0.1:1")
+	app := newServerT(t, cfg).BuildApp()
+	token, uid := login(t, app, fmt.Sprintf("del-%d@raphael.local", time.Now().UnixNano()))
+
+	convID := "88888888-8888-8888-8888-888888888888"
+	spoof := "11111111-1111-1111-1111-111111111111"
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/conversations/"+convID+"?user_id="+spoof, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req, 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("DELETE /api/conversations/<id> status = %d, want 200", resp.StatusCode)
+	}
+	if want := "/conversations/" + convID; gotPath != want {
+		t.Fatalf("upstream path = %q, want %q", gotPath, want)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Fatalf("upstream method = %q, want DELETE", gotMethod)
+	}
+	// EXACTLY the JWT uid must reach conv-svc — the spoof must not survive.
+	q, err := url.ParseQuery(gotQuery)
+	if err != nil {
+		t.Fatalf("upstream query %q unparseable: %v", gotQuery, err)
+	}
+	if got := q["user_id"]; len(got) != 1 || got[0] != uid {
+		t.Fatalf("upstream user_id = %v, want exactly [%s] (spoof leaked?)", got, uid)
+	}
+}
+
 // TestProfileForcesJWTUID proves GET/PUT /api/profile reach user-svc at
 // /users/<jwt-uid>/profile with the uid forced from the JWT. A client cannot
 // retarget another user's profile via the path.

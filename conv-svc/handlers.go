@@ -304,6 +304,40 @@ func (s *Server) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, m)
 }
 
+// DELETE /conversations/{id}?user_id=
+//
+// Ownership-scoped in one statement: the DELETE matches a row only when it
+// belongs to this user, so a foreign or absent id both affect zero rows and get
+// the same 404 — a 403 would confirm the id is real. messages.conversation_id
+// is ON DELETE CASCADE, so the rows go with it.
+func (s *Server) handleDeleteConversation(w http.ResponseWriter, r *http.Request) {
+	convID := r.PathValue("id")
+	userID, err := queryUserID(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+
+	tag, err := s.db.Exec(ctx,
+		`DELETE FROM conversations WHERE id = $1 AND user_id = $2`, convID, userID)
+	if err != nil {
+		if isInvalidUUID(err) {
+			writeErr(w, http.StatusBadRequest, "conversation id is not a valid uuid")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "could not delete conversation")
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		writeErr(w, http.StatusNotFound, "conversation not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
+}
+
 // deriveTitle turns a message into a conversation title: trimmed, collapsed to
 // one line (Fields splits on any run of unicode whitespace), and truncated to
 // ~60 runes with an ellipsis when cut. Empty (all-whitespace) => "" and the
