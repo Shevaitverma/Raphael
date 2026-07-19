@@ -14,6 +14,9 @@
   --color-warning: #fbbf24;
   --color-error: #ff6b66;
   --color-success: #4ade80;
+  /* celestial glow — secondary to the #4d8eff accent, for the "alive core" feel.
+     Exposed as a theme colour so bg-glow/text-glow/to-glow work in markup too. */
+  --color-glow: #8b5cf6;
   --font-display: var(--font-playfair), serif;
   --font-sans: var(--font-sora), sans-serif;
 }
@@ -44,4 +47,76 @@ body {
 ::-webkit-scrollbar-thumb {
   background: #2a2a2f;
   border-radius: 2px;
+}
+
+/* --- Sage core: glow + subtle motion (all decorative, aria-hidden) ---------- */
+
+@keyframes sage-breathe {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.96);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.06);
+  }
+}
+@keyframes sage-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes sage-rotate-rev {
+  to {
+    transform: rotate(-360deg);
+  }
+}
+
+.anim-breathe {
+  animation: sage-breathe 6s ease-in-out infinite;
+}
+.anim-rotate {
+  animation: sage-rotate 48s linear infinite;
+}
+.anim-rotate-rev {
+  animation: sage-rotate-rev 72s linear infinite;
+}
+
+/* rotate/scale SVG groups about their own centre, not the viewBox origin */
+.spin-center {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+/* soft radial halo sitting behind the core */
+.core-glow {
+  background: radial-gradient(
+    circle at center,
+    color-mix(in srgb, var(--color-glow) 55%, transparent) 0%,
+    color-mix(in srgb, var(--color-accent) 28%, transparent) 38%,
+    transparent 70%
+  );
+  filter: blur(10px);
+}
+
+/* bright pulsing hub */
+.core-hub {
+  filter: drop-shadow(0 0 5px var(--color-accent)) drop-shadow(0 0 12px var(--color-glow));
+}
+
+/* celestial glow rims for cards / pills */
+.glow-accent {
+  box-shadow: 0 0 24px -8px color-mix(in srgb, var(--color-accent) 65%, transparent);
+}
+.glow-violet {
+  box-shadow: 0 0 32px -10px color-mix(in srgb, var(--color-glow) 60%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-breathe,
+  .anim-rotate,
+  .anim-rotate-rev {
+    animation: none;
+  }
 }

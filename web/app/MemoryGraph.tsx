@@ -18,7 +18,10 @@ const VB_W = 820;
 const VB_H = 560;
 const CX = VB_W / 2;
 const CY = VB_H / 2;
-const RING_GAP = 150;
+// Radius per BFS ring (0 = center). Chosen so ring 2 + its node + label stay
+// inside the canvas and inside the decorative outer circle at RING_OUTER.
+const RINGS = [0, 120, 210];
+const RING_OUTER = 250;
 
 type Placed = GraphNode & { x: number; y: number; r: number };
 
@@ -65,6 +68,30 @@ export default function MemoryGraph({
   }, [token, onFail]);
 
   const placed = useMemo(() => (graph ? layout(graph) : new Map<string, Placed>()), [graph]);
+
+  // Adjacency for neighbor-highlighting on hover/select.
+  const neighbors = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    const add = (a: string, b: string) =>
+      (m.get(a) ?? m.set(a, new Set()).get(a)!).add(b);
+    for (const e of graph?.edges ?? []) {
+      add(e.source, e.target);
+      add(e.target, e.source);
+    }
+    return m;
+  }, [graph]);
+
+  // Honour prefers-reduced-motion: when reduced, we render the graph fully
+  // static (no SMIL rotation, no pulse) — the decorative motion is the only
+  // thing gated; data and interactions are untouched.
+  const [motion, setMotion] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const apply = () => setMotion(!mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, []);
 
   if (error) {
     return (
@@ -144,19 +171,119 @@ export default function MemoryGraph({
           </div>
         ) : mode === "graph" ? (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_18rem]">
-            <div className="overflow-x-auto rounded-xl border border-edge bg-panel">
+            <div className="overflow-x-auto rounded-xl border border-edge bg-[#0b0b12]">
               <svg
                 viewBox={`0 0 ${VB_W} ${VB_H}`}
                 role="img"
                 aria-label={`knowledge graph, ${fmt(graph.edges.length)} facts`}
-                className="w-full"
+                className="w-full select-none"
               >
-                {/* Edges first so nodes sit on top. */}
+                <defs>
+                  {/* Celestial violet field behind everything. */}
+                  <radialGradient id="mg-field" cx="50%" cy="50%" r="55%">
+                    <stop offset="0%" stopColor="#5b4bd6" stopOpacity="0.22" />
+                    <stop offset="55%" stopColor="#3a2f8a" stopOpacity="0.08" />
+                    <stop offset="100%" stopColor="#3a2f8a" stopOpacity="0" />
+                  </radialGradient>
+                  {/* Core aura of the identity node. */}
+                  <radialGradient id="mg-core" cx="50%" cy="50%" r="50%">
+                    <stop offset="0%" stopColor="var(--color-accent-strong)" stopOpacity="0.95" />
+                    <stop offset="45%" stopColor="var(--color-accent)" stopOpacity="0.55" />
+                    <stop offset="100%" stopColor="var(--color-accent)" stopOpacity="0" />
+                  </radialGradient>
+                  {/* Soft halo for glowing strokes/nodes. */}
+                  <filter id="mg-glow" x="-120%" y="-120%" width="340%" height="340%">
+                    <feGaussianBlur stdDeviation="3.2" result="b" />
+                    <feMerge>
+                      <feMergeNode in="b" />
+                      <feMergeNode in="SourceGraphic" />
+                    </feMerge>
+                  </filter>
+                </defs>
+
+                {/* ---- decorative sage's circle (purely ornamental) ---- */}
+                <g aria-hidden="true">
+                  <circle cx={CX} cy={CY} r={RING_OUTER + 10} fill="url(#mg-field)" />
+
+                  {/* Concentric magic-circle rings. */}
+                  {[RINGS[1], RINGS[2], RING_OUTER].map((r, i) => (
+                    <circle
+                      key={r}
+                      cx={CX}
+                      cy={CY}
+                      r={r}
+                      fill="none"
+                      stroke="var(--color-accent)"
+                      strokeOpacity={0.12 + i * 0.04}
+                      strokeWidth={i === 2 ? 1 : 0.6}
+                      strokeDasharray={i === 1 ? "2 8" : undefined}
+                    />
+                  ))}
+
+                  {/* Slowly rotating tick ring — the "analytical" dial. */}
+                  <g>
+                    {motion && (
+                      <animateTransform
+                        attributeName="transform"
+                        type="rotate"
+                        from={`0 ${CX} ${CY}`}
+                        to={`360 ${CX} ${CY}`}
+                        dur="90s"
+                        repeatCount="indefinite"
+                      />
+                    )}
+                    {Array.from({ length: 60 }).map((_, i) => {
+                      const a = (i / 60) * Math.PI * 2;
+                      const major = i % 5 === 0;
+                      const r1 = RING_OUTER;
+                      const r2 = RING_OUTER - (major ? 12 : 6);
+                      return (
+                        <line
+                          key={i}
+                          x1={CX + Math.cos(a) * r1}
+                          y1={CY + Math.sin(a) * r1}
+                          x2={CX + Math.cos(a) * r2}
+                          y2={CY + Math.sin(a) * r2}
+                          stroke="var(--color-accent)"
+                          strokeOpacity={major ? 0.4 : 0.18}
+                          strokeWidth={major ? 1.1 : 0.6}
+                        />
+                      );
+                    })}
+                  </g>
+
+                  {/* Counter-rotating dashed inner ring, for gentle depth. */}
+                  <g>
+                    {motion && (
+                      <animateTransform
+                        attributeName="transform"
+                        type="rotate"
+                        from={`360 ${CX} ${CY}`}
+                        to={`0 ${CX} ${CY}`}
+                        dur="70s"
+                        repeatCount="indefinite"
+                      />
+                    )}
+                    <circle
+                      cx={CX}
+                      cy={CY}
+                      r={RINGS[1] - 14}
+                      fill="none"
+                      stroke="var(--color-accent)"
+                      strokeOpacity={0.18}
+                      strokeWidth={0.8}
+                      strokeDasharray="1 10"
+                    />
+                  </g>
+                </g>
+
+                {/* ---- edges (glowing filaments) ---- */}
                 {graph.edges.map((e, i) => {
                   const a = placed.get(e.source);
                   const b = placed.get(e.target);
                   if (!a || !b) return null;
                   const active = activeId === e.source || activeId === e.target;
+                  const dim = activeId != null && !active;
                   return (
                     <line
                       key={i}
@@ -165,13 +292,21 @@ export default function MemoryGraph({
                       x2={b.x}
                       y2={b.y}
                       stroke="var(--color-accent)"
-                      strokeOpacity={active ? 0.9 : 0.18}
+                      strokeOpacity={active ? 0.95 : dim ? 0.06 : 0.22}
                       strokeWidth={strokeFor(e.times_seen)}
+                      filter={active ? "url(#mg-glow)" : undefined}
+                      style={{ transition: "stroke-opacity 200ms ease" }}
                     />
                   );
                 })}
+
+                {/* ---- nodes ---- */}
                 {[...placed.values()].map((n) => {
-                  const active = activeId === n.id;
+                  const isActive = activeId === n.id;
+                  const isNeighbor = activeId != null && (neighbors.get(activeId)?.has(n.id) ?? false);
+                  const dim = activeId != null && !isActive && !isNeighbor;
+                  const lit = isActive || isNeighbor || selected === n.id;
+                  const identity = n.kind === "identity";
                   return (
                     <g
                       key={n.id}
@@ -179,25 +314,51 @@ export default function MemoryGraph({
                       onMouseEnter={() => setHovered(n.id)}
                       onMouseLeave={() => setHovered(null)}
                       onClick={() => setSelected(n.id)}
+                      style={{ transition: "opacity 200ms ease" }}
+                      opacity={dim ? 0.35 : 1}
                     >
+                      {/* Aura: pulsing for identity, on-demand for lit entities. */}
+                      {(identity || lit) && (
+                        <circle
+                          cx={n.x}
+                          cy={n.y}
+                          r={n.r * (identity ? 2.6 : 1.9)}
+                          fill="url(#mg-core)"
+                          opacity={identity ? 0.9 : 0.6}
+                        >
+                          {identity && motion && (
+                            <animate
+                              attributeName="opacity"
+                              values="0.55;0.95;0.55"
+                              dur="4s"
+                              repeatCount="indefinite"
+                            />
+                          )}
+                        </circle>
+                      )}
                       <circle
                         cx={n.x}
                         cy={n.y}
                         r={n.r}
-                        fill="var(--color-panel)"
+                        fill={identity ? "var(--color-accent)" : "var(--color-raised)"}
                         stroke={
-                          active || selected === n.id
-                            ? "var(--color-accent)"
-                            : "var(--color-edge)"
+                          identity
+                            ? "var(--color-accent-strong)"
+                            : lit
+                              ? "var(--color-accent)"
+                              : "var(--color-edge)"
                         }
-                        strokeWidth={n.kind === "identity" ? 2.5 : 1.5}
+                        strokeWidth={identity ? 2.5 : lit ? 2 : 1.25}
+                        filter={lit ? "url(#mg-glow)" : undefined}
+                        style={{ transition: "stroke 200ms ease" }}
                       />
                       <text
                         x={n.x}
-                        y={n.y + n.r + 12}
+                        y={n.y + n.r + 13}
                         textAnchor="middle"
-                        className="fill-[var(--color-muted)]"
                         fontSize="11"
+                        fill={lit || identity ? "var(--color-on-surface)" : "var(--color-muted)"}
+                        style={{ transition: "fill 200ms ease" }}
                       >
                         {truncate(n.label, 18)}
                       </text>
@@ -389,12 +550,15 @@ function layout(graph: GraphData): Map<string, Placed> {
       out.set(n.id, { ...n, x: CX, y: CY, r: radiusFor(n) });
       continue;
     }
+    const radius = RINGS[Math.min(r, RINGS.length - 1)];
+    // Offset odd rings by half a step so ring 2 nodes sit between ring 1 spokes.
+    const offset = r % 2 === 0 ? 0 : Math.PI / nodes.length;
     nodes.forEach((n, i) => {
-      const angle = (i / nodes.length) * Math.PI * 2 - Math.PI / 2;
+      const angle = (i / nodes.length) * Math.PI * 2 - Math.PI / 2 + offset;
       out.set(n.id, {
         ...n,
-        x: CX + Math.cos(angle) * RING_GAP * r,
-        y: CY + Math.sin(angle) * RING_GAP * r,
+        x: CX + Math.cos(angle) * radius,
+        y: CY + Math.sin(angle) * radius,
         r: radiusFor(n),
       });
     });

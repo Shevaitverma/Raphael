@@ -12,9 +12,10 @@ import {
 
 const fmt = (n: number) => n.toLocaleString();
 
-// Overview of what Raphael has learned: real stats + the live model/provider
-// state. Mirrors the reference dashboard's IA (hero, provider cards, knowledge
-// feed, sync ring) with this app's flat theme and only real data.
+// The "Great Sage console": a glowing, alive overview of what Raphael has
+// learned and how it's answering right now. Same data wiring as before
+// (getMemoryStats / getCapabilities / listProviders) — only the presentation
+// is redesigned. Every number on screen is real; nothing is fabricated.
 export default function Dashboard({
   token,
   onNavigate,
@@ -51,6 +52,7 @@ export default function Dashboard({
   const lifeboat = creds?.find((c) => c.is_lifeboat);
   const empty =
     stats !== null && stats.facts === 0 && stats.episodic === 0 && stats.conversations === 0;
+  const active = !!caps?.model;
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
@@ -64,97 +66,116 @@ export default function Dashboard({
           </div>
         )}
 
-        <div>
-          <h2 className="text-2xl font-semibold text-on-surface">Overview</h2>
-          <p className="mt-1 text-sm text-muted">
-            What Raphael has learned, and how it&apos;s answering right now.
-          </p>
-        </div>
+        {/* Hero — the glowing living Core beside honest, real state. */}
+        <section className="glow-violet relative grid gap-6 overflow-hidden rounded-2xl border border-edge bg-panel p-6 md:grid-cols-[auto_1fr] md:items-center md:p-8">
+          <Core />
 
-        {/* Empty state — a fresh account, not an error. */}
-        {empty && (
-          <div className="rounded-xl border border-edge bg-panel px-5 py-8 text-center">
-            <p className="text-sm text-on-surface">
-              Start a conversation — Raphael learns as you talk.
-            </p>
-            <p className="mt-1 text-sm text-faint">
-              Facts and memories will show up here once you&apos;ve chatted a bit.
-            </p>
-            <button
-              onClick={() => onNavigate("chat")}
-              className="mt-4 rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong"
-            >
-              Start a chat
-            </button>
-          </div>
-        )}
-
-        {/* Stat tiles */}
-        <div className="grid grid-cols-3 gap-3">
-          <StatTile label="Facts" value={stats ? fmt(stats.facts) : "—"} />
-          <StatTile label="Memories" value={stats ? fmt(stats.episodic) : "—"} />
-          <StatTile label="Conversations" value={stats ? fmt(stats.conversations) : "—"} />
-        </div>
-
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          {/* Active model */}
-          <div className="rounded-xl border border-edge bg-panel p-4">
-            <h3 className="text-[11px] uppercase tracking-widest text-faint">Active model</h3>
+          <div className="min-w-0">
+            <h2 className="text-2xl font-semibold text-on-surface">
+              {active ? "Raphael is active" : "Raphael is standing by"}
+            </h2>
             {caps ? (
-              <>
-                <p className="mt-2 text-lg font-semibold text-on-surface">
-                  {caps.model || "—"}
-                </p>
-                <p className="text-sm text-muted">{caps.provider || "no active provider"}</p>
-                <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
-                  {typeof caps.max_context_tokens === "number" && (
-                    <span>{fmt(caps.max_context_tokens)} tokens context</span>
-                  )}
-                  {caps.source && (
-                    // Honest about HOW it knows the window: discovered vs guessed.
-                    <span className="rounded-md bg-raised px-2 py-0.5 text-[10px] uppercase tracking-widest">
-                      {caps.source}
+              <p className="mt-2 text-sm leading-relaxed text-muted">
+                {active ? (
+                  <>
+                    Answering on{" "}
+                    <span className="font-medium text-on-surface">{caps.model}</span> via{" "}
+                    <span className="font-medium text-on-surface">
+                      {caps.provider || "an active provider"}
                     </span>
-                  )}
-                </div>
-              </>
-            ) : (
-              <p className="mt-2 text-sm text-faint">Loading…</p>
-            )}
-          </div>
-
-          {/* Fallback / lifeboat + connectors */}
-          <div className="rounded-xl border border-edge bg-panel p-4">
-            <h3 className="text-[11px] uppercase tracking-widest text-faint">Fallback</h3>
-            {creds === null ? (
-              <p className="mt-2 text-sm text-faint">Loading…</p>
-            ) : lifeboat ? (
-              <p className="mt-2 text-sm text-on-surface">
-                Fallback set:{" "}
-                <span className="font-medium">{lifeboat.model_id}</span>. A rejected active
-                credential degrades to it instead of stopping.
+                    {typeof caps.max_context_tokens === "number" && (
+                      <>
+                        , with a{" "}
+                        <span className="font-medium text-on-surface">
+                          {fmt(caps.max_context_tokens)}-token
+                        </span>{" "}
+                        context window
+                      </>
+                    )}
+                    .
+                  </>
+                ) : (
+                  "No active provider yet — add one in Settings to bring the core online."
+                )}
               </p>
             ) : (
-              <p className="mt-2 text-sm text-warning">
-                No fallback set. If your active credential is rejected, the assistant will stop
-                instead of degrading. Set one in Settings.
+              <p className="mt-2 text-sm text-faint">Waking the core…</p>
+            )}
+
+            {/* Honest source of the context number: discovered / static / default. */}
+            {caps?.source && (
+              <p className="mt-1 text-xs text-faint">
+                Context window {caps.source === "discovered" ? "discovered from" : "sourced"} (
+                {caps.source})
               </p>
             )}
 
             <div className="mt-4 flex flex-wrap gap-2">
               <Pill on={!!caps?.web_search} label="Web search" />
               <Pill on={!!caps?.google_connected} label="Google" />
+              <Pill
+                on={!!lifeboat}
+                label={lifeboat ? "Fallback ready" : "No fallback"}
+                warnOff
+                title={lifeboat ? `Degrades to ${lifeboat.model_id}` : undefined}
+              />
             </div>
+            {creds !== null && !lifeboat && (
+              <p className="mt-2 text-xs text-warning">
+                If your active credential is rejected the assistant stops instead of degrading.
+                Set a fallback in Settings.
+              </p>
+            )}
           </div>
+        </section>
+
+        {/* Gauges — bold, real counts. The bars glow but are decorative; the
+            numbers are the truth, so no invented percentages. */}
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          <Gauge label="Facts learned" value={stats ? fmt(stats.facts) : "—"} />
+          <Gauge label="Memories" value={stats ? fmt(stats.episodic) : "—"} />
+          <Gauge label="Conversations" value={stats ? fmt(stats.conversations) : "—"} />
+          <Gauge
+            label="Context window"
+            value={
+              typeof caps?.max_context_tokens === "number" ? fmt(caps.max_context_tokens) : "—"
+            }
+            unit="tokens"
+          />
         </div>
 
-        {/* Recent knowledge — the reference's "Recent Knowledge Extraction", real. */}
-        <div className="rounded-xl border border-edge bg-panel p-4">
+        {/* Quick start — a real entry to chat, not a fake terminal. It's an
+            input-styled button because chat's draft lives elsewhere; typed
+            text couldn't be carried honestly, so we open the chat instead. */}
+        <section className="rounded-2xl border border-edge bg-panel p-5">
+          <h3 className="text-base font-semibold text-on-surface">
+            {empty ? "Start a conversation" : "Ask Raphael"}
+          </h3>
+          <p className="mt-1 text-sm text-muted">
+            {empty
+              ? "Raphael learns as you talk — facts and memories appear here."
+              : "Pick up where you left off, or ask something new."}
+          </p>
+          <button
+            onClick={() => onNavigate("chat")}
+            className="mt-4 flex w-full items-center gap-3 rounded-xl border border-edge bg-raised px-4 py-3 text-left text-sm text-faint transition-colors hover:border-accent/50 hover:text-muted"
+          >
+            <span className="core-hub h-2 w-2 shrink-0 rounded-full bg-accent" aria-hidden />
+            Ask Raphael anything…
+            <span className="ml-auto shrink-0 rounded-md bg-accent px-3 py-1 text-xs font-medium text-on-accent">
+              Start a conversation
+            </span>
+          </button>
+        </section>
+
+        {/* Recent knowledge — the strongest facts Raphael actually knows. */}
+        <section className="rounded-2xl border border-edge bg-panel p-5">
           <div className="flex items-center justify-between">
             <h3 className="text-base font-semibold text-on-surface">Recent knowledge</h3>
             <ActivitySparkline activity={stats?.activity ?? []} />
           </div>
           <div className="mt-3 flex flex-col divide-y divide-edge">
+            {stats === null && <p className="py-3 text-sm text-faint">Loading…</p>}
             {stats && stats.top_facts.length === 0 && (
               <p className="py-3 text-sm text-faint">
                 Nothing learned yet — chat with Raphael and facts appear here.
@@ -178,11 +199,10 @@ export default function Dashboard({
               </div>
             ))}
           </div>
-        </div>
+        </section>
 
         {/* Quick links */}
         <div className="flex flex-wrap gap-2">
-          <QuickLink label="Start a chat" onClick={() => onNavigate("chat")} />
           <QuickLink label="Open graph" onClick={() => onNavigate("graph")} />
           <QuickLink label="Settings" onClick={() => onNavigate("settings")} />
         </div>
@@ -191,24 +211,106 @@ export default function Dashboard({
   );
 }
 
-function StatTile({ label, value }: { label: string; value: string }) {
+// The living core: a soft radial halo, faint concentric rings, two slowly
+// counter-rotating dashed rings and a breathing hub. Pure decoration — real
+// state lives in the readable text beside it, so this is aria-hidden. Motion
+// is CSS-only and disabled under prefers-reduced-motion (see globals.css).
+function Core() {
   return (
-    <div className="rounded-xl border border-edge bg-panel p-4">
-      <p className="text-3xl font-semibold tabular-nums text-on-surface">{value}</p>
-      <p className="mt-1 text-sm text-muted">{label}</p>
+    <div className="relative grid h-40 w-40 shrink-0 place-items-center md:h-48 md:w-48" aria-hidden>
+      <div className="anim-breathe core-glow absolute inset-2 rounded-full" />
+      <svg viewBox="0 0 220 220" className="relative h-full w-full">
+        <g fill="none">
+          <circle cx="110" cy="110" r="100" stroke="var(--color-edge)" strokeWidth="1" />
+          <circle
+            cx="110"
+            cy="110"
+            r="80"
+            stroke="var(--color-edge)"
+            strokeWidth="1"
+            opacity="0.7"
+          />
+          <circle
+            cx="110"
+            cy="110"
+            r="58"
+            stroke="var(--color-edge)"
+            strokeWidth="1"
+            opacity="0.5"
+          />
+          <circle
+            cx="110"
+            cy="110"
+            r="100"
+            stroke="var(--color-accent)"
+            strokeWidth="1.5"
+            strokeDasharray="2 12"
+            opacity="0.8"
+            className="anim-rotate spin-center"
+          />
+          <circle
+            cx="110"
+            cy="110"
+            r="80"
+            stroke="var(--color-glow)"
+            strokeWidth="1.5"
+            strokeDasharray="34 210"
+            strokeLinecap="round"
+            opacity="0.75"
+            className="anim-rotate-rev spin-center"
+          />
+        </g>
+        <circle
+          cx="110"
+          cy="110"
+          r="16"
+          fill="var(--color-accent)"
+          className="core-hub anim-breathe spin-center"
+        />
+      </svg>
     </div>
   );
 }
 
-function Pill({ on, label }: { on: boolean; label: string }) {
+function Gauge({ label, value, unit }: { label: string; value: string; unit?: string }) {
+  return (
+    <div className="glow-accent rounded-2xl border border-edge bg-panel p-4">
+      <p className="text-[11px] uppercase tracking-widest text-faint">{label}</p>
+      <p className="mt-2 flex items-baseline gap-1">
+        <span className="text-3xl font-semibold tabular-nums text-on-surface">{value}</span>
+        {unit && <span className="text-xs text-faint">{unit}</span>}
+      </p>
+      {/* decorative glowing rail — not a ratio, just a sign of life */}
+      <div className="mt-3 h-1 rounded-full bg-gradient-to-r from-accent to-glow opacity-80" />
+    </div>
+  );
+}
+
+function Pill({
+  on,
+  label,
+  warnOff,
+  title,
+}: {
+  on: boolean;
+  label: string;
+  warnOff?: boolean;
+  title?: string;
+}) {
+  const cls = on
+    ? "bg-accent/15 text-accent"
+    : warnOff
+      ? "bg-warning/10 text-warning"
+      : "bg-raised text-faint";
+  const dot = on ? "bg-accent" : warnOff ? "bg-warning" : "bg-faint";
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs ${
-        on ? "bg-accent/15 text-accent" : "bg-raised text-faint"
-      }`}
+      title={title}
+      className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs ${cls}`}
     >
-      <span className={`h-1.5 w-1.5 rounded-full ${on ? "bg-accent" : "bg-faint"}`} />
-      {label} {on ? "on" : "off"}
+      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+      {label}
+      {!warnOff && ` ${on ? "on" : "off"}`}
     </span>
   );
 }
