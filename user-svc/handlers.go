@@ -184,7 +184,7 @@ func (s *server) clearLifeboat(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getProfile(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
-	name, err := s.store.getAssistantName(r.Context(), uid)
+	name, onboarded, err := s.store.getProfile(r.Context(), uid)
 	if err != nil {
 		if errors.Is(err, errNotFound) {
 			writeErr(w, http.StatusNotFound, "user not found")
@@ -193,11 +193,14 @@ func (s *server) getProfile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to read profile")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"assistant_name": name})
+	writeJSON(w, http.StatusOK, map[string]any{"assistant_name": name, "onboarded": onboarded})
 }
 
 type updateProfileReq struct {
 	AssistantName string `json:"assistant_name"`
+	// Pointer so an absent onboarded is distinguishable from false: nil leaves
+	// the flag unchanged (Settings name edits must not reset onboarding).
+	Onboarded *bool `json:"onboarded"`
 }
 
 func (s *server) putProfile(w http.ResponseWriter, r *http.Request) {
@@ -223,7 +226,7 @@ func (s *server) putProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.setAssistantName(r.Context(), uid, name); err != nil {
+	if err := s.store.setProfile(r.Context(), uid, name, req.Onboarded); err != nil {
 		if errors.Is(err, errNotFound) {
 			writeErr(w, http.StatusNotFound, "user not found")
 			return
@@ -231,7 +234,14 @@ func (s *server) putProfile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to update profile")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"assistant_name": name})
+	// Echo the persisted onboarded value: the one just set, else the stored one.
+	onboarded := false
+	if req.Onboarded != nil {
+		onboarded = *req.Onboarded
+	} else if _, cur, err := s.store.getProfile(r.Context(), uid); err == nil {
+		onboarded = cur
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"assistant_name": name, "onboarded": onboarded})
 }
 
 func (s *server) internalActive(w http.ResponseWriter, r *http.Request) {

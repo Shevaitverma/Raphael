@@ -59,6 +59,11 @@ export default function Page() {
   // loads; the system-prompt name is set server-side and never sent from here.
   const [assistantName, setAssistantName] = useState("Raphael");
 
+  // null = not yet known (profile still loading / failed). We only show the
+  // onboarding screen once we KNOW it's false, so it never flashes on load and
+  // a failed profile fetch fails open (stays null → straight into the app).
+  const [onboarded, setOnboarded] = useState<boolean | null>(null);
+
   // The toggle is the only gate on search, so it must survive a reload — but a
   // sticky true means nothing if this deployment has no search key, hence both
   // flags. searchOn, never `search` alone, is what reaches the wire.
@@ -100,6 +105,8 @@ export default function Page() {
     setSending(false);
     setError(null);
     setAssistantName("Raphael");
+    // The server flag is the source of truth; drop it so a re-login re-checks.
+    setOnboarded(null);
   }, []);
 
   // Every /api call funnels its failure here: an expired token ends the session,
@@ -138,17 +145,23 @@ export default function Page() {
     };
   }, [token]);
 
-  // Load the display name once signed in. A failure keeps the "Raphael" default
-  // and surfaces through the same banner as everything else — never swallowed.
+  // Load the display name + onboarding flag once signed in. A failure keeps the
+  // "Raphael" default, surfaces through the same banner as everything else, and
+  // fails OPEN on the onboarding gate: marking onboarded true lets the user into
+  // the app rather than stranding them on a naming screen that never loaded.
   useEffect(() => {
     if (!token) return;
     let live = true;
     getProfile(token)
       .then((p) => {
-        if (live && p.assistant_name) setAssistantName(p.assistant_name);
+        if (!live) return;
+        if (p.assistant_name) setAssistantName(p.assistant_name);
+        setOnboarded(p.onboarded);
       })
       .catch((e) => {
-        if (live) failed(e);
+        if (!live) return;
+        setOnboarded(true); // fail open — never lock someone out of their app
+        failed(e);
       });
     return () => {
       live = false;
@@ -313,6 +326,19 @@ export default function Page() {
 
   if (!token) {
     return <LoginScreen onLogin={handleLogin} loading={loggingIn} error={authError} />;
+  }
+
+  // Only once we KNOW onboarding is incomplete — never while it's still unknown.
+  if (onboarded === false) {
+    return (
+      <OnboardingScreen
+        token={token}
+        onDone={(name) => {
+          setAssistantName(name);
+          setOnboarded(true);
+        }}
+      />
+    );
   }
 
   return (
@@ -503,6 +529,86 @@ function LoginScreen({
         {error && (
           <p className="max-w-md text-center text-sm text-error">{error}</p>
         )}
+      </div>
+    </div>
+  );
+}
+
+// First-login screen: pick the assistant's name, then mark onboarding complete.
+// Same flat card as LoginScreen. A blank name falls back to "Raphael" — the goal
+// is to get the user in, not to block them on a field.
+function OnboardingScreen({
+  token,
+  onDone,
+}: {
+  token: string;
+  onDone: (name: string) => void;
+}) {
+  const [name, setName] = useState("Raphael");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const p = await updateProfile(token, name.trim() || "Raphael", { onboarded: true });
+      onDone(p.assistant_name);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setSaving(false); // stay put so they can retry — don't advance on failure
+    }
+  }
+
+  return (
+    <div className="flex h-screen flex-col items-center justify-center bg-surface px-4 font-sans text-on-surface">
+      <div className="flex w-full max-w-sm flex-col gap-4 rounded-xl border border-edge bg-panel px-8 py-10">
+        <div className="text-center">
+          <h1 className="font-display text-3xl font-semibold tracking-wide text-accent">
+            Welcome
+          </h1>
+          <p className="mt-2 text-sm text-muted">
+            What would you like to call your assistant?
+          </p>
+        </div>
+
+        {error && (
+          <div
+            role="alert"
+            className="border-l-2 border-error bg-error/10 px-3 py-2 text-sm text-error"
+          >
+            {error}
+          </div>
+        )}
+
+        <label className="flex flex-col gap-1.5 text-sm">
+          <span className="text-[11px] uppercase tracking-widest text-faint">
+            Assistant name
+          </span>
+          <input
+            autoFocus
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void submit();
+              }
+            }}
+            maxLength={40}
+            placeholder="Raphael"
+            className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent"
+          />
+        </label>
+
+        <button
+          onClick={() => void submit()}
+          disabled={saving}
+          className="w-full rounded-md bg-accent px-5 py-2.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
+        >
+          {saving ? "Saving…" : "Continue"}
+        </button>
       </div>
     </div>
   );

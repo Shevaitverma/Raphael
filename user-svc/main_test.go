@@ -444,6 +444,80 @@ func TestPutAssistantNameValidation(t *testing.T) {
 	}
 }
 
+// GET /profile must carry the onboarded flag. Reset it to a known value so the
+// test is order-independent.
+func TestGetProfileIncludesOnboarded(t *testing.T) {
+	srv := newTestServer(t)
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE users SET onboarded = false WHERE id = $1`, testUserID); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	rec := do(t, srv, http.MethodGet, "/users/"+testUserID+"/profile", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get profile: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	v, ok := got["onboarded"]
+	if !ok {
+		t.Fatalf("get profile missing onboarded field: %s", rec.Body.String())
+	}
+	if v != false {
+		t.Fatalf("onboarded = %v, want false", v)
+	}
+}
+
+// PUT with onboarded:true persists it, and GET reflects it.
+func TestPutOnboardedSetsAndGetReflects(t *testing.T) {
+	srv := newTestServer(t)
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE users SET onboarded = false WHERE id = $1`, testUserID); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	rec := do(t, srv, http.MethodPut, "/users/"+testUserID+"/profile",
+		map[string]any{"assistant_name": "Jarvis", "onboarded": true})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var put map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &put)
+	if put["onboarded"] != true {
+		t.Fatalf("put returned onboarded=%v, want true", put["onboarded"])
+	}
+	rec = do(t, srv, http.MethodGet, "/users/"+testUserID+"/profile", nil)
+	var got map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["onboarded"] != true {
+		t.Fatalf("get after put onboarded=%v, want true", got["onboarded"])
+	}
+}
+
+// The load-bearing one: a PUT with ONLY assistant_name (a Settings name edit)
+// must NOT flip onboarded back to false.
+func TestPutNameOnlyLeavesOnboardedUnchanged(t *testing.T) {
+	srv := newTestServer(t)
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE users SET onboarded = true WHERE id = $1`, testUserID); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	rec := do(t, srv, http.MethodPut, "/users/"+testUserID+"/profile",
+		map[string]string{"assistant_name": "Friday"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var put map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &put)
+	if put["onboarded"] != true {
+		t.Fatalf("name-only put returned onboarded=%v, want unchanged true", put["onboarded"])
+	}
+	rec = do(t, srv, http.MethodGet, "/users/"+testUserID+"/profile", nil)
+	var got map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["onboarded"] != true {
+		t.Fatalf("get after name-only put onboarded=%v, want true (must not reset)", got["onboarded"])
+	}
+}
+
 func TestProfileNonUUIDIs404Not500(t *testing.T) {
 	srv := newTestServer(t)
 	rec := do(t, srv, http.MethodGet, "/users/not-a-uuid/profile", nil)

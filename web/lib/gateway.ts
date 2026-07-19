@@ -190,7 +190,7 @@ export async function clearLifeboat(token: string, id: string): Promise<Credenti
 
 // --- profile (display-only assistant name) -----------------------------------
 
-export type Profile = { assistant_name: string };
+export type Profile = { assistant_name: string; onboarded: boolean };
 
 export async function getProfile(token: string): Promise<Profile> {
   const res = await fetch(`${GATEWAY_URL}/api/profile`, { headers: authHeader(token) });
@@ -198,11 +198,21 @@ export async function getProfile(token: string): Promise<Profile> {
   return res.json();
 }
 
-export async function updateProfile(token: string, assistantName: string): Promise<Profile> {
+// `onboarded` is sent only when opts.onboarded is given, so Settings (which omits
+// it) leaves the server flag untouched while onboarding can set it true.
+export async function updateProfile(
+  token: string,
+  assistantName: string,
+  opts?: { onboarded?: boolean },
+): Promise<Profile> {
+  const body: { assistant_name: string; onboarded?: boolean } = {
+    assistant_name: assistantName,
+  };
+  if (opts?.onboarded !== undefined) body.onboarded = opts.onboarded;
   const res = await fetch(`${GATEWAY_URL}/api/profile`, {
     method: "PUT",
     headers: { "Content-Type": "application/json", ...authHeader(token) },
-    body: JSON.stringify({ assistant_name: assistantName }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new ApiError(await errText(res, "save name"), res.status);
   return res.json();

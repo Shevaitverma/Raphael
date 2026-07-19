@@ -284,33 +284,40 @@ func validUUID(s string) bool {
 	return u.Scan(s) == nil
 }
 
-// getAssistantName returns the user's per-user assistant name (DEFAULT 'Raphael').
-// errNotFound when the user row is absent or uid is not a uuid.
-func (s *store) getAssistantName(ctx context.Context, userID string) (string, error) {
+// getProfile returns the user's per-user assistant name (DEFAULT 'Raphael') and
+// onboarded flag. errNotFound when the user row is absent or uid is not a uuid.
+func (s *store) getProfile(ctx context.Context, userID string) (name string, onboarded bool, err error) {
 	if !validUUID(userID) {
-		return "", errNotFound
+		return "", false, errNotFound
 	}
-	var name string
-	err := s.pool.QueryRow(ctx,
-		`SELECT assistant_name FROM users WHERE id = $1`, userID).Scan(&name)
+	err = s.pool.QueryRow(ctx,
+		`SELECT assistant_name, onboarded FROM users WHERE id = $1`, userID).Scan(&name, &onboarded)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", errNotFound
+			return "", false, errNotFound
 		}
-		return "", err
+		return "", false, err
 	}
-	return name, nil
+	return name, onboarded, nil
 }
 
-// setAssistantName updates the name scoped by id. Callers trim/validate first;
-// the DB CHECK is a backstop. errNotFound when no row matches (missing user or
-// non-uuid uid).
-func (s *store) setAssistantName(ctx context.Context, userID, name string) error {
+// setProfile updates the name scoped by id, and onboarded too when non-nil (a
+// nil onboarded leaves the column untouched, so Settings name edits don't reset
+// onboarding). Callers trim/validate the name first; the DB CHECK is a backstop.
+// errNotFound when no row matches (missing user or non-uuid uid).
+func (s *store) setProfile(ctx context.Context, userID, name string, onboarded *bool) error {
 	if !validUUID(userID) {
 		return errNotFound
 	}
-	ct, err := s.pool.Exec(ctx,
-		`UPDATE users SET assistant_name = $1 WHERE id = $2`, name, userID)
+	var ct pgconn.CommandTag
+	var err error
+	if onboarded != nil {
+		ct, err = s.pool.Exec(ctx,
+			`UPDATE users SET assistant_name = $1, onboarded = $2 WHERE id = $3`, name, *onboarded, userID)
+	} else {
+		ct, err = s.pool.Exec(ctx,
+			`UPDATE users SET assistant_name = $1 WHERE id = $2`, name, userID)
+	}
 	if err != nil {
 		return err
 	}

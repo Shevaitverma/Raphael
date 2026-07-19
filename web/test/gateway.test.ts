@@ -195,6 +195,40 @@ test("getProfile parses the assistant name", async () => {
   assert.equal(p.assistant_name, "Ada");
 });
 
+test("getProfile parses the onboarded flag", async () => {
+  const p = await withFetch(
+    async () => new Response('{"assistant_name":"Ada","onboarded":false}', { status: 200 }),
+    () => getProfile("t"),
+  );
+  assert.equal(p.onboarded, false);
+});
+
+test("updateProfile omits onboarded when no flag is passed (Settings path)", async () => {
+  let sentBody: unknown;
+  await withFetch(
+    async (_url, init) => {
+      sentBody = JSON.parse((init as RequestInit).body as string);
+      return new Response('{"assistant_name":"Ada","onboarded":true}', { status: 200 });
+    },
+    () => updateProfile("t", "Ada"),
+  );
+  assert.deepEqual(sentBody, { assistant_name: "Ada" });
+  assert.ok(!("onboarded" in (sentBody as object)));
+});
+
+test("updateProfile sends onboarded when the onboarding flow asks for it", async () => {
+  let sentBody: unknown;
+  const p = await withFetch(
+    async (_url, init) => {
+      sentBody = JSON.parse((init as RequestInit).body as string);
+      return new Response('{"assistant_name":"Ada","onboarded":true}', { status: 200 });
+    },
+    () => updateProfile("t", "Ada", { onboarded: true }),
+  );
+  assert.deepEqual(sentBody, { assistant_name: "Ada", onboarded: true });
+  assert.equal(p.onboarded, true);
+});
+
 test("updateProfile parses the saved name", async () => {
   const p = await withFetch(
     async () => new Response('{"assistant_name":"Ada"}', { status: 200 }),
