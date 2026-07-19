@@ -253,6 +253,91 @@ func TestProfileForcesJWTUID(t *testing.T) {
 	}
 }
 
+// TestTasksForcesJWTUID proves the tasks CRUD proxy roots every target at
+// /users/<jwt-uid>/tasks: GET lists at the JWT uid; PATCH /api/tasks/<id>
+// reaches /users/<jwt-uid>/tasks/<id> with method PATCH and the body forwarded;
+// and a spoofed uid in the path does not change the forwarded uid. Fails against
+// pre-change code: the routes did not exist (404).
+func TestTasksForcesJWTUID(t *testing.T) {
+	var gotPath, gotMethod, gotBody string
+	user := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer user.Close()
+
+	cfg := testConfig(user.URL, "http://127.0.0.1:1", "http://127.0.0.1:1")
+	app := newServerT(t, cfg).BuildApp()
+	token, uid := login(t, app, fmt.Sprintf("task-%d@raphael.local", time.Now().UnixNano()))
+
+	// GET must land on /users/<jwt-uid>/tasks.
+	{
+		req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req, 5000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("GET /api/tasks status = %d, want 200", resp.StatusCode)
+		}
+		if want := "/users/" + uid + "/tasks"; gotPath != want {
+			t.Fatalf("GET upstream path = %q, want %q", gotPath, want)
+		}
+		if gotMethod != http.MethodGet {
+			t.Fatalf("GET upstream method = %q, want GET", gotMethod)
+		}
+	}
+
+	// PATCH /api/tasks/<id> must reach /users/<jwt-uid>/tasks/<id> with PATCH and
+	// forward the body.
+	{
+		taskID := "77777777-7777-7777-7777-777777777777"
+		body, _ := json.Marshal(map[string]any{"done": true})
+		req := httptest.NewRequest(http.MethodPatch, "/api/tasks/"+taskID, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req, 5000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("PATCH /api/tasks/<id> status = %d, want 200", resp.StatusCode)
+		}
+		if want := "/users/" + uid + "/tasks/" + taskID; gotPath != want {
+			t.Fatalf("PATCH upstream path = %q, want %q", gotPath, want)
+		}
+		if gotMethod != http.MethodPatch {
+			t.Fatalf("PATCH upstream method = %q, want PATCH", gotMethod)
+		}
+		if !strings.Contains(gotBody, "done") {
+			t.Fatalf("PATCH upstream body = %q, want it to carry the body", gotBody)
+		}
+	}
+
+	// A spoofed uid in the path must not retarget: /api/tasks routes ignore any
+	// client uid, the target is always rooted at the JWT uid.
+	{
+		spoof := "11111111-1111-1111-1111-111111111111"
+		req := httptest.NewRequest(http.MethodGet, "/api/tasks?user_id="+spoof, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req, 5000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("spoof GET status = %d, want 200", resp.StatusCode)
+		}
+		if want := "/users/" + uid + "/tasks"; gotPath != want {
+			t.Fatalf("spoof upstream path = %q, want %q (spoofed uid must not retarget)", gotPath, want)
+		}
+	}
+}
+
 // TestMemoryGraphForcesJWTUID proves GET /api/memory/graph reaches agent-svc at
 // /memory/graph with ?user_id=<jwt uid> forced from the JWT. A spoofed user_id
 // in the request query must not change the forwarded uid. Fails against

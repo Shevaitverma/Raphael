@@ -54,6 +54,12 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /users/{uid}/profile", s.getProfile)
 	mux.HandleFunc("PUT /users/{uid}/profile", s.putProfile)
 
+	// Per-user tasks — public, uid-scoped like profile (no requireInternal).
+	mux.HandleFunc("GET /users/{uid}/tasks", s.listTasks)
+	mux.HandleFunc("POST /users/{uid}/tasks", s.createTask)
+	mux.HandleFunc("PATCH /users/{uid}/tasks/{id}", s.patchTask)
+	mux.HandleFunc("DELETE /users/{uid}/tasks/{id}", s.deleteTask)
+
 	// Google account connection — public routes never return a token (status is
 	// booleans + display email + scope names only).
 	mux.HandleFunc("GET /users/{uid}/google/status", s.googleStatus)

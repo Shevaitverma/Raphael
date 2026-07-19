@@ -141,6 +141,14 @@ func (s *Server) BuildApp() *fiber.App {
 	api.Get("/profile", s.proxyProfile)
 	api.Put("/profile", s.proxyProfile)
 
+	// Tasks: CRUD rooted at /users/<uid>/tasks so the uid always comes from the
+	// JWT, never a client-supplied one. The :id (a task uuid) is path-escaped and
+	// traversal-guarded in proxyTasks.
+	api.Get("/tasks", s.proxyTasks)
+	api.Post("/tasks", s.proxyTasks)
+	api.Patch("/tasks/:id", s.proxyTasks)
+	api.Delete("/tasks/:id", s.proxyTasks)
+
 	// Google: connect builds the consent URL (JWT-gated, returns JSON not a 302
 	// so the JWT stays out of the browser URL); status/disconnect proxy to
 	// user-svc rooted at the JWT uid. The callback is public and mounted above.

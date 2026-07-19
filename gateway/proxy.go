@@ -154,6 +154,37 @@ func (s *Server) proxyProfile(c *fiber.Ctx) error {
 	return s.forward(c, c.Method(), target, body)
 }
 
+// --- tasks proxy → user-svc (PUBLIC routes only) ---------------------------
+//
+// The target path is ALWAYS rooted at /users/<uid>/tasks, so the <uid> comes
+// from the JWT sub and a client-supplied uid is never trusted. The optional
+// :id (a task uuid) is appended for PATCH/DELETE. Same machinery and guards as
+// proxyProfile.
+//
+// GET    /api/tasks     → GET    /users/<uid>/tasks
+// POST   /api/tasks     → POST   /users/<uid>/tasks
+// PATCH  /api/tasks/:id → PATCH  /users/<uid>/tasks/<id>
+// DELETE /api/tasks/:id → DELETE /users/<uid>/tasks/<id>
+func (s *Server) proxyTasks(c *fiber.Ctx) error {
+	uid := c.Locals(userIDKey).(string)
+
+	target := s.cfg.UserSvcURL + "/users/" + uid + "/tasks"
+	if id := c.Params("id"); id != "" {
+		// Guard the client-supplied id exactly like the path guards above, then
+		// path-escape it so it stays a single path segment (no traversal).
+		if strings.Contains(id, "..") || strings.Contains(strings.ToLower(id), "internal") {
+			return fiber.NewError(fiber.StatusBadRequest, "invalid path")
+		}
+		target += "/" + url.PathEscape(id)
+	}
+
+	var body []byte
+	if len(c.Body()) > 0 {
+		body = c.Body()
+	}
+	return s.forward(c, c.Method(), target, body)
+}
+
 // --- capabilities proxy → agent-svc ----------------------------------------
 //
 // GET /api/capabilities → agent-svc GET /capabilities?user_id=<jwt sub>. What

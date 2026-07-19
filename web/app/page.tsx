@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Dashboard from "./Dashboard";
 import MemoryGraph from "./MemoryGraph";
+import Sidebar, { type View } from "./Sidebar";
+import Tasks from "./Tasks";
 import {
   activateProvider,
   addProvider,
@@ -66,9 +68,7 @@ export default function Page() {
 
   // Dashboard is the post-login/onboarding landing. The Google OAuth round-trip
   // still forces "settings" in its effect below.
-  const [view, setView] = useState<"dashboard" | "chat" | "graph" | "settings">(
-    "dashboard",
-  );
+  const [view, setView] = useState<View>("dashboard");
 
   // Result of a Google OAuth round-trip (the gateway redirects back with
   // ?google=connected|error). `googleReload` bumps to re-fetch the connection
@@ -390,43 +390,23 @@ export default function Page() {
   }
 
   return (
-    <div className="flex h-screen flex-col bg-surface font-sans text-on-surface">
-      <header className="z-10 flex items-center justify-between border-b border-edge bg-panel px-4 py-3">
-        <div className="flex items-center gap-5">
-          <h1 className="text-lg font-semibold tracking-tight text-accent">
-            Raphael
-          </h1>
-          <nav className="flex items-center gap-1 text-sm">
-            {(["dashboard", "chat", "graph", "settings"] as const).map((v) => (
-              <button
-                key={v}
-                onClick={() => setView(v)}
-                className={`rounded-md px-3.5 py-1 capitalize transition-colors ${
-                  view === v
-                    ? "bg-raised font-medium text-on-surface"
-                    : "text-muted hover:text-on-surface"
-                }`}
-              >
-                {v}
-              </button>
-            ))}
-          </nav>
-        </div>
-        <div className="flex items-center gap-3 text-sm text-muted">
-          <span>{user?.email ?? user?.id}</span>
-          <button
-            onClick={handleLogout}
-            className="rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface"
-          >
-            Sign out
-          </button>
-        </div>
-      </header>
+    <div className="flex h-screen bg-surface font-sans text-on-surface">
+      <Sidebar
+        view={view}
+        setView={setView}
+        email={user?.email ?? user?.id ?? ""}
+        onLogout={handleLogout}
+      />
 
+      {/* Content column — sits to the RIGHT of the nav rail. For chat it holds
+          its own [conversation list][thread] pair; everything else is one pane. */}
+      <div className="flex min-w-0 flex-1 flex-col">
       {view === "dashboard" ? (
         <Dashboard token={token} onNavigate={setView} onFail={failed} />
       ) : view === "graph" ? (
         <MemoryGraph token={token} onNavigate={setView} onFail={failed} />
+      ) : view === "tasks" ? (
+        <Tasks token={token} onFail={failed} />
       ) : view === "settings" ? (
         <SettingsView
           token={token}
@@ -560,6 +540,7 @@ export default function Page() {
         </main>
       </div>
       )}
+      </div>
     </div>
   );
 }

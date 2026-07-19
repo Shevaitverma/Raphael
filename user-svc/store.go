@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -492,6 +494,124 @@ func (s *store) deleteGoogle(ctx context.Context, userID string) error {
 	}
 	_, err := s.pool.Exec(ctx, `DELETE FROM google_credentials WHERE user_id = $1`, userID)
 	return err
+}
+
+// --- tasks -------------------------------------------------------------------
+// Per-user application data, no secrets. Every query is scoped WHERE user_id, so
+// one user can never read or mutate another's rows. due_date is a Postgres date;
+// it round-trips as a *string ("YYYY-MM-DD" or null) via to_char on read and a
+// $n::date placeholder on write, which keeps the JSON contract exact without a
+// custom time type.
+
+// task is the neutral row shape. due_date is a *string so absent (null) is
+// distinct from any real date; created_at/updated_at marshal as RFC3339.
+type task struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	Notes     string    `json:"notes"`
+	Status    string    `json:"status"`
+	DueDate   *string   `json:"due_date"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+const taskCols = `id, title, notes, status, to_char(due_date, 'YYYY-MM-DD'), created_at, updated_at`
+
+func scanTask(row pgx.Row) (*task, error) {
+	var t task
+	if err := row.Scan(&t.ID, &t.Title, &t.Notes, &t.Status, &t.DueDate, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// listTasks returns the user's tasks ordered open-before-done, then due_date
+// ASC NULLS LAST, then newest first. validUUID guard -> errNotFound.
+func (s *store) listTasks(ctx context.Context, userID string) ([]task, error) {
+	if !validUUID(userID) {
+		return nil, errNotFound
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+taskCols+`
+		FROM tasks
+		WHERE user_id = $1
+		ORDER BY status = 'done', due_date ASC NULLS LAST, created_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []task{}
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *t)
+	}
+	return out, rows.Err()
+}
+
+// createTask inserts a task for the user. Title is validated by the caller; the
+// DB CHECK is only a backstop. dueDate is nil to leave the date unset.
+func (s *store) createTask(ctx context.Context, userID, title, notes string, dueDate *string) (*task, error) {
+	if !validUUID(userID) {
+		return nil, errNotFound
+	}
+	return scanTask(s.pool.QueryRow(ctx, `
+		INSERT INTO tasks (user_id, title, notes, due_date)
+		VALUES ($1, $2, $3, $4::date)
+		RETURNING `+taskCols, userID, title, notes, dueDate))
+}
+
+// updateTask sets only the provided columns (plus updated_at), scoped to the
+// owning user. sets maps column name -> value; keys come from a fixed whitelist
+// in the handler, so the dynamic SQL carries no user input as identifiers. No
+// matching row (wrong id or not owned) -> errNotFound.
+func (s *store) updateTask(ctx context.Context, userID, taskID string, sets map[string]any) (*task, error) {
+	if !validUUID(userID) || !validUUID(taskID) {
+		return nil, errNotFound
+	}
+	clauses := make([]string, 0, len(sets)+1)
+	args := make([]any, 0, len(sets)+2)
+	i := 1
+	for col, val := range sets {
+		ph := fmt.Sprintf("$%d", i)
+		if col == "due_date" {
+			ph += "::date"
+		}
+		clauses = append(clauses, col+" = "+ph)
+		args = append(args, val)
+		i++
+	}
+	clauses = append(clauses, "updated_at = now()")
+	query := fmt.Sprintf(`
+		UPDATE tasks SET %s
+		WHERE id = $%d AND user_id = $%d
+		RETURNING `+taskCols, strings.Join(clauses, ", "), i, i+1)
+	args = append(args, taskID, userID)
+
+	t, err := scanTask(s.pool.QueryRow(ctx, query, args...))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNotFound
+	}
+	return t, err
+}
+
+// deleteTask removes one task scoped to the owning user. RowsAffected 0 (wrong
+// id or not owned) -> errNotFound.
+func (s *store) deleteTask(ctx context.Context, userID, taskID string) error {
+	if !validUUID(userID) || !validUUID(taskID) {
+		return errNotFound
+	}
+	ct, err := s.pool.Exec(ctx, `DELETE FROM tasks WHERE id = $1 AND user_id = $2`, taskID, userID)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return errNotFound
+	}
+	return nil
 }
 
 // errNotFound signals an absent row so handlers can pick 404 vs 204.

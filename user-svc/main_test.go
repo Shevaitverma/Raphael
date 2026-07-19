@@ -37,6 +37,7 @@ func TestMain(m *testing.M) {
 			// Ensure a clean test user with no leftover credentials.
 			_, _ = pool.Exec(ctx, `DELETE FROM provider_credentials WHERE user_id = $1`, testUserID)
 			_, _ = pool.Exec(ctx, `DELETE FROM google_credentials WHERE user_id = $1`, testUserID)
+			_, _ = pool.Exec(ctx, `DELETE FROM tasks WHERE user_id = $1`, testUserID)
 			_, _ = pool.Exec(ctx,
 				`INSERT INTO users (id, email, name) VALUES ($1, 'usersvc-test@raphael.local', 'Test User')
 				 ON CONFLICT (id) DO NOTHING`, testUserID)
@@ -47,6 +48,7 @@ func TestMain(m *testing.M) {
 		ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 		_, _ = testPool.Exec(ctx2, `DELETE FROM provider_credentials WHERE user_id = $1`, testUserID)
 		_, _ = testPool.Exec(ctx2, `DELETE FROM google_credentials WHERE user_id = $1`, testUserID)
+		_, _ = testPool.Exec(ctx2, `DELETE FROM tasks WHERE user_id = $1`, testUserID)
 		cancel2()
 		testPool.Close()
 	}
@@ -67,6 +69,10 @@ func newTestServer(t *testing.T) *server {
 	if _, err := testPool.Exec(context.Background(),
 		`DELETE FROM google_credentials WHERE user_id = $1`, testUserID); err != nil {
 		t.Fatalf("cleanup google: %v", err)
+	}
+	if _, err := testPool.Exec(context.Background(),
+		`DELETE FROM tasks WHERE user_id = $1`, testUserID); err != nil {
+		t.Fatalf("cleanup tasks: %v", err)
 	}
 	cr, err := newCryptor(testEncKey)
 	if err != nil {
@@ -827,5 +833,194 @@ func TestGoogleInternalRequiresToken(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("%s %s without token: got %d, want 401", tc.method, tc.path, rec.Code)
 		}
+	}
+}
+
+// --- tasks -----------------------------------------------------------------
+
+// newTestServer already clears this user's tasks, so each test starts empty.
+
+func createTaskT(t *testing.T, srv *server, body createTaskReq) task {
+	t.Helper()
+	rec := do(t, srv, http.MethodPost, "/users/"+testUserID+"/tasks", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create task: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out task
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode task: %v", err)
+	}
+	return out
+}
+
+// A created task round-trips through GET, and the list is ordered open-before-
+// done, then due_date ASC NULLS LAST.
+func TestTaskCreateListAndOrdering(t *testing.T) {
+	srv := newTestServer(t)
+
+	// created out of final order on purpose.
+	done := createTaskT(t, srv, createTaskReq{Title: "shipped", DueDate: "2020-01-01"})
+	openNoDue := createTaskT(t, srv, createTaskReq{Title: "someday", Notes: "no due date"})
+	openEarly := createTaskT(t, srv, createTaskReq{Title: "urgent", DueDate: "2026-01-01"})
+	openLate := createTaskT(t, srv, createTaskReq{Title: "later", DueDate: "2026-12-31"})
+
+	// Mark one done via PATCH so it sorts last.
+	rec := do(t, srv, http.MethodPatch, "/users/"+testUserID+"/tasks/"+done.ID,
+		map[string]string{"status": "done"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mark done: got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, srv, http.MethodGet, "/users/"+testUserID+"/tasks", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got []task
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	wantOrder := []string{openEarly.ID, openLate.ID, openNoDue.ID, done.ID}
+	if len(got) != len(wantOrder) {
+		t.Fatalf("list len = %d, want %d: %s", len(got), len(wantOrder), rec.Body.String())
+	}
+	for i, id := range wantOrder {
+		if got[i].ID != id {
+			t.Fatalf("order[%d] = %s (%q), want %s", i, got[i].ID, got[i].Title, id)
+		}
+	}
+	// The round-tripped fields survive.
+	if got[0].Title != "urgent" || got[0].DueDate == nil || *got[0].DueDate != "2026-01-01" {
+		t.Fatalf("field round-trip failed: %+v", got[0])
+	}
+	if got[2].DueDate != nil {
+		t.Fatalf("no-due task should have null due_date, got %v", *got[2].DueDate)
+	}
+	if got[3].Status != "done" {
+		t.Fatalf("done task status = %q, want done", got[3].Status)
+	}
+}
+
+// Blank and over-length titles are rejected in Go with a clean 400 (never a
+// CHECK-violation 500); notes defaults to "".
+func TestTaskTitleValidation(t *testing.T) {
+	srv := newTestServer(t)
+	for _, title := range []string{"", "   ", strings.Repeat("a", 201)} {
+		rec := do(t, srv, http.MethodPost, "/users/"+testUserID+"/tasks",
+			createTaskReq{Title: title})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("create title %q: got %d, want 400 body=%s", title, rec.Code, rec.Body.String())
+		}
+	}
+	// The 200-char boundary succeeds, and notes defaults to "".
+	tk := createTaskT(t, srv, createTaskReq{Title: strings.Repeat("a", 200)})
+	if tk.Notes != "" {
+		t.Fatalf("notes default = %q, want empty", tk.Notes)
+	}
+	// A bad status on PATCH is a 400.
+	rec := do(t, srv, http.MethodPatch, "/users/"+testUserID+"/tasks/"+tk.ID,
+		map[string]string{"status": "archived"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("patch bad status: got %d, want 400 body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// PATCH status open->done bumps updated_at, and it is uid-scoped: patching a
+// task under another user's uid is a 404, leaving the real task untouched.
+func TestTaskPatchStatusAndScoping(t *testing.T) {
+	srv := newTestServer(t)
+	tk := createTaskT(t, srv, createTaskReq{Title: "do the thing"})
+	if tk.Status != "open" {
+		t.Fatalf("new task status = %q, want open", tk.Status)
+	}
+
+	// Another user's uid must not reach this task -> 404.
+	otherUID := "00000000-0000-0000-0000-0000000000aa"
+	rec := do(t, srv, http.MethodPatch, "/users/"+otherUID+"/tasks/"+tk.ID,
+		map[string]string{"status": "done"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-user patch: got %d, want 404 body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, srv, http.MethodPatch, "/users/"+testUserID+"/tasks/"+tk.ID,
+		map[string]string{"status": "done"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch done: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var updated task
+	_ = json.Unmarshal(rec.Body.Bytes(), &updated)
+	if updated.Status != "done" {
+		t.Fatalf("status after patch = %q, want done", updated.Status)
+	}
+	if !updated.UpdatedAt.After(tk.UpdatedAt) {
+		t.Fatalf("updated_at not bumped: was %s, now %s", tk.UpdatedAt, updated.UpdatedAt)
+	}
+}
+
+// due_date: a PATCH with due_date:null clears it, while an omitted due_date
+// leaves the stored value untouched.
+func TestTaskPatchDueDateClearVsAbsent(t *testing.T) {
+	srv := newTestServer(t)
+	tk := createTaskT(t, srv, createTaskReq{Title: "with a due date", DueDate: "2026-06-06"})
+
+	// Omitting due_date (patching only title) must leave the date in place.
+	rec := do(t, srv, http.MethodPatch, "/users/"+testUserID+"/tasks/"+tk.ID,
+		map[string]string{"title": "renamed"})
+	var afterName task
+	_ = json.Unmarshal(rec.Body.Bytes(), &afterName)
+	if afterName.DueDate == nil || *afterName.DueDate != "2026-06-06" {
+		t.Fatalf("absent due_date changed the date: %v", afterName.DueDate)
+	}
+
+	// Present-but-null clears it.
+	rec = do(t, srv, http.MethodPatch, "/users/"+testUserID+"/tasks/"+tk.ID,
+		map[string]any{"due_date": nil})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear due_date: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var cleared task
+	_ = json.Unmarshal(rec.Body.Bytes(), &cleared)
+	if cleared.DueDate != nil {
+		t.Fatalf("due_date not cleared: %v", *cleared.DueDate)
+	}
+}
+
+// DELETE removes an owned task (200 deleted:true); a not-owned task is 404.
+func TestTaskDeleteOwnedAndNotOwned(t *testing.T) {
+	srv := newTestServer(t)
+	tk := createTaskT(t, srv, createTaskReq{Title: "delete me"})
+
+	otherUID := "00000000-0000-0000-0000-0000000000bb"
+	rec := do(t, srv, http.MethodDelete, "/users/"+otherUID+"/tasks/"+tk.ID, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete not-owned: got %d, want 404 body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, srv, http.MethodDelete, "/users/"+testUserID+"/tasks/"+tk.ID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete owned: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out map[string]bool
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if !out["deleted"] {
+		t.Fatalf("delete response = %s, want deleted:true", rec.Body.String())
+	}
+	// Second delete is now a 404.
+	rec = do(t, srv, http.MethodDelete, "/users/"+testUserID+"/tasks/"+tk.ID, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete again: got %d, want 404", rec.Code)
+	}
+}
+
+// A non-uuid task id must be a clean 404, never a 22P02 -> 500.
+func TestTaskNonUUIDIdIs404(t *testing.T) {
+	srv := newTestServer(t)
+	rec := do(t, srv, http.MethodPatch, "/users/"+testUserID+"/tasks/not-a-uuid",
+		map[string]string{"status": "done"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("patch non-uuid id: got %d, want 404 body=%s", rec.Code, rec.Body.String())
+	}
+	rec = do(t, srv, http.MethodDelete, "/users/"+testUserID+"/tasks/not-a-uuid", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete non-uuid id: got %d, want 404 body=%s", rec.Code, rec.Body.String())
 	}
 }

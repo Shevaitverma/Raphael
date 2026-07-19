@@ -3,15 +3,19 @@ import assert from "node:assert/strict";
 import {
   ApiError,
   connectGoogle,
+  createTask,
+  deleteTask,
   disconnectGoogle,
   getMemoryGraph,
   getMemoryStats,
   getProfile,
+  getTasks,
   googleStatus,
   listMessages,
   storedDegraded,
   streamChat,
   updateProfile,
+  updateTask,
   type ChatHandlers,
   type Degraded,
   type Done,
@@ -534,6 +538,139 @@ test("getMemoryStats raises ApiError carrying the status", async () => {
       () => getMemoryStats("t"),
     ),
     (e) => e instanceof ApiError && (e as ApiError).status === 503,
+  );
+});
+
+// --- tasks -------------------------------------------------------------------
+
+test("getTasks parses the task list", async () => {
+  const tasks = await withFetch(
+    async () =>
+      new Response(
+        JSON.stringify([
+          {
+            id: "t1",
+            title: "Buy milk",
+            notes: "",
+            status: "open",
+            due_date: "2026-07-25",
+          },
+          { id: "t2", title: "Old", notes: "", status: "done", due_date: null },
+        ]),
+        { status: 200 },
+      ),
+    () => getTasks("t"),
+  );
+  assert.equal(tasks.length, 2);
+  assert.equal(tasks[0].title, "Buy milk");
+  assert.equal(tasks[0].due_date, "2026-07-25");
+  assert.equal(tasks[1].status, "done");
+});
+
+test("getTasks raises ApiError carrying the status", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response("nope", { status: 500 }),
+      () => getTasks("t"),
+    ),
+    (e) => e instanceof ApiError && (e as ApiError).status === 500,
+  );
+});
+
+test("createTask sends the body and parses the created task", async () => {
+  let sentBody: unknown;
+  let sentMethod: string | undefined;
+  const task = await withFetch(
+    async (_url, init) => {
+      sentMethod = (init as RequestInit).method;
+      sentBody = JSON.parse((init as RequestInit).body as string);
+      return new Response(
+        JSON.stringify({
+          id: "t3",
+          title: "Ship it",
+          notes: "",
+          status: "open",
+          due_date: "2026-08-01",
+        }),
+        { status: 200 },
+      );
+    },
+    () => createTask("t", { title: "Ship it", due_date: "2026-08-01" }),
+  );
+  assert.equal(sentMethod, "POST");
+  assert.deepEqual(sentBody, { title: "Ship it", due_date: "2026-08-01" });
+  assert.equal(task.id, "t3");
+});
+
+test("createTask raises ApiError with the error body", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response('{"error":"title required"}', { status: 400 }),
+      () => createTask("t", { title: "" }),
+    ),
+    (e) => {
+      assert.ok(e instanceof ApiError);
+      assert.equal((e as ApiError).status, 400);
+      assert.match((e as ApiError).message, /title required/);
+      return true;
+    },
+  );
+});
+
+test("updateTask PATCHes the subset and parses the updated task", async () => {
+  let sentBody: unknown;
+  let sentMethod: string | undefined;
+  const task = await withFetch(
+    async (_url, init) => {
+      sentMethod = (init as RequestInit).method;
+      sentBody = JSON.parse((init as RequestInit).body as string);
+      return new Response(
+        JSON.stringify({
+          id: "t1",
+          title: "Buy milk",
+          notes: "",
+          status: "done",
+          due_date: null,
+        }),
+        { status: 200 },
+      );
+    },
+    () => updateTask("t", "t1", { status: "done" }),
+  );
+  assert.equal(sentMethod, "PATCH");
+  assert.deepEqual(sentBody, { status: "done" });
+  assert.equal(task.status, "done");
+});
+
+test("updateTask raises ApiError carrying the status", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response('{"error":"not found"}', { status: 404 }),
+      () => updateTask("t", "missing", { status: "done" }),
+    ),
+    (e) => e instanceof ApiError && (e as ApiError).status === 404,
+  );
+});
+
+test("deleteTask resolves on a 200", async () => {
+  let sentMethod: string | undefined;
+  await withFetch(
+    async (_url, init) => {
+      sentMethod = (init as RequestInit).method;
+      return new Response('{"deleted":true}', { status: 200 });
+    },
+    () => deleteTask("t", "t1"),
+  );
+  assert.equal(sentMethod, "DELETE");
+});
+
+test("deleteTask raises ApiError carrying the status", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response('{"error":"boom"}', { status: 500 }),
+      () => deleteTask("t", "t1"),
+    ),
+    (e) => e instanceof ApiError && (e as ApiError).status === 500,
   );
 });
 

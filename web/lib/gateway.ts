@@ -203,6 +203,62 @@ export async function clearLifeboat(token: string, id: string): Promise<Credenti
   return res.json();
 }
 
+// --- tasks --------------------------------------------------------------------
+// A plain to-do list, ordered open-first by the API. Same fetch/ApiError/
+// authHeader shape as the provider calls above.
+
+export type Task = {
+  id: string;
+  title: string;
+  notes: string;
+  status: "open" | "done";
+  due_date: string | null; // "YYYY-MM-DD"
+  created_at?: string;
+  updated_at?: string;
+};
+
+export async function getTasks(token: string): Promise<Task[]> {
+  const res = await fetch(`${GATEWAY_URL}/api/tasks`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`list tasks failed: ${res.status}`, res.status);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.tasks ?? []);
+}
+
+export async function createTask(
+  token: string,
+  task: { title: string; notes?: string; due_date?: string | null },
+): Promise<Task> {
+  const res = await fetch(`${GATEWAY_URL}/api/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify(task),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "create task"), res.status);
+  return res.json();
+}
+
+export async function updateTask(
+  token: string,
+  id: string,
+  patch: Partial<Pick<Task, "title" | "notes" | "status" | "due_date">>,
+): Promise<Task> {
+  const res = await fetch(`${GATEWAY_URL}/api/tasks/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "update task"), res.status);
+  return res.json();
+}
+
+export async function deleteTask(token: string, id: string): Promise<void> {
+  const res = await fetch(`${GATEWAY_URL}/api/tasks/${id}`, {
+    method: "DELETE",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "delete task"), res.status);
+}
+
 // --- profile (display-only assistant name) -----------------------------------
 
 export type Profile = { assistant_name: string; onboarded: boolean };
