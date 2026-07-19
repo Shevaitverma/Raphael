@@ -216,12 +216,30 @@ class OpenAICompatProvider:
         )
 
     def stream(self, messages, system=None, tools=None, max_tokens=1024):
-        stream = self._client.chat.completions.create(
-            model=self.model,
-            messages=self._messages(messages, system),
-            max_tokens=max_tokens,
-            stream=True,
-        )
+        # reasoning OFF: a thinking model (qwen3) streams its chain-of-thought into
+        # a SEPARATE field we neither surface nor persist, leaving `content` empty
+        # until it stops. An analytical system prompt then makes it burn the whole
+        # budget thinking and stream nothing. Reasoning is pure cost on this path —
+        # turn it off so the answer lands in content. Same per-model 400-memo
+        # fallback as chat() (a server that rejects reasoning_effort streams anyway).
+        kw = self._optional(json_mode=False, reasoning=False, tools=None)
+        while True:
+            try:
+                stream = self._client.chat.completions.create(
+                    model=self.model,
+                    messages=self._messages(messages, system),
+                    max_tokens=max_tokens,
+                    stream=True,
+                    **kw,
+                )
+                break
+            except BadRequestError:
+                drop = next((k for k in ("extra_body",) if k in kw), None)
+                if drop is None:
+                    raise
+                _UNSUPPORTED.add((self.base_url, self.model, "reasoning_effort"))
+                _log.info("%s rejected reasoning_effort on stream; retrying without", self.model)
+                kw.pop(drop)
         for chunk in stream:
             if not getattr(chunk, "choices", None):
                 continue
