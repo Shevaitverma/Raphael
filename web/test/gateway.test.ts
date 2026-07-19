@@ -4,6 +4,7 @@ import {
   ApiError,
   connectGoogle,
   createTask,
+  deleteConversation,
   deleteTask,
   disconnectGoogle,
   getMemoryGraph,
@@ -669,6 +670,40 @@ test("deleteTask raises ApiError carrying the status", async () => {
     withFetch(
       async () => new Response('{"error":"boom"}', { status: 500 }),
       () => deleteTask("t", "t1"),
+    ),
+    (e) => e instanceof ApiError && (e as ApiError).status === 500,
+  );
+});
+
+// --- conversations: delete ---------------------------------------------------
+
+test("deleteConversation DELETEs and resolves on {deleted:true}", async () => {
+  let sentMethod: string | undefined;
+  await withFetch(
+    async (_url, init) => {
+      sentMethod = (init as RequestInit).method;
+      return new Response('{"deleted":true}', { status: 200 });
+    },
+    () => deleteConversation("t", "c1"),
+  );
+  assert.equal(sentMethod, "DELETE");
+});
+
+test("deleteConversation raises ApiError on 404 (not the caller's)", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response('{"error":"not found"}', { status: 404 }),
+      () => deleteConversation("t", "missing"),
+    ),
+    (e) => e instanceof ApiError && (e as ApiError).status === 404,
+  );
+});
+
+test("deleteConversation raises ApiError carrying the status on 500", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response("boom", { status: 500 }),
+      () => deleteConversation("t", "c1"),
     ),
     (e) => e instanceof ApiError && (e as ApiError).status === 500,
   );

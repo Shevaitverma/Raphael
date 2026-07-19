@@ -126,8 +126,8 @@ func (s *server) patchTask(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, http.StatusBadRequest, "status must be a string")
 				return
 			}
-			if st != "open" && st != "done" {
-				writeErr(w, http.StatusBadRequest, "status must be open or done")
+			if st != "open" && st != "in_progress" && st != "done" {
+				writeErr(w, http.StatusBadRequest, "status must be open, in_progress or done")
 				return
 			}
 			sets["status"] = st

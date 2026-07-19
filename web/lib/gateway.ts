@@ -137,6 +137,14 @@ export async function listMessages(
   return Array.isArray(data) ? data : (data.messages ?? []);
 }
 
+export async function deleteConversation(token: string, id: string): Promise<void> {
+  const res = await fetch(`${GATEWAY_URL}/api/conversations/${id}`, {
+    method: "DELETE",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "delete conversation"), res.status);
+}
+
 // --- provider credentials ----------------------------------------------------
 
 export type Credential = {
@@ -204,14 +212,14 @@ export async function clearLifeboat(token: string, id: string): Promise<Credenti
 }
 
 // --- tasks --------------------------------------------------------------------
-// A plain to-do list, ordered open-first by the API. Same fetch/ApiError/
+// A kanban board, three columns keyed by status. Same fetch/ApiError/
 // authHeader shape as the provider calls above.
 
 export type Task = {
   id: string;
   title: string;
   notes: string;
-  status: "open" | "done";
+  status: "open" | "in_progress" | "done";
   due_date: string | null; // "YYYY-MM-DD"
   created_at?: string;
   updated_at?: string;

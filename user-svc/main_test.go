@@ -933,6 +933,18 @@ func TestTaskPatchStatusAndScoping(t *testing.T) {
 		t.Fatalf("new task status = %q, want open", tk.Status)
 	}
 
+	// The Kanban middle column: in_progress is now accepted (was a 400 pre-widen).
+	rec0 := do(t, srv, http.MethodPatch, "/users/"+testUserID+"/tasks/"+tk.ID,
+		map[string]string{"status": "in_progress"})
+	if rec0.Code != http.StatusOK {
+		t.Fatalf("patch in_progress: got %d, want 200 body=%s", rec0.Code, rec0.Body.String())
+	}
+	var mid task
+	_ = json.Unmarshal(rec0.Body.Bytes(), &mid)
+	if mid.Status != "in_progress" {
+		t.Fatalf("status after in_progress patch = %q, want in_progress", mid.Status)
+	}
+
 	// Another user's uid must not reach this task -> 404.
 	otherUID := "00000000-0000-0000-0000-0000000000aa"
 	rec := do(t, srv, http.MethodPatch, "/users/"+otherUID+"/tasks/"+tk.ID,
