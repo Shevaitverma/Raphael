@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import queue
 import threading
 import time
@@ -18,6 +19,11 @@ from llm import embeddings, resolver
 from memory import read, retriever
 from tools import google as google_tool
 from tools import search as search_tool
+
+# Application INFO lines (workflow: per-turn tokens, skip-gate, extract) go
+# nowhere without a root handler — uvicorn only configures its own loggers. One
+# line makes the skip-gate's effect measurable, as workflow.py's comments promise.
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="agent-svc")
 

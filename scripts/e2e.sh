@@ -23,7 +23,14 @@ psql() { docker exec -i raphael_db psql -U raphael -d raphael "$@"; }
 fail() { echo "FAIL: $*"; cleanup; exit 1; }
 pass() { echo "  PASS: $*"; }
 jget() { "$PY" -c "import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])" "$1" "$2"; }
-cleanup() { [ -n "$STUB_PID" ] && kill "$STUB_PID" >/dev/null 2>&1; rm -rf "$TMP"; }
+cleanup() {
+  [ -n "$STUB_PID" ] && kill "$STUB_PID" >/dev/null 2>&1
+  # Delete the throwaway user; FK ON DELETE CASCADE drops its creds/facts/memories/
+  # tasks/conversations so the DB stays tidy and the next run re-mints it. Keyed on
+  # the constant email, so it is safe even before TUID is assigned.
+  psql -q -c "DELETE FROM users WHERE email='e2e@raphael.test';" >/dev/null 2>&1
+  rm -rf "$TMP"
+}
 trap cleanup EXIT
 
 echo "== 0. health checks =="
@@ -44,18 +51,33 @@ if [ -z "$MODEL" ]; then
 fi
 [ -z "$MODEL" ] && MODEL=$(echo "$TAGS" | "$PY" -c "import json,sys;m=json.load(sys.stdin)['models'];print(m[0]['name'] if m else '')")
 [ -z "$MODEL" ] && fail "no Ollama model available"
-# Reset to a clean local-only state: drop any leftover paid creds first, then
-# point the local row at the chosen model and make it the single active row.
-psql -q -c "DELETE FROM provider_credentials WHERE user_id='$DEV_UID' AND provider IN ('anthropic','openai_compat');" >/dev/null
-psql -q -c "UPDATE provider_credentials SET model_id='$MODEL', is_active=true WHERE user_id='$DEV_UID' AND provider='local';" >/dev/null
-pass "active local credential -> $MODEL"
+pass "selected local model -> $MODEL"
 
-echo "== 1. dev-login =="
+echo "== 1. dev-login (DEDICATED throwaway test user, never DEV_UID) =="
+# dev-login upserts ANY email (gateway/auth.go), so a fixed throwaway address
+# gives us an isolated user. All data below is exercised under TUID, so a bug can
+# never touch the human's real DEV_UID knowledge graph. TUID (not UID — that is a
+# zsh readonly special var) holds the id; cleanup() deletes the user at the end.
 curl -s --max-time 8 -X POST "$GATEWAY/auth/dev-login" -H 'Content-Type: application/json' \
-  -d '{"email":"dev@raphael.local"}' > "$TMP/login.json"
+  -d '{"email":"e2e@raphael.test"}' > "$TMP/login.json"
 TOKEN=$(jget "$TMP/login.json" token)
+TUID=$("$PY" -c "import json,sys;print(json.load(open(sys.argv[1]))['user']['id'])" "$TMP/login.json")
 [ -n "$TOKEN" ] || fail "no token minted"
-pass "JWT minted"
+[ -n "$TUID" ] && [ "$TUID" != "$DEV_UID" ] || fail "dev-login did not mint a dedicated non-DEV_UID user (got '$TUID')"
+pass "JWT minted for throwaway test user $TUID"
+
+echo "== 1b. provision TUID's local credential (clone DEV_UID's seeded 'local' row) =="
+# The ONLY read of DEV_UID data: clone its seeded local credential onto TUID so
+# chat works, pointed at the model chosen in 0b, active and not the lifeboat.
+# delete-then-insert scoped to TUID makes it idempotent across re-runs (a crashed
+# prior run that skipped cleanup re-uses the same email/id).
+psql -q -c "DELETE FROM provider_credentials WHERE user_id='$TUID';" >/dev/null
+psql -q -c "INSERT INTO provider_credentials (id, user_id, provider, auth_type, api_key_enc, base_url, model_id, is_active, is_lifeboat)
+            SELECT gen_random_uuid(), '$TUID', provider, auth_type, api_key_enc, base_url, '$MODEL', true, false
+            FROM provider_credentials WHERE user_id='$DEV_UID' AND provider='local';" >/dev/null
+LOCALPROV=$(psql -Atc "SELECT provider||'='||is_active FROM provider_credentials WHERE user_id='$TUID';")
+[ "$LOCALPROV" = "local=true" ] || fail "TUID local credential not provisioned (got '$LOCALPROV')"
+pass "TUID active local credential -> $MODEL"
 
 echo "== 2. create conversation =="
 curl -s --max-time 8 -X POST "$GATEWAY/api/conversations" -H "Authorization: Bearer $TOKEN" \
@@ -101,9 +123,9 @@ pass "messages persisted: $ROLES"
 # on correct behaviour. last_seen moves on both insert and reinforce, so it means
 # what we actually want to assert: extraction ran and wrote this turn.
 FRESH="SELECT DISTINCT vector_dims(embedding)::text || '|' || embedding_model FROM (
-         SELECT embedding, embedding_model, last_seen FROM memories WHERE user_id='$DEV_UID'
+         SELECT embedding, embedding_model, last_seen FROM memories WHERE user_id='$TUID'
          UNION ALL
-         SELECT embedding, embedding_model, last_seen FROM facts WHERE user_id='$DEV_UID'
+         SELECT embedding, embedding_model, last_seen FROM facts WHERE user_id='$TUID'
        ) r WHERE last_seen > now() - interval '2 minutes';"
 # Extraction runs AFTER the SSE stream closes (workflow.py:9-12), so step 3
 # returning does not mean the row exists yet. Poll; a single query races it.
@@ -127,7 +149,7 @@ echo "== 4b. search turn: the tool call must land as OUR neutral shape =="
 # means the model can be told about it. Both true is exactly the Tier 1
 # precondition, so this section arms itself the moment search lands and skips
 # loudly until then — instead of going red for a feature nobody built yet.
-CAPS=$(curl -s --max-time 8 "$AGENT/capabilities?user_id=$DEV_UID")
+CAPS=$(curl -s --max-time 8 "$AGENT/capabilities?user_id=$TUID")
 WEBSEARCH=$(echo "$CAPS" | "$PY" -c "import json,sys;print(json.load(sys.stdin).get('web_search'))" 2>/dev/null)
 NATIVE=$(echo "$CAPS" | "$PY" -c "import json,sys;print(json.load(sys.stdin).get('native_tools'))" 2>/dev/null)
 if [ "$WEBSEARCH" != "True" ]; then
@@ -136,7 +158,7 @@ elif [ "$NATIVE" != "True" ]; then
   echo "  SKIP: $MODEL reports native_tools=$NATIVE — Tier 2 has no tool call"
 else
   curl -s -N --max-time 180 -X POST "$AGENT/chat" -H 'Content-Type: application/json' \
-    -d "{\"user_id\":\"$DEV_UID\",\"conversation_id\":\"$CID\",\"message\":\"Search the web and tell me one thing that happened in the news today.\",\"search\":true}" \
+    -d "{\"user_id\":\"$TUID\",\"conversation_id\":\"$CID\",\"message\":\"Search the web and tell me one thing that happened in the news today.\",\"search\":true}" \
     > "$TMP/search.sse"
   grep -q "^event: done" "$TMP/search.sse" || fail "search turn never completed: $(head -c 400 "$TMP/search.sse")"
   # count(col) counts NON-NULL, so this is 0 the moment _post_message goes back
@@ -174,8 +196,8 @@ curl -s --max-time 8 -X POST "$GATEWAY/api/providers" -H "Authorization: Bearer 
 # Activating anthropic deactivated local (one active per user). Now designate the
 # inactive local row as the lifeboat — the resolver falls back to is_lifeboat, not
 # to a hardcoded provider='local'.
-psql -q -c "UPDATE provider_credentials SET is_lifeboat=true WHERE user_id='$DEV_UID' AND provider='local';" >/dev/null
-BEFORE=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$DEV_UID';")
+psql -q -c "UPDATE provider_credentials SET is_lifeboat=true WHERE user_id='$TUID' AND provider='local';" >/dev/null
+BEFORE=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$TUID';")
 "$PY" "$HERE/sse_client.py" "$GATEWAY" "$TOKEN" "$CID" \
   "In one short sentence, what is the capital of Japan?" > "$TMP/lifeboat.json"
 cat "$TMP/lifeboat.json"
@@ -189,7 +211,7 @@ assert d["n_done"]==1, "expected one done"
 assert d["degraded_payload"]["provider"]=="local", d["degraded_payload"]
 print("  PASS: degraded->%s, answered by %s"%(d["degraded_payload"]["model"],d["done_payload"]["model"]))
 PYEOF
-AFTER=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$DEV_UID';")
+AFTER=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$TUID';")
 [ "$BEFORE" = "$AFTER" ] || fail "is_active changed by lifeboat: '$BEFORE' -> '$AFTER'"
 pass "is_active unchanged after lifeboat: $AFTER"
 
@@ -200,7 +222,7 @@ sleep 1
 curl -s --max-time 8 -X POST "$GATEWAY/api/providers" -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"provider":"openai_compat","auth_type":"api_key","api_key":"sk-x","base_url":"http://127.0.0.1:9099/v1","model_id":"stub","activate":true}' >/dev/null
-B2=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$DEV_UID';")
+B2=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$TUID';")
 "$PY" "$HERE/sse_client.py" "$GATEWAY" "$TOKEN" "$CID" "should error" > "$TMP/t429.json"
 cat "$TMP/t429.json"
 "$PY" - "$TMP/t429.json" <<'PYEOF' || fail "429 assertions failed"
@@ -212,18 +234,71 @@ assert d["n_token"]==0, "no tokens on transient error"
 assert "429" in json.dumps(d["error_payload"]), d["error_payload"]
 print("  PASS: error (no lifeboat) on 429")
 PYEOF
-A2=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$DEV_UID';")
+A2=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$TUID';")
 [ "$B2" = "$A2" ] || fail "is_active changed by 429 path"
 pass "is_active unchanged after 429: $A2"
 kill "$STUB_PID" >/dev/null 2>&1; STUB_PID=""
 
 echo "== 8. restore local as the active credential =="
-psql -q -c "DELETE FROM provider_credentials WHERE user_id='$DEV_UID' AND provider IN ('anthropic','openai_compat');" >/dev/null
+psql -q -c "DELETE FROM provider_credentials WHERE user_id='$TUID' AND provider IN ('anthropic','openai_compat');" >/dev/null
 # Clear the lifeboat flag as we reactivate local — a row cannot be both active
 # and the lifeboat (active_is_not_lifeboat CHECK).
-psql -q -c "UPDATE provider_credentials SET is_active=true, is_lifeboat=false WHERE user_id='$DEV_UID' AND provider='local';" >/dev/null
-FINAL=$(psql -Atc "SELECT provider||'='||is_active FROM provider_credentials WHERE user_id='$DEV_UID';")
+psql -q -c "UPDATE provider_credentials SET is_active=true, is_lifeboat=false WHERE user_id='$TUID' AND provider='local';" >/dev/null
+FINAL=$(psql -Atc "SELECT provider||'='||is_active FROM provider_credentials WHERE user_id='$TUID';")
 pass "restored: $FINAL"
+
+echo "== 9. two doors + skip-gate (token minimization) =="
+# Runs on the restored local credential (section 8). Three proofs, ordered so an
+# earlier proof's async extraction can never perturb a later count:
+#   (c) a contentless chat turn stores NO fact (the extraction skip-gate);
+#   (b) a UI create (direct POST /api/tasks) writes NO message/turn (0 LLM);
+#   (a) a task created via CHAT lands at GET /api/tasks — the SAME row the board makes.
+# (a) is arm-when-capable: chat can only tool-call a create on a native-tools model.
+
+# --- (c) skip-gate: a contentless turn stores no fact ---------------------------
+# "ok" has NO content word (extract._words drops <=2-char tokens and stopwords),
+# so extraction is a provable no-op and is skipped before any extractor spend.
+# Settle first so any in-flight extraction from sections 6-8 has landed, THEN
+# snapshot — the "ok" turn itself writes nothing, so the count must not move.
+sleep 3
+FB=$(psql -Atc "SELECT (SELECT count(*) FROM facts WHERE user_id='$TUID')+(SELECT count(*) FROM memories WHERE user_id='$TUID');")
+"$PY" "$HERE/sse_client.py" "$GATEWAY" "$TOKEN" "$CID" "ok" > "$TMP/skip.json"
+sleep 6  # extraction runs AFTER the stream closes; give a real extractor time to write
+FA=$(psql -Atc "SELECT (SELECT count(*) FROM facts WHERE user_id='$TUID')+(SELECT count(*) FROM memories WHERE user_id='$TUID');")
+[ "$FB" = "$FA" ] || fail "contentless 'ok' turn wrote a fact/memory ($FB -> $FA) — skip-gate failed"
+pass "skip-gate: contentless 'ok' stored no fact ($FA unchanged)"
+
+# --- (b) UI door: a direct REST create spends NO LLM and writes NO message ------
+MB=$(psql -Atc "SELECT count(*) FROM messages WHERE conversation_id='$CID';")
+curl -s --max-time 8 -X POST "$GATEWAY/api/tasks" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"title":"ui-created task"}' > "$TMP/ui_task.json"
+UITID=$("$PY" -c "import json,sys;print(json.load(open(sys.argv[1])).get('id',''))" "$TMP/ui_task.json" 2>/dev/null)
+[ -n "$UITID" ] || fail "UI create POST /api/tasks returned no id: $(cat "$TMP/ui_task.json")"
+MA=$(psql -Atc "SELECT count(*) FROM messages WHERE conversation_id='$CID';")
+[ "$MB" = "$MA" ] || fail "UI task create wrote a message row ($MB -> $MA) — the board path must be 100% LLM-free"
+pass "UI door: POST /api/tasks made a task with 0 messages/turns ($MA unchanged)"
+psql -q -c "DELETE FROM tasks WHERE id='$UITID';" >/dev/null  # own dev-user row; reset for re-runs
+
+# --- (a) chat door: create the SAME task via NL; needs native tool-calling ------
+CAPS9=$(curl -s --max-time 8 "$AGENT/capabilities?user_id=$TUID")
+NATIVE9=$(echo "$CAPS9" | "$PY" -c "import json,sys;print(json.load(sys.stdin).get('native_tools'))" 2>/dev/null)
+if [ "$NATIVE9" != "True" ]; then
+  echo "  SKIP: $MODEL reports native_tools=$NATIVE9 — chat cannot tool-call a task create"
+else
+  "$PY" "$HERE/sse_client.py" "$GATEWAY" "$TOKEN" "$CID" \
+    "Add a task to my list to buy oat milk." > "$TMP/task_chat.json"
+  # Poll GET /api/tasks — the SAME route the board hits — for the new row. The
+  # create fires in _preflight (before the stream), so it lands fast.
+  FOUND=""
+  for _ in $(seq 1 15); do
+    curl -s --max-time 8 "$GATEWAY/api/tasks" -H "Authorization: Bearer $TOKEN" > "$TMP/tasks.json"
+    "$PY" -c "import json,sys;t=json.load(open(sys.argv[1]));sys.exit(0 if any('oat milk' in (x.get('title') or '').lower() for x in t) else 1)" "$TMP/tasks.json" && FOUND=1 && break
+    sleep 1
+  done
+  [ -n "$FOUND" ] || fail "chat create_task never produced a row at GET /api/tasks: $(head -c 300 "$TMP/tasks.json")"
+  pass "chat door: 'buy oat milk' task visible at GET /api/tasks (byte-identical route to the board)"
+  psql -q -c "DELETE FROM tasks WHERE user_id='$TUID' AND lower(title) LIKE '%oat milk%';" >/dev/null  # reset
+fi
 
 echo ""
 echo "ALL E2E ASSERTIONS PASSED"

@@ -1,6 +1,27 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  closestCorners,
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  PointerSensor,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import {
   createTask,
   deleteTask,
@@ -8,16 +29,53 @@ import {
   updateTask,
   type Task,
 } from "@/lib/gateway";
+import {
+  levelForXp,
+  questXp,
+  rankForLevel,
+  totalXp,
+  XP_BY_PRIORITY,
+} from "@/lib/quests";
 
 // The board's three columns, left to right. `status` is the frozen contract
-// value the API stores; `label` is the human column heading.
+// value the API stores; the rest is presentation. `dot` tints the column's
+// status marker; `tint` is the drag-over wash. UI language is "quest"; the
+// stored status stays open|in_progress|done — never rename the contract.
 const COLUMNS = [
-  { status: "open", label: "To Do" },
-  { status: "in_progress", label: "In Progress" },
-  { status: "done", label: "Done" },
+  { status: "open", label: "To Do", dot: "bg-faint", tint: "bg-raised/60" },
+  { status: "in_progress", label: "In Progress", dot: "bg-accent", tint: "bg-accent/10" },
+  { status: "done", label: "Claimed", dot: "bg-success", tint: "bg-success/10" },
 ] as const;
 
 type Status = (typeof COLUMNS)[number]["status"];
+const STATUSES = COLUMNS.map((c) => c.status) as Status[];
+
+// Priority = quest "difficulty". Presentation only: none faint, low muted,
+// medium warning, high error/red — the "the System" reads harder quests hotter.
+const PRIORITY_ORDER = ["none", "low", "medium", "high"] as const;
+const PRIORITY: Record<Task["priority"], { label: string; text: string; dot: string }> = {
+  none: { label: "None", text: "text-faint", dot: "bg-faint" },
+  low: { label: "Low", text: "text-muted", dot: "bg-muted" },
+  medium: { label: "Medium", text: "text-warning", dot: "bg-warning" },
+  high: { label: "High", text: "text-error", dot: "bg-error" },
+};
+
+// Fractional index between two neighbour positions, so a reorder only rewrites
+// the moved card. Ends: just below the min / just above the max; empty column
+// (both undefined) seeds a fresh position.
+function between(prev?: number, next?: number): number {
+  // Seconds, to match the DB's epoch-seconds positions (extract(epoch from now));
+  // ms here would sort an empty-column drop ~1000x above freshly-created cards.
+  if (prev === undefined && next === undefined) return Date.now() / 1000;
+  if (prev === undefined) return next! - 1;
+  if (next === undefined) return prev + 1;
+  return (prev + next) / 2;
+}
+if (process.env.NODE_ENV !== "production") {
+  console.assert(between(1, 3) === 2, "between(1,3)===2");
+  console.assert(between(undefined, 3) < 3, "between(undefined,3)<3");
+  console.assert(between(1, undefined) > 1, "between(1,undefined)>1");
+}
 
 // Today as "YYYY-MM-DD" in local time, for the past-due comparison. The API
 // stores due_date as a plain date string, so compare strings, not Date objects.
@@ -28,6 +86,14 @@ function todayStr(): string {
   return `${d.getFullYear()}-${m}-${day}`;
 }
 
+// "Jul 20" style short label; the raw "YYYY-MM-DD" is kept as the title attr.
+function dueLabel(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return iso;
+  const mon = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][m - 1];
+  return `${mon} ${d}`;
+}
+
 export default function Tasks({
   token,
   onFail,
@@ -36,11 +102,15 @@ export default function Tasks({
   onFail: (e: unknown) => void;
 }) {
   const [tasks, setTasks] = useState<Task[] | null>(null);
-  const [title, setTitle] = useState("");
-  const [due, setDue] = useState("");
-  const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState<string | null>(null); // id currently mutating
-  const [dragOver, setDragOver] = useState<Status | null>(null); // hovered column
+  const [activeId, setActiveId] = useState<string | null>(null); // dragged card
+
+  // A click must not start a drag, or inline-edit and the delete button break.
+  // 6px of travel is the Notion-ish threshold between "click" and "drag".
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
 
   const load = useCallback(async () => {
     try {
@@ -54,202 +124,334 @@ export default function Tasks({
     void load();
   }, [load]);
 
-  async function add() {
-    const t = title.trim();
-    if (!t || adding) return;
-    setAdding(true);
-    try {
-      await createTask(token, { title: t, due_date: due || undefined });
-      setTitle("");
-      setDue("");
-      await load();
-    } catch (e) {
-      onFail(e);
-    } finally {
-      setAdding(false);
-    }
-  }
-
   // A single mutation guarded by the row id, then a reload for canonical order.
-  async function mutate(id: string, fn: () => Promise<unknown>) {
-    setBusy(id);
-    try {
-      await fn();
-      await load();
-    } catch (e) {
-      onFail(e);
-    } finally {
-      setBusy(null);
-    }
+  const mutate = useCallback(
+    async (id: string, fn: () => Promise<unknown>) => {
+      setBusy(id);
+      try {
+        await fn();
+        await load();
+      } catch (e) {
+        onFail(e);
+      } finally {
+        setBusy(null);
+      }
+    },
+    [load, onFail],
+  );
+
+  // Column contents, sorted by position ascending (equal positions keep their
+  // fetch order via stable sort).
+  const columnTasks = useCallback(
+    (status: Status): Task[] =>
+      (tasks ?? []).filter((t) => t.status === status).sort((a, b) => a.position - b.position),
+    [tasks],
+  );
+
+  // Which column an id belongs to: a column id is its own container; a card id
+  // resolves to its task's status.
+  const findContainer = useCallback(
+    (id: string): Status | undefined =>
+      STATUSES.includes(id as Status) ? (id as Status) : tasks?.find((t) => t.id === id)?.status,
+    [tasks],
+  );
+
+  // ◂ ▸ keyboard/click fallback: status-only column move (position carries over,
+  // the reload re-sorts). The guaranteed a11y path.
+  const move = useCallback(
+    (task: Task, to: Status) => {
+      if (task.status === to) return;
+      setTasks((prev) =>
+        prev ? prev.map((t) => (t.id === task.id ? { ...t, status: to } : t)) : prev,
+      );
+      void mutate(task.id, () => updateTask(token, task.id, { status: to }));
+    },
+    [mutate, token],
+  );
+
+  const setPriority = useCallback(
+    (task: Task, priority: Task["priority"]) => {
+      if (task.priority === priority) return;
+      setTasks((prev) =>
+        prev ? prev.map((t) => (t.id === task.id ? { ...t, priority } : t)) : prev,
+      );
+      void mutate(task.id, () => updateTask(token, task.id, { priority }));
+    },
+    [mutate, token],
+  );
+
+  function onDragStart(e: DragStartEvent) {
+    setActiveId(String(e.active.id));
   }
 
-  function move(task: Task, to: Status) {
-    if (task.status === to) return;
-    void mutate(task.id, () => updateTask(token, task.id, { status: to }));
+  // Cross-column: pull the card into the column it's hovering so it renders
+  // there mid-drag. Within a column the sortable strategy handles the visual
+  // shift on its own — no state change needed until drop.
+  function onDragOver(e: DragOverEvent) {
+    const { active, over } = e;
+    if (!over) return;
+    const overContainer = findContainer(String(over.id));
+    const activeContainer = findContainer(String(active.id));
+    if (!overContainer || activeContainer === overContainer) return;
+    setTasks((prev) =>
+      prev ? prev.map((t) => (t.id === active.id ? { ...t, status: overContainer } : t)) : prev,
+    );
+  }
+
+  function onDragEnd(e: DragEndEvent) {
+    setActiveId(null);
+    const { active, over } = e;
+    if (!over) return;
+    const overContainer = findContainer(String(over.id));
+    const activeTask = tasks?.find((t) => t.id === active.id);
+    if (!overContainer || !activeTask) return;
+
+    // Ordered ids of the destination column, with the active card guaranteed
+    // present (onDragOver may not have synced on a very fast drop).
+    let ids = columnTasks(overContainer).map((t) => t.id);
+    if (!ids.includes(activeTask.id)) ids = [...ids, activeTask.id];
+    const from = ids.indexOf(activeTask.id);
+    const overId = String(over.id);
+    let to = overId === overContainer ? ids.length - 1 : ids.indexOf(overId);
+    if (to < 0) to = ids.length - 1;
+
+    // Same column, same slot, dropped on itself → nothing to persist.
+    if (overContainer === activeTask.status && (from === to || overId === activeTask.id)) return;
+
+    const ordered = arrayMove(ids, from, to);
+    const idx = ordered.indexOf(activeTask.id);
+    const byId = (id?: string) => (id ? tasks?.find((t) => t.id === id) : undefined);
+    const position = between(byId(ordered[idx - 1])?.position, byId(ordered[idx + 1])?.position);
+
+    setTasks((prev) =>
+      prev
+        ? prev.map((t) => (t.id === activeTask.id ? { ...t, status: overContainer, position } : t))
+        : prev,
+    );
+    void mutate(activeTask.id, () =>
+      updateTask(token, activeTask.id, { status: overContainer, position }),
+    );
   }
 
   const today = todayStr();
   const total = tasks?.length ?? 0;
+  const activeTask = tasks?.find((t) => t.id === activeId) ?? null;
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
-      <div className="mx-auto flex min-h-0 max-w-5xl flex-col gap-6">
+      <div className="mx-auto flex min-h-0 max-w-6xl flex-col gap-6">
         <div>
-          <h2 className="text-2xl font-semibold text-on-surface">Tasks</h2>
+          <h2 className="text-2xl font-semibold text-on-surface">Quest Log</h2>
           <p className="mt-2 text-sm text-muted">
-            A kanban board. Drag a card between columns, or use the move
-            buttons.
+            Drag a quest between columns or reorder within one, rename it in
+            place, set its difficulty, or use the ◂ ▸ buttons. Clear a quest to
+            claim its EXP.
           </p>
         </div>
 
-        {/* Quick-add — always creates a To Do task */}
-        <div className="flex flex-wrap items-end gap-2 rounded-xl border border-edge bg-panel p-3">
-          <label className="flex min-w-[12rem] flex-1 flex-col gap-1.5 text-sm">
-            <span className="text-[11px] uppercase tracking-widest text-faint">
-              New task
-            </span>
-            <input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  void add();
-                }
-              }}
-              placeholder="What needs doing?"
-              className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent"
-            />
-          </label>
-          <label className="flex flex-col gap-1.5 text-sm">
-            <span className="text-[11px] uppercase tracking-widest text-faint">
-              Due date
-            </span>
-            <input
-              type="date"
-              value={due}
-              onChange={(e) => setDue(e.target.value)}
-              aria-label="Due date"
-              className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface outline-none transition-colors focus:border-accent [color-scheme:dark]"
-            />
-          </label>
-          <button
-            onClick={() => void add()}
-            disabled={adding || !title.trim()}
-            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
-          >
-            {adding ? "Adding…" : "Add"}
-          </button>
-        </div>
+        {tasks !== null && <SystemBar tasks={tasks} />}
 
-        {/* Board */}
         {tasks === null ? (
           <p className="text-sm text-faint">Loading…</p>
-        ) : total === 0 ? (
-          <p className="py-8 text-center text-sm text-faint">
-            No tasks yet — add one above.
-          </p>
         ) : (
-          // Columns scroll horizontally as a group on a narrow window so the
-          // page body never overflows.
-          <div className="flex gap-4 overflow-x-auto pb-2">
-            {COLUMNS.map((col) => (
-              <Column
-                key={col.status}
-                status={col.status}
-                label={col.label}
-                tasks={tasks.filter((t) => t.status === col.status)}
-                today={today}
-                busy={busy}
-                dragOver={dragOver === col.status}
-                onDragEnterCol={() => setDragOver(col.status)}
-                onDragLeaveCol={() => setDragOver((s) => (s === col.status ? null : s))}
-                onDropTask={(id) => {
-                  setDragOver(null);
-                  const task = tasks.find((t) => t.id === id);
-                  if (task) move(task, col.status);
-                }}
-                onMove={move}
-                onDelete={(t) =>
-                  void mutate(t.id, () => deleteTask(token, t.id))
-                }
-              />
-            ))}
-          </div>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCorners}
+            onDragStart={onDragStart}
+            onDragOver={onDragOver}
+            onDragEnd={onDragEnd}
+            onDragCancel={() => setActiveId(null)}
+          >
+            {/* Columns scroll horizontally as a group on a narrow window so the
+                page body never overflows. */}
+            <div className="flex gap-4 overflow-x-auto pb-2">
+              {COLUMNS.map((col) => (
+                <Column
+                  key={col.status}
+                  col={col}
+                  tasks={columnTasks(col.status)}
+                  today={today}
+                  busy={busy}
+                  onMove={move}
+                  onPriority={setPriority}
+                  onAdd={(title, due) =>
+                    mutate("__add__", () =>
+                      createTask(token, {
+                        title,
+                        due_date: due || undefined,
+                      }).then((t) =>
+                        // A brand-new task lands in To Do; nudge it to this
+                        // column if the user added from elsewhere.
+                        col.status === "open"
+                          ? undefined
+                          : updateTask(token, t.id, { status: col.status }),
+                      ),
+                    )
+                  }
+                  onRename={(t, title) =>
+                    title.trim() && title !== t.title
+                      ? mutate(t.id, () =>
+                          updateTask(token, t.id, { title: title.trim() }),
+                        )
+                      : undefined
+                  }
+                  onDue={(t, due) =>
+                    mutate(t.id, () =>
+                      updateTask(token, t.id, { due_date: due || null }),
+                    )
+                  }
+                  onDelete={(t) => mutate(t.id, () => deleteTask(token, t.id))}
+                />
+              ))}
+            </div>
+
+            {/* The floating card that follows the cursor — the Notion feel. */}
+            <DragOverlay dropAnimation={null}>
+              {activeTask ? (
+                <div className="w-64 rotate-2 rounded-lg border border-glow bg-raised p-2.5 shadow-2xl shadow-black/40 glow-violet">
+                  <p className="break-words text-sm text-on-surface">
+                    {activeTask.title}
+                  </p>
+                </div>
+              ) : null}
+            </DragOverlay>
+          </DndContext>
+        )}
+
+        {tasks !== null && total === 0 && (
+          <p className="-mt-2 text-center text-sm text-faint">
+            No quests yet — add one in a column above.
+          </p>
         )}
       </div>
     </div>
   );
 }
 
+// The "System" status strip. XP is DERIVED client-side — sum of claimed quests'
+// rewards — never fetched, never a stored counter.
+function SystemBar({ tasks }: { tasks: Task[] }) {
+  const xp = totalXp(tasks);
+  const info = levelForXp(xp);
+  const rank = rankForLevel(info.level);
+
+  // Level-up moment: when a claimed quest crosses a boundary, flash the badge
+  // once and show a "Level up!" tag for a beat. Client-side only, 0 tokens —
+  // derived from the same math, no new write path. The tag still appears under
+  // prefers-reduced-motion (the CSS flash is disabled there); it's the feedback.
+  const prevLevel = useRef(info.level);
+  const [leveledUp, setLeveledUp] = useState(false);
+  useEffect(() => {
+    if (info.level > prevLevel.current) {
+      setLeveledUp(true);
+      const t = setTimeout(() => setLeveledUp(false), 1400);
+      prevLevel.current = info.level;
+      return () => clearTimeout(t);
+    }
+    prevLevel.current = info.level;
+  }, [info.level]);
+
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-edge bg-panel px-4 py-3 glow-violet">
+      <div
+        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-glow/40 bg-glow/10 text-sm font-semibold tabular-nums text-glow ${
+          leveledUp ? "level-up" : ""
+        }`}
+        aria-hidden="true"
+      >
+        {info.level}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-2">
+          <span className="text-sm font-medium text-on-surface">Level {info.level}</span>
+          <span className="text-xs text-glow">{rank.name}</span>
+          {leveledUp && (
+            <span
+              role="status"
+              className="rounded-full bg-glow/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-glow"
+            >
+              Level up!
+            </span>
+          )}
+          <span className="ml-auto text-[11px] tabular-nums text-muted">{xp} EXP</span>
+        </div>
+        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-raised">
+          <div
+            className="h-full rounded-full bg-glow transition-[width] duration-500 motion-reduce:transition-none"
+            style={{ width: `${Math.round(info.progress * 100)}%` }}
+          />
+        </div>
+        <p className="mt-1 text-[11px] text-faint">{info.xpForNext} EXP to next level</p>
+      </div>
+    </div>
+  );
+}
+
 function Column({
-  status,
-  label,
+  col,
   tasks,
   today,
   busy,
-  dragOver,
-  onDragEnterCol,
-  onDragLeaveCol,
-  onDropTask,
   onMove,
+  onPriority,
+  onAdd,
+  onRename,
+  onDue,
   onDelete,
 }: {
-  status: Status;
-  label: string;
+  col: (typeof COLUMNS)[number];
   tasks: Task[];
   today: string;
   busy: string | null;
-  dragOver: boolean;
-  onDragEnterCol: () => void;
-  onDragLeaveCol: () => void;
-  onDropTask: (id: string) => void;
   onMove: (task: Task, to: Status) => void;
+  onPriority: (task: Task, priority: Task["priority"]) => void;
+  onAdd: (title: string, due: string) => void;
+  onRename: (task: Task, title: string) => void;
+  onDue: (task: Task, due: string) => void;
   onDelete: (task: Task) => void;
 }) {
+  const { setNodeRef, isOver } = useDroppable({ id: col.status });
+
   return (
     <section
-      aria-label={`${label} column`}
-      onDragOver={(e) => {
-        e.preventDefault(); // allow drop
-        onDragEnterCol();
-      }}
-      onDragLeave={(e) => {
-        // Ignore moves between the column's own children.
-        if (!e.currentTarget.contains(e.relatedTarget as Node)) onDragLeaveCol();
-      }}
-      onDrop={(e) => {
-        e.preventDefault();
-        const id = e.dataTransfer.getData("text/plain");
-        if (id) onDropTask(id);
-      }}
-      className={`flex w-72 shrink-0 flex-col rounded-xl border bg-panel transition-colors ${
-        dragOver ? "border-accent bg-accent/10" : "border-edge"
-      }`}
+      aria-label={`${col.label} column`}
+      className="flex w-72 shrink-0 flex-col rounded-xl border border-edge bg-panel"
     >
       <header className="flex items-center gap-2 px-3 py-2.5">
-        <h3 className="text-sm font-medium text-on-surface">{label}</h3>
+        <span className={`h-2 w-2 rounded-full ${col.dot}`} aria-hidden="true" />
+        <h3 className="text-sm font-medium text-on-surface">{col.label}</h3>
         <span className="rounded-full bg-raised px-2 py-0.5 text-[11px] tabular-nums text-muted">
           {tasks.length}
         </span>
       </header>
-      <div className="flex min-h-[6rem] flex-col gap-2 overflow-y-auto px-2 pb-2">
-        {tasks.length === 0 ? (
-          <p className="px-1 py-6 text-center text-xs text-faint">
-            Nothing here
-          </p>
-        ) : (
-          tasks.map((t) => (
-            <TaskCard
-              key={t.id}
-              task={t}
-              today={today}
-              busy={busy === t.id}
-              onMove={onMove}
-              onDelete={() => onDelete(t)}
-            />
-          ))
-        )}
+
+      {/* The droppable body. min-height keeps an empty column a valid target. */}
+      <div
+        ref={setNodeRef}
+        className={`flex min-h-[5rem] flex-1 flex-col gap-2 rounded-b-xl px-2 pb-2 transition-colors ${
+          isOver ? col.tint : ""
+        }`}
+      >
+        <SortableContext items={tasks.map((t) => t.id)} strategy={verticalListSortingStrategy}>
+          {tasks.length === 0 ? (
+            <p className="px-1 py-5 text-center text-xs text-faint">Nothing here</p>
+          ) : (
+            tasks.map((t) => (
+              <TaskCard
+                key={t.id}
+                task={t}
+                today={today}
+                busy={busy === t.id}
+                onMove={onMove}
+                onPriority={(p) => onPriority(t, p)}
+                onRename={(title) => onRename(t, title)}
+                onDue={(due) => onDue(t, due)}
+                onDelete={() => onDelete(t)}
+              />
+            ))
+          )}
+        </SortableContext>
+        <AddCard onAdd={onAdd} />
       </div>
     </section>
   );
@@ -260,14 +462,34 @@ function TaskCard({
   today,
   busy,
   onMove,
+  onPriority,
+  onRename,
+  onDue,
   onDelete,
 }: {
   task: Task;
   today: string;
   busy: boolean;
   onMove: (task: Task, to: Status) => void;
+  onPriority: (priority: Task["priority"]) => void;
+  onRename: (title: string) => void;
+  onDue: (due: string) => void;
   onDelete: () => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(task.title);
+  const [dueOpen, setDueOpen] = useState(false);
+
+  // Dragging is disabled while editing so pointer events reach the input.
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useSortable({
+    id: task.id,
+    disabled: editing || busy,
+  });
+  // Reorder motion rides on the `transition-all` class (below) so that
+  // `motion-reduce:transition-none` can disable it; an inline transition here
+  // would override the class and ignore prefers-reduced-motion.
+  const style = { transform: CSS.Translate.toString(transform) };
+
   const isDone = task.status === "done";
   const pastDue = !isDone && task.due_date !== null && task.due_date < today;
 
@@ -275,38 +497,62 @@ function TaskCard({
   const prev = COLUMNS[i - 1];
   const next = COLUMNS[i + 1];
 
+  function commit() {
+    setEditing(false);
+    if (draft.trim() && draft.trim() !== task.title) onRename(draft.trim());
+    else setDraft(task.title);
+  }
+
   return (
     <article
-      draggable={!busy}
-      onDragStart={(e) => e.dataTransfer.setData("text/plain", task.id)}
-      className={`group rounded-lg border border-edge bg-raised p-2.5 transition-opacity ${
-        busy ? "opacity-40" : "cursor-grab active:cursor-grabbing"
-      }`}
+      ref={setNodeRef}
+      style={style}
+      className={`group rounded-lg border border-edge bg-raised p-2.5 transition-all motion-reduce:transition-none ${
+        busy ? "opacity-40" : ""
+      } ${isDragging ? "opacity-30" : ""} ${isDone ? "opacity-75" : ""}`}
     >
       <div className="flex items-start gap-2">
-        <p
-          className={`min-w-0 flex-1 break-words text-sm ${
-            isDone ? "text-muted line-through" : "text-on-surface"
-          }`}
-        >
-          {task.title}
-        </p>
+        {editing ? (
+          <textarea
+            autoFocus
+            value={draft}
+            rows={2}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commit}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                commit();
+              }
+              if (e.key === "Escape") {
+                setDraft(task.title);
+                setEditing(false);
+              }
+            }}
+            className="min-w-0 flex-1 resize-none rounded border border-accent bg-panel px-1.5 py-1 text-sm text-on-surface outline-none"
+          />
+        ) : (
+          // The card body is the drag handle; a plain click (no travel) opens
+          // the inline rename instead — the 6px sensor threshold separates them.
+          <button
+            type="button"
+            {...listeners}
+            {...attributes}
+            onClick={() => setEditing(true)}
+            className={`min-w-0 flex-1 cursor-grab break-words text-left text-sm active:cursor-grabbing ${
+              isDone ? "text-muted line-through" : "text-on-surface"
+            }`}
+          >
+            {task.title}
+          </button>
+        )}
         <button
           onClick={onDelete}
           disabled={busy}
           aria-label={`Delete task: ${task.title}`}
           className="shrink-0 rounded-md p-1 text-faint opacity-0 transition-colors hover:bg-panel hover:text-error focus:opacity-100 group-hover:opacity-100 disabled:opacity-40"
         >
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={1.75}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="h-3.5 w-3.5"
-            aria-hidden="true"
-          >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5" aria-hidden="true">
             <path d="M3 6h18" />
             <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
             <path d="M6 6v14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V6" />
@@ -315,21 +561,57 @@ function TaskCard({
         </button>
       </div>
 
-      <div className="mt-2 flex items-center gap-1">
-        {task.due_date && (
-          <span
-            className={`mr-auto text-xs ${pastDue ? "text-warning" : "text-muted"}`}
+      <div className="mt-2 flex flex-wrap items-center gap-1">
+        <PriorityChip task={task} busy={busy} onPriority={onPriority} />
+
+        {/* EXP reward — a claimed (done) quest reads as banked, greyed. */}
+        <span
+          title={isDone ? "EXP claimed" : "EXP reward on completion"}
+          className={`rounded px-1.5 py-0.5 text-[10px] font-medium tabular-nums ${
+            isDone ? "bg-raised text-faint" : "bg-glow/10 text-glow"
+          }`}
+        >
+          {isDone ? "✓ " : "+"}
+          {questXp(task)} EXP
+        </span>
+
+        {/* Due date: a chip that opens a native date input; empty clears it. */}
+        {dueOpen ? (
+          <input
+            type="date"
+            autoFocus
+            defaultValue={task.due_date ?? ""}
+            onBlur={(e) => {
+              setDueOpen(false);
+              if ((e.target.value || "") !== (task.due_date ?? "")) onDue(e.target.value);
+            }}
+            aria-label="Due date"
+            className="rounded border border-accent bg-panel px-1 py-0.5 text-xs text-on-surface outline-none [color-scheme:dark]"
+          />
+        ) : task.due_date ? (
+          <button
+            onClick={() => setDueOpen(true)}
+            title={task.due_date}
+            className={`rounded px-1 py-0.5 text-xs transition-colors hover:bg-panel ${
+              pastDue ? "text-warning" : "text-muted"
+            }`}
           >
-            {task.due_date}
-          </span>
+            {dueLabel(task.due_date)}
+          </button>
+        ) : (
+          <button
+            onClick={() => setDueOpen(true)}
+            className="rounded px-1 py-0.5 text-xs text-faint opacity-0 transition-colors hover:bg-panel hover:text-muted focus:opacity-100 group-hover:opacity-100"
+          >
+            ＋ due
+          </button>
         )}
-        {/* Keyboard/click move fallback — native drag-drop is mouse-only. */}
+
+        {/* Keyboard/click move fallback — the guaranteed a11y path. */}
         <button
           onClick={() => prev && onMove(task, prev.status)}
           disabled={busy || !prev}
-          aria-label={
-            prev ? `Move task "${task.title}" to ${prev.label}` : "No column to the left"
-          }
+          aria-label={prev ? `Move "${task.title}" to ${prev.label}` : "No column to the left"}
           className="ml-auto rounded p-0.5 text-muted transition-colors enabled:hover:bg-panel enabled:hover:text-on-surface disabled:opacity-30"
         >
           <Chevron dir="left" />
@@ -337,9 +619,7 @@ function TaskCard({
         <button
           onClick={() => next && onMove(task, next.status)}
           disabled={busy || !next}
-          aria-label={
-            next ? `Move task "${task.title}" to ${next.label}` : "No column to the right"
-          }
+          aria-label={next ? `Move "${task.title}" to ${next.label}` : "No column to the right"}
           className="rounded p-0.5 text-muted transition-colors enabled:hover:bg-panel enabled:hover:text-on-surface disabled:opacity-30"
         >
           <Chevron dir="right" />
@@ -349,18 +629,126 @@ function TaskCard({
   );
 }
 
+// Difficulty chip → 4-option picker. PATCHes priority directly (0 tokens). The
+// backdrop button closes the menu on any outside click.
+function PriorityChip({
+  task,
+  busy,
+  onPriority,
+}: {
+  task: Task;
+  busy: boolean;
+  onPriority: (priority: Task["priority"]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const p = PRIORITY[task.priority];
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        disabled={busy}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`Difficulty: ${p.label}. Change.`}
+        className={`flex items-center gap-1 rounded px-1 py-0.5 text-xs transition-colors hover:bg-panel disabled:opacity-40 ${p.text}`}
+      >
+        <span className={`h-1.5 w-1.5 rounded-full ${p.dot}`} aria-hidden="true" />
+        {p.label}
+      </button>
+      {open && (
+        <>
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-hidden="true"
+            onClick={() => setOpen(false)}
+            className="fixed inset-0 z-10 cursor-default"
+          />
+          <div
+            role="menu"
+            className="absolute left-0 top-full z-20 mt-1 w-32 rounded-lg border border-edge bg-panel p-1 shadow-xl shadow-black/40"
+          >
+            {PRIORITY_ORDER.map((k) => (
+              <button
+                key={k}
+                role="menuitemradio"
+                aria-checked={k === task.priority}
+                onClick={() => {
+                  setOpen(false);
+                  if (k !== task.priority) onPriority(k);
+                }}
+                className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs transition-colors hover:bg-raised ${
+                  PRIORITY[k].text
+                } ${k === task.priority ? "bg-raised" : ""}`}
+              >
+                <span className={`h-1.5 w-1.5 rounded-full ${PRIORITY[k].dot}`} aria-hidden="true" />
+                {PRIORITY[k].label}
+                <span className="ml-auto text-[10px] tabular-nums text-faint">
+                  +{XP_BY_PRIORITY[k]}
+                </span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Inline add at the bottom of a column — collapses to a "+ Add" affordance
+// until clicked, so the column stays quiet. Creates directly in this column.
+function AddCard({ onAdd }: { onAdd: (title: string, due: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState("");
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  function commit() {
+    const t = title.trim();
+    if (t) onAdd(t, "");
+    setTitle("");
+    setOpen(false);
+  }
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="rounded-lg px-2 py-1.5 text-left text-xs text-faint transition-colors hover:bg-raised hover:text-muted"
+      >
+        ＋ Add a quest
+      </button>
+    );
+  }
+  return (
+    <div className="rounded-lg border border-accent bg-raised p-2">
+      <textarea
+        ref={ref}
+        autoFocus
+        rows={2}
+        value={title}
+        placeholder="What needs doing?"
+        onChange={(e) => setTitle(e.target.value)}
+        onBlur={() => (title.trim() ? commit() : setOpen(false))}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            commit();
+          }
+          if (e.key === "Escape") {
+            setTitle("");
+            setOpen(false);
+          }
+        }}
+        className="w-full resize-none bg-transparent text-sm text-on-surface placeholder:text-faint outline-none"
+      />
+    </div>
+  );
+}
+
 function Chevron({ dir }: { dir: "left" | "right" }) {
   return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="h-4 w-4"
-      aria-hidden="true"
-    >
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4" aria-hidden="true">
       <path d={dir === "left" ? "M15 18l-6-6 6-6" : "M9 18l6-6-6-6"} />
     </svg>
   );

@@ -47,6 +47,10 @@ export type Done = {
   provider?: string;
   model?: string;
   message_id?: string;
+  // Per-turn token cost. Present only when the server knows it; absent/null when
+  // unknown — never a fabricated 0. The UI shows the footnote only when set.
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
 };
 
 // A reloaded message stores provenance as `degraded` (boolean) + `answered_model`,
@@ -221,6 +225,8 @@ export type Task = {
   notes: string;
   status: "open" | "in_progress" | "done";
   due_date: string | null; // "YYYY-MM-DD"
+  priority: "none" | "low" | "medium" | "high";
+  position: number;
   created_at?: string;
   updated_at?: string;
 };
@@ -234,7 +240,7 @@ export async function getTasks(token: string): Promise<Task[]> {
 
 export async function createTask(
   token: string,
-  task: { title: string; notes?: string; due_date?: string | null },
+  task: { title: string; notes?: string; due_date?: string | null; priority?: Task["priority"] },
 ): Promise<Task> {
   const res = await fetch(`${GATEWAY_URL}/api/tasks`, {
     method: "POST",
@@ -248,7 +254,7 @@ export async function createTask(
 export async function updateTask(
   token: string,
   id: string,
-  patch: Partial<Pick<Task, "title" | "notes" | "status" | "due_date">>,
+  patch: Partial<Pick<Task, "title" | "notes" | "status" | "due_date" | "priority" | "position">>,
 ): Promise<Task> {
   const res = await fetch(`${GATEWAY_URL}/api/tasks/${id}`, {
     method: "PATCH",
@@ -568,6 +574,12 @@ function dispatchEvent(raw: string, handlers: ChatHandlers): void {
         provider: obj.provider ? String(obj.provider) : undefined,
         model: obj.model ? String(obj.model) : undefined,
         message_id: obj.message_id ? String(obj.message_id) : undefined,
+        // Only a real number counts; null/absent stay undefined so the footnote
+        // hides rather than printing a fabricated 0.
+        prompt_tokens:
+          typeof obj.prompt_tokens === "number" ? obj.prompt_tokens : undefined,
+        completion_tokens:
+          typeof obj.completion_tokens === "number" ? obj.completion_tokens : undefined,
       });
       break;
     case "error":

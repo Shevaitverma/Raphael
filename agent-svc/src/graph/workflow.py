@@ -18,6 +18,7 @@ callable (`emit`) carried in state, so main.py can drain them in real time.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypedDict
@@ -29,6 +30,9 @@ from llm import resolver
 from memory import budget, extract as extractor_mod, history, retriever
 from tools import google as google_tool
 from tools import search as search_tool
+from tools import tasks as tasks_tool
+
+_log = logging.getLogger(__name__)
 
 def _persona(name: str) -> str:
     """Raphael's voice: the EVOLVED Great Sage. In the source, "Great Sage" is a
@@ -46,8 +50,12 @@ def _persona(name: str) -> str:
         "touch of personality or gentle humour when it fits. Skip the clinical report voice and "
         "robotic labels like \"Answer.\" / \"Proposal.\". Read what they actually need and offer "
         "the most useful path to it. Be honest above all: if you don't know or aren't sure, say so "
-        "plainly rather than inventing. Stay concise and genuinely helpful — never cold, never "
-        "rambling."
+        "plainly rather than inventing. Default to SHORT: answer simple questions in about 1-4 "
+        "sentences, direct answer first, then stop — don't pad, don't restate the question, don't "
+        "pile on caveats or dump every detail. Reach for lists or numbered steps only when they "
+        "genuinely make the answer clearer. Go long ONLY when the user asks you to explain, walk "
+        "them through something, or go into detail, or when the task truly needs the steps — then "
+        "give the fuller answer they want. Never cold, never rambling."
     )
 
 
@@ -107,6 +115,15 @@ def build_system(profile: list, memories: list, search: str = "", name: str = "R
     return "\n".join(out)
 
 
+def _usage(provider) -> tuple[int | None, int | None]:
+    """(prompt_tokens, completion_tokens) from the provider's LAST stream, or
+    (None, None). Each provider sets .last_usage inside stream(); a fake or a
+    never-streamed provider has none, so getattr floors to None — never 0, which
+    would masquerade as a real count of zero."""
+    u = getattr(provider, "last_usage", None) or {}
+    return u.get("prompt_tokens"), u.get("completion_tokens")
+
+
 def stream_with_lifeboat(user_id, provider, messages, system, emit, lifeboat_fn=None) -> dict:
     """Stream from the active provider; fall back to the lifeboat ONLY on a
     dead credential. On a transient fault, emit an 'error' event and stop.
@@ -122,6 +139,10 @@ def stream_with_lifeboat(user_id, provider, messages, system, emit, lifeboat_fn=
         "provider_name": provider.provider,
         "degraded": False,
         "failed": False,
+        # None (not 0) is the honest "unknown": a provider that never reported
+        # usage leaves these absent from the done event rather than claiming zero.
+        "prompt_tokens": None,
+        "completion_tokens": None,
     }
     parts: list[str] = []
     try:
@@ -130,6 +151,7 @@ def stream_with_lifeboat(user_id, provider, messages, system, emit, lifeboat_fn=
                 parts.append(chunk)
                 emit("token", {"text": chunk})
         result["answer"] = "".join(parts)
+        result["prompt_tokens"], result["completion_tokens"] = _usage(provider)
         return result
     except Exception as e:
         if not resolver.is_dead_credential(e):
@@ -163,6 +185,8 @@ def stream_with_lifeboat(user_id, provider, messages, system, emit, lifeboat_fn=
         result["degraded"] = True
         result["model"] = lb.model
         result["provider_name"] = lb.provider
+        # The lifeboat did the work, so its usage is the turn's usage.
+        result["prompt_tokens"], result["completion_tokens"] = _usage(lb)
         return result
 
 
@@ -185,6 +209,8 @@ class GState(TypedDict, total=False):
     provider_name: str
     degraded: bool
     failed: bool
+    prompt_tokens: int | None
+    completion_tokens: int | None
     message_id: str
     persisted_message_id: str | None
 
@@ -235,6 +261,33 @@ def _tier2_query(message: str) -> str:
     return m
 
 
+def _dispatch_task(name: str, uid: str, args: dict) -> tuple[dict, str]:
+    """Route one task tool call to its tasks.py handler (pure httpx, NEVER an LLM
+    call — a nested LLM here deadlocks the queue drain). Returns (neutral
+    arguments, result string). The neutral args use task_id, never the literal
+    "id" the e2e wire-format regex bans, and drop empties so the persisted shape
+    stays minimal."""
+    a = args or {}
+
+    def _s(k):  # trimmed string arg, or ""
+        return str(a.get(k) or "").strip()
+
+    if name == tasks_tool.LIST_TASKS["name"]:
+        return {}, tasks_tool.list_tasks(uid)
+    if name == tasks_tool.CREATE_TASK["name"]:
+        na = {k: _s(k) for k in ("title", "notes", "due_date") if _s(k)}
+        return na, tasks_tool.create_task(uid, na.get("title", ""), na.get("notes", ""), na.get("due_date", ""))
+    if name == tasks_tool.UPDATE_TASK["name"]:
+        na = {k: _s(k) for k in ("task_id", "title", "status", "due_date") if _s(k)}
+        return na, tasks_tool.update_task(
+            uid, na.get("task_id", ""), na.get("title", ""), na.get("status", ""), na.get("due_date", "")
+        )
+    if name == tasks_tool.DELETE_TASK["name"]:
+        tid = _s("task_id")
+        return ({"task_id": tid} if tid else {}), tasks_tool.delete_task(uid, tid)
+    return {}, ""
+
+
 def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
     """Pre-flight chat() calls before streaming; returns (system-prompt block, tool_calls).
 
@@ -263,8 +316,12 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
         cal_on = google_tool.connected(uid)
     except Exception:
         cal_on = False  # a token-lookup problem degrades the tool, not the turn.
+    # THE token-minimization gate: task tools are offered ONLY when the message
+    # looks task-related, so a non-task turn never adds them and never triggers
+    # the pre-flight chat() below. A cheap keyword check, no LLM.
+    tasks_on = tasks_tool.looks_task_related(state["message"])
 
-    if not search_on and not cal_on:
+    if not search_on and not cal_on and not tasks_on:
         return "", []  # nothing to offer: nothing leaves the box.
 
     provider = state["provider"]
@@ -274,7 +331,8 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
         native = False  # the conservative floor, same as everywhere else.
 
     if not native:
-        # Tier 2: only search has a keyword fallback; calendar refuses.
+        # Tier 2: only search has a keyword fallback; calendar and tasks refuse
+        # (no keyword can guess a task_id or a calendar window).
         if not search_on:
             return "", []
         q = _tier2_query(state["message"])
@@ -285,10 +343,13 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
         tools.append(search_tool.WEB_SEARCH)
     if cal_on:
         tools.append(google_tool.CALENDAR_LIST_EVENTS)
+    if tasks_on:
+        tools.extend(tasks_tool.ALL_TOOLS)
 
     blocks: list[str] = []
     tool_calls: list = []
     cal_done = False
+    task_mutated = False  # a create/update/delete already fired this turn
     empty_q = None  # a search that came back with zero hits and may still refine
     convo = list(messages)
     for _ in range(_MAX_PREFLIGHT_ROUNDS):
@@ -314,8 +375,39 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
             tool_calls.append(neutral)
             blocks.append(google_tool.list_events(uid, tmin, tmax))
 
+        # --- task tools: a read (list_tasks) may precede ONE write in the loop.
+        # A mutating tool fires AT MOST ONCE; any write ends the loop (a write
+        # never refines) so a confused model cannot double-submit.
+        task_progressed = False
+        for c in calls:
+            name = c.get("name")
+            if name != tasks_tool.LIST_TASKS["name"] and name not in tasks_tool.MUTATING:
+                continue
+            if name in tasks_tool.MUTATING:
+                if task_mutated:
+                    continue
+                task_mutated = True
+            neutral_args, result = _dispatch_task(name, uid, c.get("arguments") or {})
+            tool_calls.append({"name": name, "arguments": neutral_args})
+            blocks.append(result)
+            if name == tasks_tool.LIST_TASKS["name"]:
+                # Hand the list (each line carries a task_id) back so a follow-up
+                # round can resolve "mark my milk task done" to the task_id
+                # update_task/delete_task need. Plain role/content — every adapter
+                # reads it, no tool-result wire shape to invent.
+                convo = convo + [
+                    {"role": "assistant", "content": "I looked up your task list."},
+                    {"role": "user", "content": result},
+                ]
+                task_progressed = True
+
+        if task_mutated:
+            break  # a write is terminal.
+
         srch = next((c for c in calls if c.get("name") == search_tool.WEB_SEARCH["name"]), None)
         if srch is None:
+            if task_progressed:
+                continue  # a read task asked for a follow-up round to write.
             break  # no (further) search asked — the tool working, not failing.
         q = str((srch.get("arguments") or {}).get("query") or "").strip()
         if not q:
@@ -428,14 +520,21 @@ def persist_node(state: GState) -> dict:
 def done_node(state: GState) -> dict:
     if state.get("failed"):
         return {}
-    state["emit"](
-        "done",
-        {
-            "provider": state.get("provider_name"),
-            "model": state.get("model"),
-            "message_id": state.get("message_id"),
-        },
-    )
+    pt, ct = state.get("prompt_tokens"), state.get("completion_tokens")
+    payload = {
+        "provider": state.get("provider_name"),
+        "model": state.get("model"),
+        "message_id": state.get("message_id"),
+    }
+    # Absent, never 0-as-unknown: a provider that reported no usage leaves the
+    # keys off entirely so the UI shows "unknown", not a false zero.
+    if pt is not None:
+        payload["prompt_tokens"] = pt
+    if ct is not None:
+        payload["completion_tokens"] = ct
+    state["emit"]("done", payload)
+    # One line per turn so the skip-gate's effect is measurable.
+    _log.info("turn model=%s prompt_tokens=%s completion_tokens=%s", state.get("model"), pt, ct)
     return {}
 
 
@@ -458,10 +557,21 @@ def extract(state: GState) -> None:
         retriever.touch(state["user_id"], state.get("injected_ids") or [])
         if state.get("failed"):
             return
+        # SKIP-GATE (the free win): extract.py grounds every item against a
+        # CONTENT WORD of the user's message, so a message with none can produce
+        # nothing — extraction is a provable no-op. Skip it before spending a
+        # token resolving/calling the extractor. Catches "ok"/"2+2"/emoji turns.
+        if not extractor_mod._words(state.get("message") or ""):
+            _log.info("extract skipped: no content words in message")
+            return
         provider = resolver.extractor(state["user_id"])
         if provider is None:
             return  # no credential may pay for this. Store nothing.
         items = extractor_mod.extract(provider, state["message"], state.get("answer", ""))
+        # No token count here: the extractor uses chat(), which does not populate
+        # last_usage (only stream() does), and a reused provider instance would
+        # otherwise leak the ANSWER stream's count. Item count is the honest signal.
+        _log.info("extract model=%s items=%d", getattr(provider, "model", "?"), len(items))
         mid = state.get("persisted_message_id")
         retriever.write_facts(state["user_id"], [i for i in items if i["kind"] == "triple"], mid)
         retriever.write_notes(state["user_id"], [i for i in items if i["kind"] == "note"], mid)

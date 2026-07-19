@@ -92,6 +92,25 @@ test("parses token stream and done event", async () => {
   assert.equal(c.errors.length, 0);
 });
 
+test("done event carries prompt/completion tokens when present", async () => {
+  const payload =
+    "event: done\ndata: {\"model\":\"qwen2.5:7b\",\"prompt_tokens\":1234,\"completion_tokens\":567}\n\n";
+  const c = await run(payload, 4096);
+  assert.equal(c.done.length, 1);
+  assert.equal(c.done[0].prompt_tokens, 1234);
+  assert.equal(c.done[0].completion_tokens, 567);
+});
+
+test("done event leaves token counts undefined when absent or null", async () => {
+  const payload =
+    "event: done\ndata: {\"model\":\"qwen2.5:7b\",\"prompt_tokens\":null}\n\n";
+  const c = await run(payload, 4096);
+  assert.equal(c.done.length, 1);
+  // null (unknown) and absent both become undefined — never a fabricated 0.
+  assert.equal(c.done[0].prompt_tokens, undefined);
+  assert.equal(c.done[0].completion_tokens, undefined);
+});
+
 test("reassembles events split across arbitrary chunk boundaries", async () => {
   // One byte at a time is the worst case for the framing logic.
   const c = await run(HAPPY, 1);

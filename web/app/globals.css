@@ -73,6 +73,22 @@ body {
   }
 }
 
+/* one-shot level-up ding: a quick swell + violet flare on the level badge */
+@keyframes level-up {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 transparent;
+  }
+  35% {
+    transform: scale(1.18);
+    box-shadow: 0 0 20px 4px color-mix(in srgb, var(--color-glow) 70%, transparent);
+  }
+}
+.level-up {
+  animation: level-up 0.9s ease-in-out;
+}
+
 .anim-breathe {
   animation: sage-breathe 6s ease-in-out infinite;
 }
@@ -116,7 +132,8 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .anim-breathe,
   .anim-rotate,
-  .anim-rotate-rev {
+  .anim-rotate-rev,
+  .level-up {
     animation: none;
   }
 }

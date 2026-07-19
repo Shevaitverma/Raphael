@@ -50,6 +50,10 @@ type UiMessage = Omit<Message, "degraded"> & {
   degraded?: Degraded;
   error?: string;
   streaming?: boolean;
+  // Per-turn token cost from the done event. Render-only, never persisted;
+  // undefined when the server didn't report it (so the footnote stays hidden).
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
 };
 
 export default function Page() {
@@ -439,7 +443,13 @@ export default function Page() {
         // Keep the row's database id so it stops being identified by position;
         // stash the model so the "— {model}" label matches a reloaded row.
         onDone: (d) =>
-          patchAssistant({ streaming: false, id: d.message_id, answered_model: d.model }),
+          patchAssistant({
+            streaming: false,
+            id: d.message_id,
+            answered_model: d.model,
+            prompt_tokens: d.prompt_tokens,
+            completion_tokens: d.completion_tokens,
+          }),
         onError: (message) => patchAssistant({ streaming: false, error: message }),
       },
       ctrl.signal,
@@ -1482,6 +1492,26 @@ function MessageRow({
         {!isUser && message.answered_model && (
           <div className="mt-1 text-xs text-muted">— {message.answered_model}</div>
         )}
+
+        {/* Per-turn token cost — the visible "less AI" signal. Only when the
+            server reported a number; unknown shows nothing, never a fake 0. */}
+        {!isUser &&
+          (typeof message.prompt_tokens === "number" ||
+            typeof message.completion_tokens === "number") && (
+            <div className="mt-0.5 text-xs text-faint">
+              ·{" "}
+              {typeof message.prompt_tokens === "number"
+                ? `${message.prompt_tokens.toLocaleString()} in`
+                : ""}
+              {typeof message.prompt_tokens === "number" &&
+              typeof message.completion_tokens === "number"
+                ? " / "
+                : ""}
+              {typeof message.completion_tokens === "number"
+                ? `${message.completion_tokens.toLocaleString()} out`
+                : ""}
+            </div>
+          )}
 
         {/* Degraded banner — the lifeboat fired. Product requirement. */}
         {message.degraded && (

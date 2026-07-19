@@ -73,6 +73,53 @@ def test_extract_never_reuses_the_credential_that_just_401d(monkeypatch):
     monkeypatch.setattr(workflow.resolver, "extractor", lambda u: calls.setdefault("who", "lifeboat"))
     monkeypatch.setattr(workflow.extractor_mod, "extract", lambda p, m, a: [])
     dead = object()  # state["provider"] on a degraded turn: touching it would raise
-    workflow.extract({"user_id": "u", "message": "m", "answer": "a",
+    workflow.extract({"user_id": "u", "message": "m one", "answer": "a",
                       "provider": dead, "injected_ids": ["i1"], "degraded": True})
     assert calls == {"touch": ["i1"], "who": "lifeboat"}
+
+
+def test_extract_skips_the_extractor_on_a_contentless_message(monkeypatch):
+    # A message with NO content words (extract._words == {}) can ground nothing,
+    # so the extractor is never resolved or called — the free skip-gate win. touch
+    # still runs (surfaced memories are still reinforced).
+    # extract() swallows every exception, so a raising fake would false-green;
+    # record the resolution instead and assert it never happened.
+    calls = {}
+    monkeypatch.setattr(workflow.retriever, "touch", lambda u, ids: calls.setdefault("touch", ids))
+    monkeypatch.setattr(workflow.resolver, "extractor", lambda u: calls.setdefault("resolved", True))
+    # "ok" is filtered by the len>2 rule; "2+2" folds to two 1-char tokens; both
+    # leave _words == {}. Any of these must skip without resolving the extractor.
+    for msg in ("ok", "2+2", "👍"):
+        workflow.extract({"user_id": "u", "message": msg, "answer": "a", "injected_ids": []})
+    assert calls == {"touch": []}  # touch ran; extractor was never resolved
+
+
+def test_mutating_task_tool_runs_at_most_once_and_ends_the_loop(monkeypatch):
+    # A model that asks to create the SAME task twice (once per round) must write
+    # exactly once, and a write must break the refine loop.
+    creates = []
+    monkeypatch.setattr(workflow.tasks_tool, "create_task",
+                        lambda uid, title, notes="", due="": creates.append(title) or f"Added {title}")
+    monkeypatch.setattr(workflow.tasks_tool, "looks_task_related", lambda m: True)
+
+    class _Resp:
+        tool_calls = [{"name": "create_task", "arguments": {"title": "buy milk"}}]
+
+    class _Caps:
+        native_tools = True
+
+    class _Prov:
+        provider, model = "local", "m"
+
+        def capabilities(self):
+            return _Caps()
+
+        def chat(self, convo, system=None, tools=None, max_tokens=512):
+            return _Resp()
+
+    block, tool_calls = workflow._preflight(
+        {"user_id": "u", "message": "add buy milk", "provider": _Prov(), "search": False},
+        [{"role": "user", "content": "add buy milk"}], "sys",
+    )
+    assert creates == ["buy milk"]  # exactly one write despite the loop
+    assert [c["name"] for c in tool_calls] == ["create_task"]

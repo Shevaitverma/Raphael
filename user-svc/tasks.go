@@ -26,6 +26,16 @@ func parseDueDate(s string) (*string, bool) {
 	return &s, true
 }
 
+// validPriority reports whether p is one of the four select values (mirrors the
+// tasks_priority_check CHECK so an invalid value is a clean 400, never a 500).
+func validPriority(p string) bool {
+	switch p {
+	case "none", "low", "medium", "high":
+		return true
+	}
+	return false
+}
+
 func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	tasks, err := s.store.listTasks(r.Context(), uid)
@@ -41,9 +51,10 @@ func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 type createTaskReq struct {
-	Title   string `json:"title"`
-	Notes   string `json:"notes"`
-	DueDate string `json:"due_date"`
+	Title    string `json:"title"`
+	Notes    string `json:"notes"`
+	DueDate  string `json:"due_date"`
+	Priority string `json:"priority"`
 }
 
 func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -71,8 +82,17 @@ func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "due_date must be a YYYY-MM-DD date")
 		return
 	}
+	// Priority is optional on create; empty means the default 'none'.
+	priority := req.Priority
+	if priority == "" {
+		priority = "none"
+	}
+	if !validPriority(priority) {
+		writeErr(w, http.StatusBadRequest, "priority must be none, low, medium or high")
+		return
+	}
 
-	t, err := s.store.createTask(r.Context(), uid, title, req.Notes, dueDate)
+	t, err := s.store.createTask(r.Context(), uid, title, req.Notes, priority, dueDate)
 	if err != nil {
 		if errors.Is(err, errNotFound) {
 			writeErr(w, http.StatusNotFound, "user not found")
@@ -84,7 +104,7 @@ func (s *server) createTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, t)
 }
 
-// patchTask applies any subset of {title,notes,status,due_date}. Decoding into a
+// patchTask applies any subset of {title,notes,status,priority,position,due_date}. Decoding into a
 // raw-message map is what lets "key absent" differ from "key present but null":
 // only present keys land in the map, so due_date:null clears the date while an
 // omitted due_date leaves it untouched. Absent title/notes/status stay untouched.
@@ -131,6 +151,24 @@ func (s *server) patchTask(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			sets["status"] = st
+		case "priority":
+			var p string
+			if json.Unmarshal(val, &p) != nil {
+				writeErr(w, http.StatusBadRequest, "priority must be a string")
+				return
+			}
+			if !validPriority(p) {
+				writeErr(w, http.StatusBadRequest, "priority must be none, low, medium or high")
+				return
+			}
+			sets["priority"] = p
+		case "position":
+			var pos float64
+			if json.Unmarshal(val, &pos) != nil {
+				writeErr(w, http.StatusBadRequest, "position must be a number")
+				return
+			}
+			sets["position"] = pos
 		case "due_date":
 			// present-but-null (or "") clears; a string is validated as a date.
 			var d *string

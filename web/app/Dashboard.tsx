@@ -4,11 +4,14 @@ import { useEffect, useState } from "react";
 import {
   getCapabilities,
   getMemoryStats,
+  getTasks,
   listProviders,
   type Capabilities,
   type Credential,
   type MemoryStats,
+  type Task,
 } from "@/lib/gateway";
+import { levelForXp, rankForLevel, totalXp } from "@/lib/quests";
 
 const fmt = (n: number) => n.toLocaleString();
 
@@ -28,16 +31,23 @@ export default function Dashboard({
   const [stats, setStats] = useState<MemoryStats | null>(null);
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [creds, setCreds] = useState<Credential[] | null>(null);
+  const [tasks, setTasks] = useState<Task[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
-    Promise.all([getMemoryStats(token), getCapabilities(token), listProviders(token)])
-      .then(([s, c, p]) => {
+    Promise.all([
+      getMemoryStats(token),
+      getCapabilities(token),
+      listProviders(token),
+      getTasks(token),
+    ])
+      .then(([s, c, p, t]) => {
         if (!live) return;
         setStats(s);
         setCaps(c);
         setCreds(p);
+        setTasks(t);
       })
       .catch((e) => {
         if (!live) return;
@@ -143,6 +153,12 @@ export default function Dashboard({
             unit="tokens"
           />
         </div>
+
+        {/* The System — RPG status derived entirely from completed quests
+            (tasks). Pure client math via quests.ts: level, rank, EXP. No
+            endpoint, no LLM, 0 tokens. The fill width is real progress; its
+            glow is static so nothing animates under reduced motion. */}
+        <SystemPanel tasks={tasks} />
 
         {/* Quick start — a real entry to chat, not a fake terminal. It's an
             input-styled button because chat's draft lives elsewhere; typed
@@ -283,6 +299,73 @@ function Gauge({ label, value, unit }: { label: string; value: string; unit?: st
       {/* decorative glowing rail — not a ratio, just a sign of life */}
       <div className="mt-3 h-1 rounded-full bg-gradient-to-r from-accent to-glow opacity-80" />
     </div>
+  );
+}
+
+// "The System" — an isekai-inspired but original status readout. Everything is
+// DERIVED from the same getTasks() the board uses: EXP = sum of completed
+// quests' rewards, level/rank from quests.ts. No fabricated numbers.
+function SystemPanel({ tasks }: { tasks: Task[] | null }) {
+  const xp = totalXp(tasks ?? []);
+  const info = levelForXp(xp);
+  const rank = rankForLevel(info.level);
+  const completed = (tasks ?? []).filter((t) => t.status === "done").length;
+  const pct = Math.round(info.progress * 100);
+
+  return (
+    <section className="glow-violet rounded-2xl border border-edge bg-panel p-5">
+      <div className="flex items-center justify-between">
+        <h3 className="text-base font-semibold text-on-surface">The System</h3>
+        <span className="rounded-md bg-accent/15 px-2.5 py-1 text-xs font-medium text-accent">
+          {rank.name}
+        </span>
+      </div>
+
+      <div className="mt-4 flex items-baseline gap-3">
+        <span className="text-[11px] uppercase tracking-widest text-faint">Level</span>
+        <span className="text-4xl font-semibold tabular-nums text-on-surface">
+          {tasks === null ? "—" : info.level}
+        </span>
+      </div>
+
+      {/* EXP progress bar — width is real (xpIntoLevel / xpForThisLevel);
+          the fill glow is a static box-shadow, so reduced motion sees no change. */}
+      <div className="mt-4">
+        <div
+          className="h-2 overflow-hidden rounded-full bg-raised"
+          role="progressbar"
+          aria-valuenow={pct}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-label={`EXP ${info.xpIntoLevel} of ${info.xpForThisLevel} into level ${info.level}`}
+        >
+          <div
+            className="glow-accent h-full rounded-full bg-gradient-to-r from-accent to-glow"
+            style={{ width: `${tasks === null ? 0 : Math.max(pct, info.xpIntoLevel > 0 ? 2 : 0)}%` }}
+          />
+        </div>
+        <p className="mt-1.5 text-xs text-faint">
+          {tasks === null
+            ? "Reading the System…"
+            : `${fmt(info.xpIntoLevel)} / ${fmt(info.xpForThisLevel)} EXP — ${fmt(info.xpForNext)} to level ${info.level + 1}`}
+        </p>
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        <div className="rounded-xl border border-edge bg-raised px-3 py-2">
+          <p className="text-[11px] uppercase tracking-widest text-faint">Total EXP</p>
+          <p className="mt-1 text-xl font-semibold tabular-nums text-on-surface">
+            {tasks === null ? "—" : fmt(xp)}
+          </p>
+        </div>
+        <div className="rounded-xl border border-edge bg-raised px-3 py-2">
+          <p className="text-[11px] uppercase tracking-widest text-faint">Quests cleared</p>
+          <p className="mt-1 text-xl font-semibold tabular-nums text-on-surface">
+            {tasks === null ? "—" : fmt(completed)}
+          </p>
+        </div>
+      </div>
+    </section>
   );
 }
 

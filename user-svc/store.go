@@ -510,23 +510,26 @@ type task struct {
 	Title     string    `json:"title"`
 	Notes     string    `json:"notes"`
 	Status    string    `json:"status"`
+	Priority  string    `json:"priority"`
+	Position  float64   `json:"position"`
 	DueDate   *string   `json:"due_date"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-const taskCols = `id, title, notes, status, to_char(due_date, 'YYYY-MM-DD'), created_at, updated_at`
+const taskCols = `id, title, notes, status, priority, position, to_char(due_date, 'YYYY-MM-DD'), created_at, updated_at`
 
 func scanTask(row pgx.Row) (*task, error) {
 	var t task
-	if err := row.Scan(&t.ID, &t.Title, &t.Notes, &t.Status, &t.DueDate, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	if err := row.Scan(&t.ID, &t.Title, &t.Notes, &t.Status, &t.Priority, &t.Position, &t.DueDate, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &t, nil
 }
 
-// listTasks returns the user's tasks ordered open-before-done, then due_date
-// ASC NULLS LAST, then newest first. validUUID guard -> errNotFound.
+// listTasks returns the user's tasks in manual board order (position ASC). The
+// board groups by status client-side, so position is the order within a column.
+// validUUID guard -> errNotFound.
 func (s *store) listTasks(ctx context.Context, userID string) ([]task, error) {
 	if !validUUID(userID) {
 		return nil, errNotFound
@@ -535,7 +538,7 @@ func (s *store) listTasks(ctx context.Context, userID string) ([]task, error) {
 		SELECT `+taskCols+`
 		FROM tasks
 		WHERE user_id = $1
-		ORDER BY status = 'done', due_date ASC NULLS LAST, created_at DESC`, userID)
+		ORDER BY position ASC`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -552,16 +555,18 @@ func (s *store) listTasks(ctx context.Context, userID string) ([]task, error) {
 	return out, rows.Err()
 }
 
-// createTask inserts a task for the user. Title is validated by the caller; the
-// DB CHECK is only a backstop. dueDate is nil to leave the date unset.
-func (s *store) createTask(ctx context.Context, userID, title, notes string, dueDate *string) (*task, error) {
+// createTask inserts a task for the user. Title/priority are validated by the
+// caller; the DB CHECK is only a backstop. dueDate is nil to leave the date
+// unset. position is left to the DB default (epoch(now)), so a new card lands
+// last within its column without the caller computing an order.
+func (s *store) createTask(ctx context.Context, userID, title, notes, priority string, dueDate *string) (*task, error) {
 	if !validUUID(userID) {
 		return nil, errNotFound
 	}
 	return scanTask(s.pool.QueryRow(ctx, `
-		INSERT INTO tasks (user_id, title, notes, due_date)
-		VALUES ($1, $2, $3, $4::date)
-		RETURNING `+taskCols, userID, title, notes, dueDate))
+		INSERT INTO tasks (user_id, title, notes, priority, due_date)
+		VALUES ($1, $2, $3, $4, $5::date)
+		RETURNING `+taskCols, userID, title, notes, priority, dueDate))
 }
 
 // updateTask sets only the provided columns (plus updated_at), scoped to the

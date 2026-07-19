@@ -853,25 +853,23 @@ func createTaskT(t *testing.T, srv *server, body createTaskReq) task {
 	return out
 }
 
-// A created task round-trips through GET, and the list is ordered open-before-
-// done, then due_date ASC NULLS LAST.
+// A created task round-trips through GET; the list is in manual board order
+// (position ASC). Create seeds a non-zero position (epoch now), so new cards
+// land in creation order; a PATCH position moves a card without renumbering.
 func TestTaskCreateListAndOrdering(t *testing.T) {
 	srv := newTestServer(t)
 
-	// created out of final order on purpose.
-	done := createTaskT(t, srv, createTaskReq{Title: "shipped", DueDate: "2020-01-01"})
-	openNoDue := createTaskT(t, srv, createTaskReq{Title: "someday", Notes: "no due date"})
-	openEarly := createTaskT(t, srv, createTaskReq{Title: "urgent", DueDate: "2026-01-01"})
-	openLate := createTaskT(t, srv, createTaskReq{Title: "later", DueDate: "2026-12-31"})
+	first := createTaskT(t, srv, createTaskReq{Title: "shipped", DueDate: "2020-01-01"})
+	second := createTaskT(t, srv, createTaskReq{Title: "someday", Notes: "no due date"})
+	third := createTaskT(t, srv, createTaskReq{Title: "urgent", DueDate: "2026-01-01"})
 
-	// Mark one done via PATCH so it sorts last.
-	rec := do(t, srv, http.MethodPatch, "/users/"+testUserID+"/tasks/"+done.ID,
-		map[string]string{"status": "done"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("mark done: got %d body=%s", rec.Code, rec.Body.String())
+	// Create seeds a non-zero position from epoch(now).
+	if first.Position == 0 {
+		t.Fatalf("created task position = 0, want non-zero seed")
 	}
 
-	rec = do(t, srv, http.MethodGet, "/users/"+testUserID+"/tasks", nil)
+	// Default order is position ASC = creation order.
+	rec := do(t, srv, http.MethodGet, "/users/"+testUserID+"/tasks", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list: got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -879,7 +877,7 @@ func TestTaskCreateListAndOrdering(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
-	wantOrder := []string{openEarly.ID, openLate.ID, openNoDue.ID, done.ID}
+	wantOrder := []string{first.ID, second.ID, third.ID}
 	if len(got) != len(wantOrder) {
 		t.Fatalf("list len = %d, want %d: %s", len(got), len(wantOrder), rec.Body.String())
 	}
@@ -889,14 +887,70 @@ func TestTaskCreateListAndOrdering(t *testing.T) {
 		}
 	}
 	// The round-tripped fields survive.
-	if got[0].Title != "urgent" || got[0].DueDate == nil || *got[0].DueDate != "2026-01-01" {
+	if got[0].Title != "shipped" || got[0].DueDate == nil || *got[0].DueDate != "2020-01-01" {
 		t.Fatalf("field round-trip failed: %+v", got[0])
 	}
-	if got[2].DueDate != nil {
-		t.Fatalf("no-due task should have null due_date, got %v", *got[2].DueDate)
+	if got[1].DueDate != nil {
+		t.Fatalf("no-due task should have null due_date, got %v", *got[1].DueDate)
 	}
-	if got[3].Status != "done" {
-		t.Fatalf("done task status = %q, want done", got[3].Status)
+
+	// Fractional-index move: put "urgent" between the first two (only that row
+	// changes). List must reflect the new manual order.
+	mid := (first.Position + second.Position) / 2
+	rec = do(t, srv, http.MethodPatch, "/users/"+testUserID+"/tasks/"+third.ID,
+		map[string]float64{"position": mid})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch position: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = do(t, srv, http.MethodGet, "/users/"+testUserID+"/tasks", nil)
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	wantOrder = []string{first.ID, third.ID, second.ID}
+	for i, id := range wantOrder {
+		if got[i].ID != id {
+			t.Fatalf("after move order[%d] = %q, want %s", i, got[i].Title, id)
+		}
+	}
+}
+
+// Priority defaults to 'none', accepts a value on create, persists via PATCH,
+// and rejects an invalid value with a clean 400 (never a CHECK-violation 500).
+func TestTaskPriority(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Default on create is 'none'.
+	def := createTaskT(t, srv, createTaskReq{Title: "no priority given"})
+	if def.Priority != "none" {
+		t.Fatalf("default priority = %q, want none", def.Priority)
+	}
+
+	// Accepted on create.
+	hi := createTaskT(t, srv, createTaskReq{Title: "important", Priority: "high"})
+	if hi.Priority != "high" {
+		t.Fatalf("create priority = %q, want high", hi.Priority)
+	}
+
+	// PATCH priority persists.
+	rec := do(t, srv, http.MethodPatch, "/users/"+testUserID+"/tasks/"+def.ID,
+		map[string]string{"priority": "high"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch priority: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var updated task
+	_ = json.Unmarshal(rec.Body.Bytes(), &updated)
+	if updated.Priority != "high" {
+		t.Fatalf("priority after patch = %q, want high", updated.Priority)
+	}
+
+	// Invalid priority -> 400, on both create and PATCH.
+	rec = do(t, srv, http.MethodPost, "/users/"+testUserID+"/tasks",
+		createTaskReq{Title: "bad", Priority: "urgent"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create bad priority: got %d, want 400 body=%s", rec.Code, rec.Body.String())
+	}
+	rec = do(t, srv, http.MethodPatch, "/users/"+testUserID+"/tasks/"+def.ID,
+		map[string]string{"priority": "urgent"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("patch bad priority: got %d, want 400 body=%s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -100,7 +100,16 @@ class AnthropicAPIProvider:
     def stream(self, messages, system=None, tools=None, max_tokens=4096):
         # text_stream yields only text deltas — thinking blocks stream empty and
         # tool_use ids never surface here, so nothing vendor-shaped escapes.
+        self.last_usage = None  # reset so a caller never reads a prior turn's count
         with self._client.messages.stream(**self._params(messages, system, max_tokens)) as s:
             for text in s.text_stream:
                 if text:
                     yield text
+            try:
+                u = s.get_final_message().usage
+                self.last_usage = {
+                    "prompt_tokens": u.input_tokens,
+                    "completion_tokens": u.output_tokens,
+                }
+            except Exception:
+                pass  # usage is best-effort; never break the stream over it

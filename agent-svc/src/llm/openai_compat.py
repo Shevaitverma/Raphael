@@ -222,6 +222,7 @@ class OpenAICompatProvider:
         # budget thinking and stream nothing. Reasoning is pure cost on this path —
         # turn it off so the answer lands in content. Same per-model 400-memo
         # fallback as chat() (a server that rejects reasoning_effort streams anyway).
+        self.last_usage = None  # reset so a caller never reads a prior turn's count
         kw = self._optional(json_mode=False, reasoning=False, tools=None)
         while True:
             try:
@@ -230,6 +231,8 @@ class OpenAICompatProvider:
                     messages=self._messages(messages, system),
                     max_tokens=max_tokens,
                     stream=True,
+                    # The FINAL chunk carries .usage; Ollama and OpenRouter both honor it.
+                    stream_options={"include_usage": True},
                     **kw,
                 )
                 break
@@ -241,6 +244,14 @@ class OpenAICompatProvider:
                 _log.info("%s rejected reasoning_effort on stream; retrying without", self.model)
                 kw.pop(drop)
         for chunk in stream:
+            # The usage chunk typically has empty choices, so read usage before the
+            # choices guard — whichever chunk carries it wins; None stays if none do.
+            usage = getattr(chunk, "usage", None)
+            if usage is not None:
+                self.last_usage = {
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                }
             if not getattr(chunk, "choices", None):
                 continue
             delta = chunk.choices[0].delta
