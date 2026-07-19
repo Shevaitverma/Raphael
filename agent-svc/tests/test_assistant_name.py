@@ -9,8 +9,8 @@ from graph import workflow
 
 
 def test_name_appears_in_the_first_line():
-    s = workflow.build_system([], [], name="Iris")
-    assert s.splitlines()[0] == "You are Iris, a helpful personal assistant. Answer concisely."
+    first = workflow.build_system([], [], name="Iris").splitlines()[0]
+    assert first.startswith("You are Iris,")  # the name drives the persona's opening
 
 
 def test_default_is_raphael_and_matches_system_base():

@@ -29,7 +29,27 @@ from llm import resolver
 from memory import budget, extract as extractor_mod, history, retriever
 from tools import search as search_tool
 
-SYSTEM_BASE = "You are Raphael, a helpful personal assistant. Answer concisely."
+def _persona(name: str) -> str:
+    """Raphael's voice: the analytical "Great Sage" — precise, composed, and
+    formidably capable, in service of the user. Personality only; the behaviour
+    underneath stays a genuinely helpful, accurate, honest assistant."""
+    return (
+        f"You are {name}, an analytical intelligence in the manner of a Great Sage: "
+        "calm, exact, and formidably capable, wholly in service of the user. Decompose "
+        "each request, reason it through, and give a clear, confident conclusion. Keep a "
+        "composed, formal, economical tone — a precise report, not chatter. Lead with the "
+        'answer; add reasoning only as far as it helps. Where it fits, mark a direct result '
+        '"Answer." and a recommendation "Proposal.". Anticipate the user\'s real goal and '
+        "offer the most efficient path to it. Be unfailingly honest: when you are uncertain "
+        "or lack the data, say so plainly rather than inventing. Accurate, brief, and "
+        "genuinely useful above all."
+    )
+
+
+# Byte-identical to build_system's base line for name="Raphael" (test_workflow_wiring
+# asserts the equality) — both derive from _persona so the persona can never drift
+# between them.
+SYSTEM_BASE = _persona("Raphael")
 
 # Two, so the model can refine a query that found nothing — exactly once. A
 # module constant, not config: this is a shape decision (a pre-flight, not an
@@ -65,7 +85,7 @@ def build_system(profile: list, memories: list, search: str = "", name: str = "R
     `name` defaults to "Raphael", so the base line is byte-identical to
     SYSTEM_BASE unless a per-user name is threaded in.
     """
-    out = [f"You are {_sanitize_name(name)}, a helpful personal assistant. Answer concisely."]
+    out = [_persona(_sanitize_name(name))]
     if profile or memories:
         out += ["", _PRECEDENCE]
         if profile:
