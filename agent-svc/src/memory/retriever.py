@@ -37,6 +37,10 @@ MEMORY_DIST_FLOOR = float(os.environ.get("MEMORY_DIST_FLOOR", "0.55"))
 # Notes closer than this to a live note are the same note.
 NOTE_DEDUP_DIST = 0.15
 
+# Episodic rows this old and never re-heard (times_seen <= 1) are archived by the
+# reaper. ponytail: fixed threshold, tune against real retention like the floor.
+REAP_AFTER_DAYS = int(os.environ.get("MEMORY_REAP_AFTER_DAYS", "90"))
+
 # Computed, never stored: a stored importance is stale the moment the clock
 # moves and needs a recompute cron to stay honest. ::float8 keeps exp() off
 # numeric, where a very old row is an expensive way to reach zero.
@@ -199,6 +203,35 @@ def touch(user_id: str, ids) -> None:
                 _bump(cur, "facts", user_id, ids)
     except Exception:
         pass
+
+
+def reap() -> int:
+    """Archive stale, never-reinforced episodic memories. Returns rows archived.
+
+    The missing WRITE side of the valid_until contract. The read path already
+    filters `valid_until IS NULL` and the HNSW index is partial on it, but nothing
+    ever SET it — so episodic rows (and the index) grew without bound and a
+    long-idle memory was still retrieved live. Setting the tombstone drops the row
+    from retrieval and from the partial index in one statement.
+
+    Scope is deliberate: kind='episodic' only (facts are superseded via upsert,
+    never archived) and times_seen <= 1 (a re-heard memory earned its keep). Never
+    raises; a failed reap is a no-op, not a downed turn.
+    """
+    try:
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE memories SET valid_until = now()
+                        WHERE valid_until IS NULL
+                          AND kind = 'episodic'
+                          AND times_seen <= 1
+                          AND last_seen < now() - make_interval(days => %s)""",
+                    (REAP_AFTER_DAYS,),
+                )
+                return cur.rowcount
+    except Exception:
+        return 0
 
 
 def _clamp(c) -> float:

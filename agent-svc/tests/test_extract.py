@@ -23,16 +23,16 @@ GOOD = '{"items": [{"subject": "user", "predicate": "lives in", "object": "Berli
     "name,text,want",
     [
         (
-            "clean json",
+            "clean json",  # no confidence field -> explicit default (0.95)
             GOOD,
             [{"kind": "triple", "subject": "user", "predicate": "lives in",
-              "object": "Berlin", "confidence": 0.70}],
+              "object": "Berlin", "confidence": 0.95}],
         ),
         (
             "fenced json with preamble and trailing prose",
             "Sure! Here is the JSON you asked for:\n```json\n" + GOOD + "\n```\nHope that helps!",
             [{"kind": "triple", "subject": "user", "predicate": "lives in",
-              "object": "Berlin", "confidence": 0.70}],
+              "object": "Berlin", "confidence": 0.95}],
         ),
         ("prose only", "I could not find any durable facts in that exchange.", []),
         ("empty string", "", []),
@@ -45,17 +45,17 @@ GOOD = '{"items": [{"subject": "user", "predicate": "lives in", "object": "Berli
             ' {"subject": "user", "predicate": "drinks", "object": "tea"},'
             ' "not even an object"]}',
             [{"kind": "triple", "subject": "user", "predicate": "drinks",
-              "object": "tea", "confidence": 0.70}],
+              "object": "tea", "confidence": 0.95}],
         ),
         (
-            "note item",
-            '{"items": [{"note": "prefers short answers", "confidence": "explicit"}]}',
-            [{"kind": "note", "content": "prefers short answers", "confidence": 0.95}],
-        ),
-        (
-            "bare list, no items wrapper",
-            '[{"note": "prefers short answers"}]',
+            "note item, tagged inferred",
+            '{"items": [{"note": "prefers short answers", "confidence": "inferred"}]}',
             [{"kind": "note", "content": "prefers short answers", "confidence": 0.70}],
+        ),
+        (
+            "bare list, no items wrapper -> explicit default",
+            '[{"note": "prefers short answers"}]',
+            [{"kind": "note", "content": "prefers short answers", "confidence": 0.95}],
         ),
     ],
 )
@@ -68,9 +68,9 @@ def test_confidence_menu():
         return extract.parse('{"items": [{"note": "x", "confidence": %s}]}' % v)[0]["confidence"]
 
     assert conf('"explicit"') == 0.95
-    assert conf('"inferred"') == 0.70
-    assert conf('"high"') == 0.70  # off-menu -> the inferred tier, never a guess.
-    assert conf("null") == 0.70
+    assert conf('"inferred"') == 0.70  # the ONLY tag that lowers a fact
+    assert conf('"high"') == 0.95  # off-menu -> explicit default, not a guessed-low
+    assert conf("null") == 0.95  # omitted/None -> explicit; a grounded fact is stated
     assert conf("0.42") == 0.42
     assert conf("7") == 1.0  # clamped
     assert conf("-3") > 0  # db CHECK is confidence > 0

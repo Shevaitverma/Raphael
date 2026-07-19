@@ -60,15 +60,15 @@ Rules:
   not anything true of everyone.
 - NEVER record the assistant's own name, identity, or persona. "What is your
   name?" and its answer contain NO fact about the user.
-- Add "confidence": "explicit" ONLY if the user stated it outright. Omit the
-  field when you inferred it.
+- Add "confidence": "inferred" ONLY when you GUESSED something the user did not
+  say outright. Omit the field for anything the user stated directly.
 - At most 5 items. Use words from the exchange.
 - Nothing durable in the exchange? Output exactly: {"items": []}
 
 Example
 Message: I moved to Berlin last month, think I'll stay a while.
 Answer: Congrats on the move!
-Output: {"items": [{"subject": "user", "predicate": "lives in", "object": "Berlin", "confidence": "explicit"}, {"note": "moved to Berlin recently and plans to stay"}]}"""
+Output: {"items": [{"subject": "user", "predicate": "lives in", "object": "Berlin"}, {"note": "moved to Berlin recently and plans to stay"}]}"""
 
 # Grounding stopwords: enough to stop "the"/"and" from grounding a hallucination.
 _STOP = {
@@ -98,7 +98,11 @@ def _conf(v) -> float:
     if isinstance(v, (int, float)) and not isinstance(v, bool):
         # db CHECK is confidence > 0, so the floor is 0.01 and not 0.
         return min(1.0, max(0.01, float(v)))
-    return CONF_INFERRED  # "high", None, garbage -> the inferred tier.
+    # Omitted/None/garbage -> explicit. A grounded fact came from the user's own
+    # words (see grounding below), so "stated" is the honest default; the model
+    # lowers a fact ONLY by tagging it "inferred". Defaulting to inferred left a
+    # 7B model — which never volunteers the tag — flooring every fact at 0.70.
+    return CONF_EXPLICIT
 
 
 def _item(raw) -> dict | None:
@@ -186,8 +190,16 @@ def extract(provider, message: str, answer: str) -> list[dict]:
     # "user is known as Akku". This also enforces the prompt's "skip anything the
     # assistant suggested that the user did not confirm".
     seen = _words(message)
-    return [
-        it
-        for it in items
-        if _words(" ".join(v for k, v in it.items() if k != "kind" and isinstance(v, str))) & seen
-    ]
+
+    def _grounded(it: dict) -> bool:
+        # Ground the PAYLOAD in the USER's words — for a triple that is the OBJECT
+        # (the claim), for a note the content. NOT "any word of the item": a RECALL
+        # question ("where was I born?") shares its predicate word with the
+        # remembered fact, so grounding the whole triple let an answer-sourced
+        # object ("Reykjavik") ride in and be RE-INSCRIBED as a fresh user fact —
+        # now at explicit 0.95, i.e. retrieval feedback poisoning. Subject and
+        # predicate are not payload; only what the user actually said counts.
+        payload = it.get("object") if it.get("kind") == "triple" else it.get("content")
+        return bool(_words(payload or "") & seen)
+
+    return [it for it in items if _grounded(it)]
