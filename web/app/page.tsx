@@ -277,6 +277,66 @@ export default function Page() {
   // Cheaper than a modal and never fires on one stray click.
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
+  // Bulk delete: a selection mode reveals a checkbox per row; the selected ids
+  // live in a Set. confirmBulk is the same two-step arm as the single delete.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirmBulk, setConfirmBulk] = useState(false);
+
+  const allSelected = conversations.length > 0 && selected.size === conversations.length;
+
+  function toggleSelected(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelected(allSelected ? new Set() : new Set(conversations.map((c) => c.id)));
+  }
+
+  function exitSelectMode() {
+    setSelectMode(false);
+    setSelected(new Set());
+    setConfirmBulk(false);
+  }
+
+  // Loop the existing single-delete route — N is small for a personal app, so a
+  // batch endpoint is a future optimization, not now. Tolerate partial failure:
+  // one 404/500 is recorded and the rest still run, then surfaced via failed().
+  async function handleDeleteSelected() {
+    if (!token || selected.size === 0) return;
+    setConfirmBulk(false);
+    const deleted = new Set<string>();
+    let lastError: unknown = null;
+    for (const id of selected) {
+      try {
+        await deleteConversation(token, id);
+        deleted.add(id);
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    const remaining = conversations.filter((c) => !deleted.has(c.id));
+    setConversations(remaining);
+    // Don't strand the user on a thread that no longer exists: pick another
+    // conversation, or fall back to the empty "start a conversation" state.
+    if (activeId && deleted.has(activeId)) {
+      const next = remaining[0]?.id ?? null;
+      setActiveId(next);
+      if (!next) setMessages([]);
+    }
+    exitSelectMode();
+    if (lastError) failed(lastError);
+    else {
+      setError(null);
+      void refreshConversations();
+    }
+  }
+
   async function handleDeleteConversation(id: string) {
     if (!token) return;
     setConfirmDeleteId(null);
@@ -447,10 +507,76 @@ export default function Page() {
         <aside className="flex w-64 flex-col border-r border-edge bg-panel">
           <button
             onClick={handleNewConversation}
-            className="m-3 rounded-md bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent transition-colors hover:bg-accent/25"
+            className="mx-3 mt-3 rounded-md bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent transition-colors hover:bg-accent/25"
           >
             + New conversation
           </button>
+
+          {/* Select-mode header: a toggle, and while on, a select-all/clear
+              control plus the bulk-delete arm. */}
+          <div className="flex items-center justify-between px-3 py-2">
+            {!selectMode ? (
+              <button
+                onClick={() => setSelectMode(true)}
+                disabled={conversations.length === 0}
+                className="text-xs text-muted transition-colors hover:text-on-surface disabled:opacity-40"
+              >
+                Select
+              </button>
+            ) : (
+              <>
+                <label className="flex items-center gap-2 text-xs text-muted">
+                  <input
+                    type="checkbox"
+                    ref={(el) => {
+                      // A partial selection reads as indeterminate, not checked.
+                      if (el) el.indeterminate = selected.size > 0 && !allSelected;
+                    }}
+                    checked={allSelected}
+                    onChange={toggleSelectAll}
+                    aria-label={allSelected ? "Clear selection" : "Select all conversations"}
+                    className="accent-accent"
+                  />
+                  {allSelected ? "Clear" : "Select all"}
+                </label>
+                <button
+                  onClick={exitSelectMode}
+                  className="text-xs text-muted transition-colors hover:text-on-surface"
+                >
+                  Done
+                </button>
+              </>
+            )}
+          </div>
+
+          {selectMode && selected.size > 0 && (
+            <div className="px-3 pb-2">
+              {confirmBulk ? (
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => void handleDeleteSelected()}
+                    className="rounded px-2 py-1 text-xs font-medium text-error hover:bg-error/10"
+                  >
+                    Delete {selected.size}?
+                  </button>
+                  <button
+                    onClick={() => setConfirmBulk(false)}
+                    className="rounded px-2 py-1 text-xs text-muted hover:bg-raised hover:text-on-surface"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirmBulk(true)}
+                  className="w-full rounded-md border border-error/40 px-2 py-1 text-xs font-medium text-error transition-colors hover:bg-error/10"
+                >
+                  Delete selected ({selected.size})
+                </button>
+              )}
+            </div>
+          )}
+
           <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
             {conversations.length === 0 && !error && (
               <p className="px-2 py-3 text-sm text-faint">
@@ -468,6 +594,15 @@ export default function Page() {
                       : "text-muted hover:bg-raised/60 hover:text-on-surface"
                   }`}
                 >
+                  {selectMode && (
+                    <input
+                      type="checkbox"
+                      checked={selected.has(c.id)}
+                      onChange={() => toggleSelected(c.id)}
+                      aria-label={title}
+                      className="ml-3 shrink-0 accent-accent"
+                    />
+                  )}
                   <button
                     onClick={() => setActiveId(c.id)}
                     className="min-w-0 flex-1 truncate px-3 py-2 text-left"
@@ -475,7 +610,7 @@ export default function Page() {
                   >
                     {title}
                   </button>
-                  {confirmDeleteId === c.id ? (
+                  {selectMode ? null : confirmDeleteId === c.id ? (
                     <span className="flex shrink-0 items-center gap-1 pr-2">
                       <button
                         onClick={() => void handleDeleteConversation(c.id)}
