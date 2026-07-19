@@ -28,6 +28,11 @@ export type Message = {
   role: "user" | "assistant" | "tool";
   content: string;
   created_at?: string;
+  // Answer provenance, stored server-side so a reload renders the same banner
+  // and model label the live SSE stream did (see Degraded/Done below).
+  answered_model?: string | null;
+  degraded?: boolean;
+  tool_calls?: { name: string; arguments: Record<string, unknown> }[];
 };
 
 // --- Degraded / error metadata surfaced from the SSE stream ------------------
@@ -43,6 +48,16 @@ export type Done = {
   model?: string;
   message_id?: string;
 };
+
+// A reloaded message stores provenance as `degraded` (boolean) + `answered_model`,
+// while the live SSE stream carries a full Degraded object. Rebuild that same shape
+// from stored state so a reload renders the identical warning banner — a lifeboat
+// answer must never look like a normal one just because the page was refreshed.
+export function storedDegraded(m: Message): Degraded | undefined {
+  return m.degraded
+    ? { reason: "", provider: "local", model: m.answered_model ?? "" }
+    : undefined;
+}
 
 // --- errors ------------------------------------------------------------------
 

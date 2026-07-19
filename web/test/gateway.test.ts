@@ -6,6 +6,8 @@ import {
   disconnectGoogle,
   getProfile,
   googleStatus,
+  listMessages,
+  storedDegraded,
   streamChat,
   updateProfile,
   type ChatHandlers,
@@ -371,6 +373,52 @@ test("aborting a hung stream resolves and reports no error", async () => {
   }
   assert.equal(c.tokens.join(""), "Hi");
   assert.deepEqual(c.errors, []);
+});
+
+// --- answer provenance: stored model / degraded / tool_calls -----------------
+
+test("listMessages parses answered_model, degraded and tool_calls", async () => {
+  const msgs = await withFetch(
+    async () =>
+      new Response(
+        JSON.stringify([
+          {
+            id: "m1",
+            role: "assistant",
+            content: "hi",
+            answered_model: "qwen2.5:7b",
+            degraded: true,
+            tool_calls: [{ name: "web_search", arguments: { query: "cats" } }],
+          },
+        ]),
+        { status: 200 },
+      ),
+    () => listMessages("t", "c1"),
+  );
+  assert.equal(msgs.length, 1);
+  assert.equal(msgs[0].answered_model, "qwen2.5:7b");
+  assert.equal(msgs[0].degraded, true);
+  assert.equal(msgs[0].tool_calls?.[0].name, "web_search");
+  assert.equal(msgs[0].tool_calls?.[0].arguments.query, "cats");
+});
+
+test("storedDegraded rebuilds the live banner shape for a degraded reload", () => {
+  const d = storedDegraded({
+    role: "assistant",
+    content: "hi",
+    answered_model: "qwen2.5:7b",
+    degraded: true,
+  });
+  // Same shape the SSE `degraded` event yields, so MessageRow renders one banner.
+  assert.equal(d?.model, "qwen2.5:7b");
+  assert.equal(d?.provider, "local");
+});
+
+test("storedDegraded returns undefined for a normal (non-degraded) message", () => {
+  assert.equal(
+    storedDegraded({ role: "assistant", content: "hi", answered_model: "gpt", degraded: false }),
+    undefined,
+  );
 });
 
 test("aborting before the first byte reports no error", async () => {

@@ -362,17 +362,25 @@ def generate_node(state: GState) -> dict:
     return out
 
 
-def _post_message(client, conversation_id, user_id, role, content, tool_calls=None):
+def _post_message(client, conversation_id, user_id, role, content, tool_calls=None,
+                  answered_model=None, degraded=False):
     # user_id rides in the query, not the body: conv-svc's message body is
-    # {role, content, tool_calls?} and rejects anything else. It authorizes the
-    # write against the conversation's owner and 404s if they do not match, so a
-    # conversation_id from the client cannot be used to write into someone
-    # else's history. user_id originates from the gateway's verified JWT.
+    # {role, content, tool_calls?, answered_model?, degraded?} and rejects
+    # anything else. It authorizes the write against the conversation's owner and
+    # 404s if they do not match, so a conversation_id from the client cannot be
+    # used to write into someone else's history. user_id originates from the
+    # gateway's verified JWT.
     body = {"role": role, "content": content}
     if tool_calls:
         # Absent, not null, when there was no call: conv-svc validates the column
         # and the shape is {name, arguments} only — no provider wire format.
         body["tool_calls"] = tool_calls
+    # Provenance rides only on the assistant turn; omit on the user turn so it
+    # stores null/false. Absent = default, matching the DB defaults.
+    if answered_model is not None:
+        body["answered_model"] = answered_model
+    if degraded:
+        body["degraded"] = degraded
     return client.post(
         f"{CONV_SVC_URL}/conversations/{conversation_id}/messages",
         params={"user_id": user_id},
@@ -391,6 +399,8 @@ def persist_node(state: GState) -> dict:
             r = _post_message(
                 client, state["conversation_id"], uid, "assistant", state.get("answer", ""),
                 state.get("tool_calls"),
+                answered_model=state.get("model"),
+                degraded=bool(state.get("degraded")),
             )
             if r.status_code < 300:
                 data = r.json()

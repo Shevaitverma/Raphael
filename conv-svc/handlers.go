@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -165,8 +166,8 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	// TestListMessagesLimitOrdering: id is a random uuid, so the order it settles
 	// on among tied rows is stable, NOT insertion order.
 	rows, err := s.db.Query(ctx,
-		`SELECT id, conversation_id, role, content, tool_calls, created_at FROM (
-		   SELECT id, conversation_id, role, content, tool_calls, created_at
+		`SELECT id, conversation_id, role, content, tool_calls, answered_model, degraded, created_at FROM (
+		   SELECT id, conversation_id, role, content, tool_calls, answered_model, degraded, created_at
 		   FROM messages
 		   WHERE conversation_id = $1
 		   ORDER BY created_at DESC, id DESC
@@ -185,7 +186,7 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var m Message
 		var tc []byte
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &tc, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &tc, &m.AnsweredModel, &m.Degraded, &m.CreatedAt); err != nil {
 			writeErr(w, http.StatusInternalServerError, "could not read messages")
 			return
 		}
@@ -214,6 +215,11 @@ func (s *Server) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
 		Role      string          `json:"role"`
 		Content   string          `json:"content"`
 		ToolCalls json.RawMessage `json:"tool_calls"`
+		// Pointers so "absent" is distinguishable from an explicit zero: an absent
+		// answered_model stores NULL, an absent degraded stores false. Declared so
+		// DisallowUnknownFields accepts them from agent-svc.
+		AnsweredModel *string `json:"answered_model"`
+		Degraded      *bool   `json:"degraded"`
 	}
 	if err := decodeBody(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -235,6 +241,17 @@ func (s *Server) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
 		toolCallsArg = string(in.ToolCalls)
 	}
 
+	// Absent answered_model => SQL NULL; absent degraded => false (the column
+	// default). Deref only when present so the pointers stay the "absent" signal.
+	var answeredModelArg any // nil => SQL NULL
+	if in.AnsweredModel != nil {
+		answeredModelArg = *in.AnsweredModel
+	}
+	degradedArg := false
+	if in.Degraded != nil {
+		degradedArg = *in.Degraded
+	}
+
 	ctx, cancel := reqCtx(r)
 	defer cancel()
 
@@ -245,12 +262,12 @@ func (s *Server) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
 	// insert writes nothing and Scan reports ErrNoRows => 404, exactly as for an
 	// id that does not exist. It also subsumes the old FK-violation branch.
 	err = s.db.QueryRow(ctx,
-		`INSERT INTO messages (conversation_id, role, content, tool_calls)
-		 SELECT $1::uuid, $2::text, $3::text, $4::jsonb
+		`INSERT INTO messages (conversation_id, role, content, tool_calls, answered_model, degraded)
+		 SELECT $1::uuid, $2::text, $3::text, $4::jsonb, $6::text, $7::boolean
 		 WHERE EXISTS (SELECT 1 FROM conversations WHERE id = $1 AND user_id = $5)
-		 RETURNING id, conversation_id, role, content, tool_calls, created_at`,
-		convID, in.Role, in.Content, toolCallsArg, userID,
-	).Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &tc, &m.CreatedAt)
+		 RETURNING id, conversation_id, role, content, tool_calls, answered_model, degraded, created_at`,
+		convID, in.Role, in.Content, toolCallsArg, userID, answeredModelArg, degradedArg,
+	).Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &tc, &m.AnsweredModel, &m.Degraded, &m.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeErr(w, http.StatusNotFound, "conversation not found")
@@ -267,7 +284,37 @@ func (s *Server) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
 	if tc != nil {
 		m.ToolCalls = json.RawMessage(tc)
 	}
+
+	// Derive the conversation title from its FIRST user message. Best-effort and
+	// non-fatal: the message is already written. The guards make it correct and
+	// idempotent — count(*)=1 means this insert IS the first message (0 before),
+	// title='New conversation' means the user/a prior derivation never named it,
+	// and user_id=$3 keeps the same ownership scope the insert just passed so this
+	// can never title someone else's conversation.
+	if in.Role == "user" {
+		if title := deriveTitle(in.Content); title != "" {
+			_, _ = s.db.Exec(ctx,
+				`UPDATE conversations SET title = $1
+				 WHERE id = $2 AND user_id = $3 AND title = 'New conversation'
+				   AND (SELECT count(*) FROM messages WHERE conversation_id = $2) = 1`,
+				title, convID, userID)
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, m)
+}
+
+// deriveTitle turns a message into a conversation title: trimmed, collapsed to
+// one line (Fields splits on any run of unicode whitespace), and truncated to
+// ~60 runes with an ellipsis when cut. Empty (all-whitespace) => "" and the
+// caller skips the update rather than naming a conversation "".
+func deriveTitle(content string) string {
+	t := strings.Join(strings.Fields(content), " ")
+	r := []rune(t)
+	if len(r) > 60 {
+		return string(r[:60]) + "…"
+	}
+	return t
 }
 
 // ---- internals ------------------------------------------------------------

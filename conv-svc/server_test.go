@@ -235,6 +235,67 @@ func TestCreateAndListMessages(t *testing.T) {
 	}
 }
 
+// The first user message names an untitled conversation; later messages leave
+// the derived title alone. This is the daily-visible gap: the sidebar showed
+// "New conversation" forever.
+func TestFirstUserMessageDerivesTitle(t *testing.T) {
+	srv, cleanup := newTestServer(t)
+	defer cleanup()
+	convID := createConv(t, srv)
+
+	postMsg(t, srv, convID, map[string]any{
+		"role": "user", "content": "  What is the\n capital  of France?  ",
+	})
+	if got := convTitle(t, srv, convID); got != "What is the capital of France?" {
+		t.Fatalf("title = %q, want it derived (trimmed, one line) from the first message", got)
+	}
+
+	// A second user message (and an assistant turn between) must NOT re-derive.
+	postMsg(t, srv, convID, map[string]any{"role": "assistant", "content": "Paris."})
+	postMsg(t, srv, convID, map[string]any{"role": "user", "content": "and Germany?"})
+	if got := convTitle(t, srv, convID); got != "What is the capital of France?" {
+		t.Fatalf("title changed after later messages: %q", got)
+	}
+}
+
+// A long first message is truncated to 60 runes plus an ellipsis, not stored whole.
+func TestTitleTruncatedToSixtyRunes(t *testing.T) {
+	srv, cleanup := newTestServer(t)
+	defer cleanup()
+	convID := createConv(t, srv)
+	postMsg(t, srv, convID, map[string]any{"role": "user", "content": strings.Repeat("a", 100)})
+	got := []rune(convTitle(t, srv, convID))
+	if len(got) != 61 || got[60] != '…' {
+		t.Fatalf("title len = %d (want 61 incl. ellipsis), last rune = %q", len(got), string(got[len(got)-1]))
+	}
+}
+
+// answered_model + degraded round-trip on the assistant row; a user message
+// lists them back as null/false. This is the provenance that SSE showed live
+// and a reload used to lose.
+func TestMessageProvenanceStoredAndListed(t *testing.T) {
+	srv, cleanup := newTestServer(t)
+	defer cleanup()
+	convID := createConv(t, srv)
+
+	postMsg(t, srv, convID, map[string]any{"role": "user", "content": "hi"})
+	postMsg(t, srv, convID, map[string]any{
+		"role": "assistant", "content": "hello",
+		"answered_model": "qwen2.5:7b", "degraded": true,
+	})
+
+	msgs := listMsgs(t, srv, msgsURL(convID, devUserID))
+	if len(msgs) != 2 {
+		t.Fatalf("got %d messages, want 2", len(msgs))
+	}
+	if msgs[0].AnsweredModel != nil || msgs[0].Degraded {
+		t.Fatalf("user provenance = %v / %v, want null / false", msgs[0].AnsweredModel, msgs[0].Degraded)
+	}
+	if msgs[1].AnsweredModel == nil || *msgs[1].AnsweredModel != "qwen2.5:7b" || !msgs[1].Degraded {
+		t.Fatalf("assistant provenance not round-tripped: %+v", msgs[1])
+	}
+}
+
 func TestCreateMessageBadRole(t *testing.T) {
 	srv, cleanup := newTestServer(t)
 	defer cleanup()
@@ -539,6 +600,27 @@ func postMsg(t *testing.T, srv *Server, convID string, body any) Message {
 		t.Fatalf("setup space created_at: %v", err)
 	}
 	return m
+}
+
+// convTitle reads the current title of a conversation via the list endpoint
+// (there is no single-conversation GET), scoping to its owner.
+func convTitle(t *testing.T, srv *Server, convID string) string {
+	t.Helper()
+	rr := do(t, srv, "GET", "/conversations?user_id="+devUserID, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list conversations = %d; body=%s", rr.Code, rr.Body)
+	}
+	var list []Conversation
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode conversations: %v", err)
+	}
+	for _, c := range list {
+		if c.ID == convID {
+			return c.Title
+		}
+	}
+	t.Fatalf("conversation %s not found in list", convID)
+	return ""
 }
 
 // createConv creates a conversation via the API and returns its id.

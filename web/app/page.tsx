@@ -18,6 +18,7 @@ import {
   listMessages,
   listProviders,
   setLifeboat,
+  storedDegraded,
   streamChat,
   updateProfile,
   type Conversation,
@@ -32,8 +33,11 @@ import {
 const DEV_EMAIL = "dev@raphael.local";
 const SEARCH_KEY = "raphael.search";
 
-// UI message carries extra render state that never touches the database.
-type UiMessage = Message & {
+// UI message carries extra render state that never touches the database. It
+// overrides Message.degraded (a stored boolean) with the live Degraded object
+// the banner renders — loadMessages rebuilds that object from stored state so
+// live and reloaded rows are indistinguishable.
+type UiMessage = Omit<Message, "degraded"> & {
   // Client-side identity, assigned before the row has a database id. Streaming
   // patches address the message by this, never by its index: any reload can
   // replace the array and leave an index pointing at a different message.
@@ -232,7 +236,9 @@ export default function Page() {
       if (!token) return;
       try {
         const msgs = await listMessages(token, conversationId);
-        setMessages(msgs);
+        // Rebuild the live Degraded shape from stored provenance so a reloaded
+        // lifeboat answer renders the SAME banner it did while streaming.
+        setMessages(msgs.map((m) => ({ ...m, degraded: storedDegraded(m) })));
         setError(null);
       } catch (e) {
         // Clear rather than leave the previous conversation's messages under
@@ -339,8 +345,10 @@ export default function Page() {
       {
         onToken: (t) => appendToken(t),
         onDegraded: (d) => patchAssistant({ degraded: d }),
-        // Keep the row's database id so it stops being identified by position.
-        onDone: (d) => patchAssistant({ streaming: false, id: d.message_id }),
+        // Keep the row's database id so it stops being identified by position;
+        // stash the model so the "— {model}" label matches a reloaded row.
+        onDone: (d) =>
+          patchAssistant({ streaming: false, id: d.message_id, answered_model: d.model }),
         onError: (message) => patchAssistant({ streaming: false, error: message }),
       },
       ctrl.signal,
@@ -472,9 +480,13 @@ export default function Page() {
                   Send a message to start.
                 </p>
               )}
-              {messages.map((m, i) => (
-                <MessageRow key={m.id ?? m.localId ?? i} message={m} assistantName={assistantName} />
-              ))}
+              {/* role:"tool" is never the assistant's own words — agent-svc
+                  doesn't emit it, but guard so a stray one is never shown as one. */}
+              {messages
+                .filter((m) => m.role !== "tool")
+                .map((m, i) => (
+                  <MessageRow key={m.id ?? m.localId ?? i} message={m} assistantName={assistantName} />
+                ))}
             </div>
           </div>
 
@@ -1245,12 +1257,35 @@ function MessageRow({
           )}
         </div>
 
+        {/* Tools the assistant used this turn — data round-trips from the DB. */}
+        {!isUser && message.tool_calls?.length ? (
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            {message.tool_calls.map((tc, i) => {
+              const q = typeof tc.arguments?.query === "string" ? tc.arguments.query : "";
+              return (
+                <span
+                  key={i}
+                  className="inline-flex items-center rounded-md bg-raised px-2 py-0.5 text-xs text-muted"
+                >
+                  🔍 {tc.name}
+                  {q ? `: ${q.length > 40 ? q.slice(0, 40) + "…" : q}` : ""}
+                </span>
+              );
+            })}
+          </div>
+        ) : null}
+
         <div className="mt-1 whitespace-pre-wrap text-sm text-on-surface">
           {message.content}
           {message.streaming && !message.content && (
             <span className="text-muted">…</span>
           )}
         </div>
+
+        {/* Which model answered — live via onDone, reloaded via answered_model. */}
+        {!isUser && message.answered_model && (
+          <div className="mt-1 text-xs text-muted">— {message.answered_model}</div>
+        )}
 
         {/* Degraded banner — the lifeboat fired. Product requirement. */}
         {message.degraded && (

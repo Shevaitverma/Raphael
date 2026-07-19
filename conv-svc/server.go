@@ -53,7 +53,12 @@ type Message struct {
 	Role           string          `json:"role"`
 	Content        string          `json:"content"`
 	ToolCalls      json.RawMessage `json:"tool_calls,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
+	// Provenance of an assistant turn, persisted so a reload shows what SSE showed:
+	// pointer + no omitempty so a user message serializes answered_model as null,
+	// not a missing key. degraded is false on every non-degraded/user row.
+	AnsweredModel *string   `json:"answered_model"`
+	Degraded      bool      `json:"degraded"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // ---- helpers --------------------------------------------------------------

@@ -35,6 +35,38 @@ def test_persist_never_fabricates_the_fk(monkeypatch):
     assert out["message_id"] and out["persisted_message_id"] is None
 
 
+def test_persist_tags_assistant_with_provenance(monkeypatch):
+    # The assistant post carries answered_model + degraded so a reload shows what
+    # SSE showed; the user post carries neither (stored null/false).
+    posts = []
+
+    class _Resp:
+        status_code = 201
+
+        def json(self):
+            return {"id": "mid"}
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, params=None, json=None):
+            posts.append(json)
+            return _Resp()
+
+    monkeypatch.setattr(workflow.httpx, "Client", lambda **k: _Client())
+    workflow.persist_node({
+        "user_id": "u", "conversation_id": "c", "message": "m",
+        "answer": "a", "model": "qwen2.5:7b", "degraded": True,
+    })
+    user_body, asst_body = posts
+    assert "answered_model" not in user_body and not user_body.get("degraded")
+    assert asst_body["answered_model"] == "qwen2.5:7b" and asst_body["degraded"] is True
+
+
 def test_extract_never_reuses_the_credential_that_just_401d(monkeypatch):
     calls = {}
     monkeypatch.setattr(workflow.retriever, "touch", lambda u, ids: calls.setdefault("touch", ids))
