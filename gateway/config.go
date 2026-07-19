@@ -24,6 +24,15 @@ type Config struct {
 	// need explicit CORS or the browser blocks them (curl doesn't, which is why
 	// it's easy to miss).
 	CORSOrigins string
+	// Google OAuth. ClientID empty means the connect route returns 503 (fails
+	// closed, never panics). RedirectURI is where Google sends the browser back —
+	// it must match the /auth/google/callback route mounted OUTSIDE the JWT group.
+	// WebOrigin is where the callback 302s the browser after exchange; no token
+	// ever rides in that redirect.
+	GoogleClientID     string
+	GoogleClientSecret string
+	GoogleRedirectURI  string
+	WebOrigin          string
 }
 
 func getenv(key, def string) string {
@@ -50,5 +59,10 @@ func LoadConfig() Config {
 		InternalToken:   getenv("INTERNAL_TOKEN", ""),
 		RateLimitPerMin: 60,
 		CORSOrigins:     getenv("CORS_ORIGINS", "http://localhost:3000"),
+
+		GoogleClientID:     getenv("GOOGLE_CLIENT_ID", ""),
+		GoogleClientSecret: getenv("GOOGLE_CLIENT_SECRET", ""),
+		GoogleRedirectURI:  getenv("GOOGLE_REDIRECT_URI", "http://localhost:8080/auth/google/callback"),
+		WebOrigin:          getenv("WEB_ORIGIN", "http://localhost:3000"),
 	}
 }

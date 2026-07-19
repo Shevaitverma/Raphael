@@ -45,6 +45,17 @@ def _get(path: str):
     return data or None
 
 
+def google_token(user_id: str) -> str | None:
+    """The user's Google OAuth access token from user-svc, or None if they have
+    not connected Calendar (404) or anything at all went wrong. Never raises:
+    a token lookup problem must degrade the calendar tool, not break the turn."""
+    try:
+        data = _get(f"/internal/users/{user_id}/google/token")
+    except Exception:
+        return None
+    return (data or {}).get("access_token") or None
+
+
 def _fetch_active(user_id: str):
     return _get(f"/internal/users/{user_id}/credential/active")
 

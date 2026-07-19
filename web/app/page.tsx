@@ -4,11 +4,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   activateProvider,
   addProvider,
+  ApiError,
   clearLifeboat,
+  connectGoogle,
   createConversation,
   devLogin,
+  disconnectGoogle,
   getCapabilities,
   getProfile,
+  googleStatus,
   isAuthError,
   listConversations,
   listMessages,
@@ -19,6 +23,7 @@ import {
   type Conversation,
   type Credential,
   type Degraded,
+  type GoogleStatus,
   type Message,
   type NewCredential,
   type User,
@@ -54,6 +59,12 @@ export default function Page() {
   const [error, setError] = useState<string | null>(null);
 
   const [view, setView] = useState<"chat" | "settings">("chat");
+
+  // Result of a Google OAuth round-trip (the gateway redirects back with
+  // ?google=connected|error). `googleReload` bumps to re-fetch the connection
+  // status after a successful connect.
+  const [googleNotice, setGoogleNotice] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [googleReload, setGoogleReload] = useState(0);
 
   // Display-only assistant name. Defaults to the product name until the profile
   // loads; the system-prompt name is set server-side and never sent from here.
@@ -130,6 +141,29 @@ export default function Page() {
   // effect rather than a useState initializer.
   useEffect(() => {
     setSearch(localStorage.getItem(SEARCH_KEY) === "1");
+  }, []);
+
+  // The gateway redirects the browser back here after Google consent. Read the
+  // result once, open Settings so it's visible, then strip the query param via
+  // replaceState so a reload doesn't re-fire the notice.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const g = params.get("google");
+    if (!g) return;
+    if (g === "connected") {
+      setGoogleNotice({ ok: true, msg: "Google connected." });
+      setGoogleReload((n) => n + 1); // re-fetch status in Settings
+    } else {
+      setGoogleNotice({ ok: false, msg: "Google connection failed. Please try again." });
+    }
+    setView("settings");
+    params.delete("google");
+    const qs = params.toString();
+    window.history.replaceState(
+      {},
+      "",
+      qs ? `${window.location.pathname}?${qs}` : window.location.pathname,
+    );
   }, []);
 
   // A checkbox that silently does nothing is the invisible failure this whole
@@ -376,7 +410,14 @@ export default function Page() {
       </header>
 
       {view === "settings" ? (
-        <SettingsView token={token} assistantName={assistantName} onSaved={setAssistantName} />
+        <SettingsView
+          token={token}
+          assistantName={assistantName}
+          onSaved={setAssistantName}
+          onFail={failed}
+          googleReload={googleReload}
+          googleNotice={googleNotice}
+        />
       ) : (
       <div className="flex min-h-0 flex-1">
         {/* Conversation list */}
@@ -626,10 +667,16 @@ function SettingsView({
   token,
   assistantName,
   onSaved,
+  onFail,
+  googleReload,
+  googleNotice,
 }: {
   token: string;
   assistantName: string;
   onSaved: (name: string) => void;
+  onFail: (e: unknown) => void;
+  googleReload: number;
+  googleNotice: { ok: boolean; msg: string } | null;
 }) {
   const [creds, setCreds] = useState<Credential[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -775,7 +822,151 @@ function SettingsView({
             }
           }}
         />
+
+        <GoogleSection
+          token={token}
+          onFail={onFail}
+          reload={googleReload}
+          notice={googleNotice}
+        />
       </div>
+    </div>
+  );
+}
+
+// Read-only Google connector: link/unlink the user's Calendar + profile. The
+// gateway owns the OAuth dance; this only kicks it off and reflects status.
+function GoogleSection({
+  token,
+  onFail,
+  reload,
+  notice,
+}: {
+  token: string;
+  onFail: (e: unknown) => void;
+  reload: number;
+  notice: { ok: boolean; msg: string } | null;
+}) {
+  const [status, setStatus] = useState<GoogleStatus | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // Set only when /connect answers 503 — this deployment has no Google
+  // credentials, so the connector is inert by design (like web search with no key).
+  const [notConfigured, setNotConfigured] = useState(false);
+
+  const loadStatus = useCallback(async () => {
+    try {
+      setStatus(await googleStatus(token));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      onFail(e); // funnel 401s to a logout; never a silent console.error
+    }
+  }, [token, onFail]);
+
+  useEffect(() => {
+    void loadStatus();
+  }, [loadStatus, reload]);
+
+  async function connect() {
+    setBusy(true);
+    setErr(null);
+    try {
+      const { auth_url } = await connectGoogle(token);
+      window.location.href = auth_url; // -> Google's consent screen
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 503) {
+        setNotConfigured(true);
+      } else {
+        setErr(e instanceof Error ? e.message : String(e));
+        onFail(e);
+      }
+      setBusy(false); // on success we're navigating away, so don't unset then
+    }
+  }
+
+  async function disconnect() {
+    setBusy(true);
+    setErr(null);
+    try {
+      await disconnectGoogle(token);
+      await loadStatus();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      onFail(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-edge bg-panel p-4">
+      <h3 className="mb-1 text-base font-semibold text-on-surface">Google</h3>
+      <p className="mb-4 text-sm text-muted">
+        Connect your Google account so the assistant can look at your calendar
+        when a message needs it.
+      </p>
+
+      {notice && (
+        <div
+          role={notice.ok ? "status" : "alert"}
+          className={`mb-3 border-l-2 px-3 py-2 text-sm ${
+            notice.ok
+              ? "border-accent bg-accent/10 text-accent"
+              : "border-error bg-error/10 text-error"
+          }`}
+        >
+          {notice.msg}
+        </div>
+      )}
+
+      {err && (
+        <div
+          role="alert"
+          className="mb-3 border-l-2 border-error bg-error/10 px-3 py-2 text-sm text-error"
+        >
+          {err}
+        </div>
+      )}
+
+      {status?.connected ? (
+        <div className="flex items-center justify-between gap-3">
+          <p className="min-w-0 text-sm text-on-surface">
+            Connected as{" "}
+            <span className="font-medium">{status.email ?? "your Google account"}</span>
+          </p>
+          <button
+            onClick={() => void disconnect()}
+            disabled={busy}
+            className="shrink-0 rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40"
+          >
+            {busy ? "Working…" : "Disconnect"}
+          </button>
+        </div>
+      ) : notConfigured ? (
+        <p className="text-sm text-faint">
+          Google connector isn&apos;t configured on this deployment.
+        </p>
+      ) : (
+        <>
+          <button
+            onClick={() => void connect()}
+            disabled={busy || status === null}
+            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
+          >
+            {busy ? "Connecting…" : "Connect Google"}
+          </button>
+          {/* PRIVACY DISCLOSURE — required, visible text (not a tooltip). */}
+          <p className="mt-3 text-sm text-muted">
+            Connecting lets Raphael read your Google Calendar, and only when a
+            message actually needs it. The calendar text it reads for that turn
+            is sent to your active model provider to answer — if your active
+            provider is Claude or OpenRouter, that data goes to them; if it&apos;s
+            your local model, it stays on this machine. Access is read-only:
+            Raphael cannot create, change, or delete anything in your calendar.
+            You can disconnect at any time.
+          </p>
+        </>
+      )}
     </div>
   );
 }

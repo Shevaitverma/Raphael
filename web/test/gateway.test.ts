@@ -2,7 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   ApiError,
+  connectGoogle,
+  disconnectGoogle,
   getProfile,
+  googleStatus,
   streamChat,
   updateProfile,
   type ChatHandlers,
@@ -257,6 +260,74 @@ test("getProfile raises ApiError carrying the status", async () => {
     withFetch(
       async () => new Response("nope", { status: 500 }),
       () => getProfile("t"),
+    ),
+    (e) => e instanceof ApiError && (e as ApiError).status === 500,
+  );
+});
+
+// --- Google connector --------------------------------------------------------
+
+test("connectGoogle parses the auth_url", async () => {
+  const r = await withFetch(
+    async () =>
+      new Response('{"auth_url":"https://accounts.google.com/o/oauth2/v2/auth?x=1"}', {
+        status: 200,
+      }),
+    () => connectGoogle("t"),
+  );
+  assert.match(r.auth_url, /accounts\.google\.com/);
+});
+
+test("connectGoogle raises a 503 ApiError when Google isn't configured", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response('{"error":"google not configured"}', { status: 503 }),
+      () => connectGoogle("t"),
+    ),
+    (e) => {
+      assert.ok(e instanceof ApiError);
+      assert.equal((e as ApiError).status, 503);
+      return true;
+    },
+  );
+});
+
+test("googleStatus parses connected, email and scopes", async () => {
+  const s = await withFetch(
+    async () =>
+      new Response(
+        '{"connected":true,"email":"a@b.com","scopes":["calendar.readonly","userinfo.email"]}',
+        { status: 200 },
+      ),
+    () => googleStatus("t"),
+  );
+  assert.equal(s.connected, true);
+  assert.equal(s.email, "a@b.com");
+  assert.deepEqual(s.scopes, ["calendar.readonly", "userinfo.email"]);
+});
+
+test("googleStatus normalizes the disconnected shape", async () => {
+  const s = await withFetch(
+    async () => new Response('{"connected":false,"email":null,"scopes":[]}', { status: 200 }),
+    () => googleStatus("t"),
+  );
+  assert.equal(s.connected, false);
+  assert.equal(s.email, null);
+  assert.deepEqual(s.scopes, []);
+});
+
+test("disconnectGoogle resolves on a 200", async () => {
+  await withFetch(
+    async () => new Response('{"connected":false}', { status: 200 }),
+    () => disconnectGoogle("t"),
+  );
+});
+
+test("disconnectGoogle raises ApiError carrying the status", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response('{"error":"boom"}', { status: 500 }),
+      () => disconnectGoogle("t"),
     ),
     (e) => e instanceof ApiError && (e as ApiError).status === 500,
   );

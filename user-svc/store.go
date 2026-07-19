@@ -327,6 +327,173 @@ func (s *store) setProfile(ctx context.Context, userID, name string, onboarded *
 	return nil
 }
 
+// --- google_credentials -----------------------------------------------------
+// Same cryptor as provider_credentials: the refresh token is AES-256-GCM at rest
+// and is decrypted ONLY on the internal token path. The public status reader
+// never selects a token column, so a leak on that path is impossible by
+// construction (mirrors listCredentials never selecting api_key_enc).
+
+// googleStatusResult is the PUBLIC shape: booleans + display email + scope names,
+// never a token.
+type googleStatusResult struct {
+	Connected bool     `json:"connected"`
+	Email     *string  `json:"email"`
+	Scopes    []string `json:"scopes"`
+}
+
+// readGoogleStatus reports whether the user has a connected Google account, with
+// the display email and granted scopes. It selects no token column. validUUID
+// guard -> errNotFound (like getProfile); an absent row is connected:false, 200.
+func (s *store) readGoogleStatus(ctx context.Context, userID string) (*googleStatusResult, error) {
+	if !validUUID(userID) {
+		return nil, errNotFound
+	}
+	var email *string
+	var scopes []string
+	err := s.pool.QueryRow(ctx,
+		`SELECT google_email, scopes FROM google_credentials WHERE user_id = $1`, userID).
+		Scan(&email, &scopes)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return &googleStatusResult{Connected: false, Scopes: []string{}}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if scopes == nil {
+		scopes = []string{}
+	}
+	return &googleStatusResult{Connected: true, Email: email, Scopes: scopes}, nil
+}
+
+// googleTokenRow is the INTERNAL-only shape carrying decrypted tokens.
+type googleTokenRow struct {
+	RefreshToken string
+	AccessToken  string
+	ExpiresAt    *time.Time
+	Scopes       []string
+}
+
+// readGoogleTokens returns the decrypted tokens for the internal refresh path.
+// errNotFound when there is no row (or uid is not a uuid).
+func (s *store) readGoogleTokens(ctx context.Context, userID string) (*googleTokenRow, error) {
+	if !validUUID(userID) {
+		return nil, errNotFound
+	}
+	var refreshEnc, accessEnc []byte
+	var expiresAt *time.Time
+	var scopes []string
+	err := s.pool.QueryRow(ctx,
+		`SELECT refresh_token_enc, access_token_enc, access_token_expires_at, scopes
+		 FROM google_credentials WHERE user_id = $1`, userID).
+		Scan(&refreshEnc, &accessEnc, &expiresAt, &scopes)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errNotFound
+		}
+		return nil, err
+	}
+	out := &googleTokenRow{ExpiresAt: expiresAt, Scopes: scopes}
+	rt, err := s.crypto.decrypt(refreshEnc)
+	if err != nil {
+		return nil, err
+	}
+	out.RefreshToken = rt
+	if len(accessEnc) > 0 {
+		at, err := s.crypto.decrypt(accessEnc)
+		if err != nil {
+			return nil, err
+		}
+		out.AccessToken = at
+	}
+	return out, nil
+}
+
+// upsertGoogle stores (or replaces) the connection after an exchange. Both tokens
+// are encrypted before they touch the DB.
+func (s *store) upsertGoogle(ctx context.Context, userID, refreshToken, accessToken string,
+	expiresAt time.Time, scopes []string, email, sub string) error {
+	if !validUUID(userID) {
+		return errNotFound
+	}
+	refreshEnc, err := s.crypto.encrypt(refreshToken)
+	if err != nil {
+		return err
+	}
+	var accessEnc []byte
+	if accessToken != "" {
+		if accessEnc, err = s.crypto.encrypt(accessToken); err != nil {
+			return err
+		}
+	}
+	if scopes == nil {
+		scopes = []string{}
+	}
+	var emailPtr, subPtr *string
+	if email != "" {
+		emailPtr = &email
+	}
+	if sub != "" {
+		subPtr = &sub
+	}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO google_credentials
+			(user_id, refresh_token_enc, access_token_enc, access_token_expires_at, scopes, google_email, google_sub, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+		ON CONFLICT (user_id) DO UPDATE SET
+			refresh_token_enc = EXCLUDED.refresh_token_enc,
+			access_token_enc = EXCLUDED.access_token_enc,
+			access_token_expires_at = EXCLUDED.access_token_expires_at,
+			scopes = EXCLUDED.scopes,
+			google_email = EXCLUDED.google_email,
+			google_sub = EXCLUDED.google_sub,
+			updated_at = now()`,
+		userID, refreshEnc, accessEnc, expiresAt, scopes, emailPtr, subPtr)
+	return err
+}
+
+// updateGoogleAccess persists a refreshed access token (and a rotated refresh
+// token when Google returns one — refresh_token_enc is only overwritten when
+// newRefresh is non-empty, so an unchanged refresh token is preserved).
+func (s *store) updateGoogleAccess(ctx context.Context, userID, accessToken string,
+	expiresAt time.Time, newRefresh string, scopes []string) error {
+	if !validUUID(userID) {
+		return errNotFound
+	}
+	accessEnc, err := s.crypto.encrypt(accessToken)
+	if err != nil {
+		return err
+	}
+	if scopes == nil {
+		scopes = []string{}
+	}
+	if newRefresh != "" {
+		refreshEnc, err := s.crypto.encrypt(newRefresh)
+		if err != nil {
+			return err
+		}
+		_, err = s.pool.Exec(ctx, `
+			UPDATE google_credentials
+			SET access_token_enc = $2, access_token_expires_at = $3, refresh_token_enc = $4, scopes = $5, updated_at = now()
+			WHERE user_id = $1`, userID, accessEnc, expiresAt, refreshEnc, scopes)
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `
+		UPDATE google_credentials
+		SET access_token_enc = $2, access_token_expires_at = $3, scopes = $4, updated_at = now()
+		WHERE user_id = $1`, userID, accessEnc, expiresAt, scopes)
+	return err
+}
+
+// deleteGoogle removes the connection. Idempotent: no RowsAffected check, so
+// deleting when absent is still a success (the handler returns 200).
+func (s *store) deleteGoogle(ctx context.Context, userID string) error {
+	if !validUUID(userID) {
+		return errNotFound
+	}
+	_, err := s.pool.Exec(ctx, `DELETE FROM google_credentials WHERE user_id = $1`, userID)
+	return err
+}
+
 // errNotFound signals an absent row so handlers can pick 404 vs 204.
 var errNotFound = errors.New("not found")
 

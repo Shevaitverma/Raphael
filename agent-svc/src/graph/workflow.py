@@ -27,6 +27,7 @@ import httpx
 from config import CONV_SVC_URL
 from llm import resolver
 from memory import budget, extract as extractor_mod, history, retriever
+from tools import google as google_tool
 from tools import search as search_tool
 
 def _persona(name: str) -> str:
@@ -226,7 +227,7 @@ def _tier2_query(message: str) -> str:
 
 
 def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
-    """ONE chat() call before streaming; returns (system-prompt block, tool_calls).
+    """Pre-flight chat() calls before streaming; returns (system-prompt block, tool_calls).
 
     Tier 1 is a pre-flight, NOT a streaming tool loop, for three reasons:
       - stream() is never touched. chat() already owns the _UNSUPPORTED probing
@@ -235,14 +236,27 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
       - stream_with_lifeboat still runs EXACTLY ONCE per turn, so e2e.sh's
         n_degraded==1 holds by construction, not by a guard someone can delete.
         Never move this inside stream_with_lifeboat.
-      - no LLM call is nested in a tool handler; the handler is one httpx.get.
+      - no LLM call is nested in a tool handler; each handler is one httpx.get.
         main.py drains a queue.Queue from a daemon thread — nesting deadlocks.
 
+    Two tools can coexist here. web_search is offered when the user asked AND a
+    key exists; calendar_list_events when THIS user has connected Google. Both
+    need native tool calling — without it, search keeps its keyword fallback but
+    calendar is simply not offered (Tier-2 refuse, no keyword guess for a
+    calendar). Blocks from the tools the model actually called are concatenated.
+
     Never raises. Every failure here is non-fatal and lands the turn ungrounded
-    but HONEST, because the failure block tells the model the search failed.
+    but HONEST, because each failure block tells the model the tool failed.
     """
-    if not state.get("search") or not search_tool.enabled():
-        return "", []  # no key, or the user did not ask: nothing leaves the box.
+    uid = state["user_id"]
+    search_on = bool(state.get("search")) and search_tool.enabled()
+    try:
+        cal_on = google_tool.connected(uid)
+    except Exception:
+        cal_on = False  # a token-lookup problem degrades the tool, not the turn.
+
+    if not search_on and not cal_on:
+        return "", []  # nothing to offer: nothing leaves the box.
 
     provider = state["provider"]
     try:
@@ -251,31 +265,64 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
         native = False  # the conservative floor, same as everywhere else.
 
     if not native:
+        # Tier 2: only search has a keyword fallback; calendar refuses.
+        if not search_on:
+            return "", []
         q = _tier2_query(state["message"])
         return (search_tool.block(q, search_tool.search(q)) if q else ""), []
 
+    tools = []
+    if search_on:
+        tools.append(search_tool.WEB_SEARCH)
+    if cal_on:
+        tools.append(google_tool.CALENDAR_LIST_EVENTS)
+
+    blocks: list[str] = []
+    tool_calls: list = []
+    cal_done = False
+    empty_q = None  # a search that came back with zero hits and may still refine
     convo = list(messages)
     for _ in range(_MAX_PREFLIGHT_ROUNDS):
         try:
-            resp = provider.chat(convo, system=system, tools=[search_tool.WEB_SEARCH], max_tokens=512)
+            resp = provider.chat(convo, system=system, tools=tools, max_tokens=512)
         except Exception:
-            return "", []  # the model never asked to search; do not claim it failed.
-        call = next((c for c in (resp.tool_calls or []) if c.get("name") == search_tool.WEB_SEARCH["name"]), None)
-        if call is None:
-            return "", []  # the model declined — that is the tool working, not failing.
-        q = str((call.get("arguments") or {}).get("query") or "").strip()
+            break  # the model never asked; do not claim a tool failed.
+        calls = resp.tool_calls or []
+
+        cal = next((c for c in calls if c.get("name") == google_tool.CALENDAR_LIST_EVENTS["name"]), None)
+        if cal and not cal_done:
+            cal_done = True
+            args = cal.get("arguments") or {}
+            tmin = str(args.get("time_min") or "").strip() or None
+            tmax = str(args.get("time_max") or "").strip() or None
+            # {name, arguments} only — the neutral shape conv-svc validates; no
+            # arg named "id". The handler is one httpx.get, never an LLM call.
+            neutral = {"name": cal["name"], "arguments": {}}
+            if tmin:
+                neutral["arguments"]["time_min"] = tmin
+            if tmax:
+                neutral["arguments"]["time_max"] = tmax
+            tool_calls.append(neutral)
+            blocks.append(google_tool.list_events(uid, tmin, tmax))
+
+        srch = next((c for c in calls if c.get("name") == search_tool.WEB_SEARCH["name"]), None)
+        if srch is None:
+            break  # no (further) search asked — the tool working, not failing.
+        q = str((srch.get("arguments") or {}).get("query") or "").strip()
         if not q:
-            return "", []
-        # {name, arguments} only — the neutral shape conv-svc validates.
-        tool_calls = [{"name": call["name"], "arguments": {"query": q}}]
+            break
+        tool_calls.append({"name": srch["name"], "arguments": {"query": q}})
         results = search_tool.search(q)
         if results is None:
-            return search_tool.block(q, None), tool_calls  # failed: say so, do not retry.
+            blocks.append(search_tool.block(q, None))  # failed: say so, do not retry.
+            break
         if results:
-            return search_tool.block(q, results), tool_calls
+            blocks.append(search_tool.block(q, results))
+            break
         # Zero hits: hand the miss back and let it refine ONCE. Plain role/content
         # turns — every adapter reads those, and no provider tool-result shape has
         # to be invented for the two adapters that disagree about it.
+        empty_q = q
         convo = convo + [
             {"role": "assistant", "content": f'I searched the web for "{q}".'},
             {
@@ -286,7 +333,13 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
                 ),
             },
         ]
-    return search_tool.block(q, []), tool_calls
+    else:
+        # Rounds exhausted while still refining a zero-hit search: say the web
+        # had nothing rather than dropping the admission silently.
+        if empty_q is not None:
+            blocks.append(search_tool.block(empty_q, []))
+
+    return "\n\n".join(b for b in blocks if b), tool_calls
 
 
 def generate_node(state: GState) -> dict:

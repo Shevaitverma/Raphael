@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from config import DATABASE_URL
 from graph import workflow
 from llm import embeddings, resolver
+from tools import google as google_tool
 from tools import search as search_tool
 
 app = FastAPI(title="agent-svc")
@@ -59,6 +60,10 @@ def capabilities(user_id: str):
     # eventually promises a tool the workflow never runs. No key -> false, the
     # tool is never offered to a model, and no query leaves the box.
     caps["web_search"] = search_tool.enabled()
+    # Per-user, not a global key: does THIS user have a live Google token, so the
+    # UI knows whether the calendar tool can do anything. A bool; the token never
+    # leaves the process. connected() never raises (degrades to False).
+    caps["google_connected"] = google_tool.connected(user_id)
     return caps
 
 

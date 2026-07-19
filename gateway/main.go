@@ -108,6 +108,12 @@ func (s *Server) BuildApp() *fiber.App {
 	// closed when INTERNAL_TOKEN is unset.
 	app.Post("/internal/chat", s.requireInternal, s.handleInternalChat)
 
+	// Google OAuth callback. Google redirects a BROWSER here with no JWT, so it
+	// is mounted at TOP LEVEL, OUTSIDE the /api group — exactly like /internal/chat.
+	// The signed `state` query param carries + authenticates the user_id; the
+	// handler verifies its HMAC before trusting it. No token ever rides the redirect.
+	app.Get("/auth/google/callback", s.handleGoogleCallback)
+
 	// Everything under /api requires a valid JWT and is rate limited.
 	api := app.Group("/api", s.authMiddleware, s.rateLimitMiddleware)
 
@@ -130,6 +136,13 @@ func (s *Server) BuildApp() *fiber.App {
 	// uid always comes from the JWT, never a client-supplied one.
 	api.Get("/profile", s.proxyProfile)
 	api.Put("/profile", s.proxyProfile)
+
+	// Google: connect builds the consent URL (JWT-gated, returns JSON not a 302
+	// so the JWT stays out of the browser URL); status/disconnect proxy to
+	// user-svc rooted at the JWT uid. The callback is public and mounted above.
+	api.Get("/google/connect", s.handleGoogleConnect)
+	api.Get("/google/status", s.proxyGoogle)
+	api.Delete("/google", s.proxyGoogle)
 
 	return app
 }

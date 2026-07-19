@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -437,6 +438,203 @@ func TestInternalChat(t *testing.T) {
 	}
 	if gotUserID != bodyUID {
 		t.Fatalf("agent-svc user_id = %q, want body-supplied %q", gotUserID, bodyUID)
+	}
+}
+
+// TestGoogleState is the load-bearing security test: signState/verifyState must
+// round-trip, and verifyState must REJECT a state whose payload was swapped, a
+// state with a single flipped byte, and an expired state. Each rejection is the
+// CSRF + identity boundary — the callback trusts uid ONLY from a state that
+// survives all three. Fails against pre-change code: the methods did not exist.
+func TestGoogleState(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:1", "http://127.0.0.1:1", "http://127.0.0.1:1")
+	srv := newServerT(t, cfg)
+
+	uid := "44444444-4444-4444-4444-444444444444"
+	state, err := srv.signState(uid)
+	if err != nil {
+		t.Fatalf("signState: %v", err)
+	}
+
+	// Round-trip.
+	if got, ok := srv.verifyState(state); !ok || got != uid {
+		t.Fatalf("verifyState round-trip = (%q,%v), want (%q,true)", got, ok, uid)
+	}
+
+	// Tampered payload (swap the uid, keep the original MAC) must be rejected —
+	// this is exactly the forge-another-user attack.
+	{
+		p, sig, _ := strings.Cut(state, ".")
+		raw, _ := base64.RawURLEncoding.DecodeString(p)
+		var sp statePayload
+		json.Unmarshal(raw, &sp)
+		sp.UID = "99999999-9999-9999-9999-999999999999"
+		swapped, _ := json.Marshal(sp)
+		tampered := base64.RawURLEncoding.EncodeToString(swapped) + "." + sig
+		if got, ok := srv.verifyState(tampered); ok {
+			t.Fatalf("verifyState accepted a swapped-uid state (got %q) — MAC does not bind the payload", got)
+		}
+	}
+
+	// Single flipped byte anywhere must fail the MAC.
+	{
+		b := []byte(state)
+		b[len(b)-1] ^= 0x01
+		if _, ok := srv.verifyState(string(b)); ok {
+			t.Fatal("verifyState accepted a state with a flipped byte")
+		}
+	}
+
+	// Expired state (valid MAC, past exp) must be rejected — no replay.
+	{
+		payload, _ := json.Marshal(statePayload{
+			UID: uid, Exp: time.Now().Add(-time.Minute).Unix(), Nonce: "n",
+		})
+		expired := base64.RawURLEncoding.EncodeToString(payload) + "." +
+			base64.RawURLEncoding.EncodeToString(srv.stateMAC(payload))
+		if _, ok := srv.verifyState(expired); ok {
+			t.Fatal("verifyState accepted an expired state — replay past exp is possible")
+		}
+	}
+}
+
+// TestGoogleConnect proves connect fails closed (503) when unconfigured, and
+// once configured returns a JSON auth_url carrying the client_id and a state.
+func TestGoogleConnect(t *testing.T) {
+	// Unconfigured (no GOOGLE_CLIENT_ID) → 503, never a panic.
+	{
+		cfg := testConfig("http://127.0.0.1:1", "http://127.0.0.1:1", "http://127.0.0.1:1")
+		cfg.GoogleClientID = ""
+		app := newServerT(t, cfg).BuildApp()
+		token, _ := login(t, app, fmt.Sprintf("gc0-%d@raphael.local", time.Now().UnixNano()))
+
+		req := httptest.NewRequest(http.MethodGet, "/api/google/connect", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req, 5000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 503 {
+			t.Fatalf("unconfigured connect status = %d, want 503", resp.StatusCode)
+		}
+	}
+
+	// Configured → 200 with an auth_url containing the client_id and a state.
+	{
+		cfg := testConfig("http://127.0.0.1:1", "http://127.0.0.1:1", "http://127.0.0.1:1")
+		cfg.GoogleClientID = "test-client-id.apps.googleusercontent.com"
+		app := newServerT(t, cfg).BuildApp()
+		token, _ := login(t, app, fmt.Sprintf("gc1-%d@raphael.local", time.Now().UnixNano()))
+
+		req := httptest.NewRequest(http.MethodGet, "/api/google/connect", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := app.Test(req, 5000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("configured connect status = %d, want 200", resp.StatusCode)
+		}
+		var out struct {
+			AuthURL string `json:"auth_url"`
+		}
+		json.NewDecoder(resp.Body).Decode(&out)
+		u, err := url.Parse(out.AuthURL)
+		if err != nil {
+			t.Fatalf("auth_url unparseable: %v", err)
+		}
+		q := u.Query()
+		if q.Get("client_id") != cfg.GoogleClientID {
+			t.Fatalf("auth_url client_id = %q, want %q", q.Get("client_id"), cfg.GoogleClientID)
+		}
+		if q.Get("state") == "" {
+			t.Fatal("auth_url has no state")
+		}
+		// The state must verify — connect and callback share the same secret.
+		if _, ok := newServerT(t, cfg).verifyState(q.Get("state")); !ok {
+			t.Fatal("auth_url state does not verify")
+		}
+	}
+}
+
+// TestGoogleCallback proves the public callback: a VALID state forwards the code
+// to user-svc's internal exchange (with the shared secret) and 302s to
+// WEB_ORIGIN/?google=connected; a BAD state neither calls user-svc nor 302s to
+// success. Fails against pre-change code: the route did not exist.
+func TestGoogleCallback(t *testing.T) {
+	var exchangeHits int32
+	var gotPath, gotCode, gotSecret string
+	user := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&exchangeHits, 1)
+		gotPath = r.URL.Path
+		gotSecret = r.Header.Get("X-Internal-Token")
+		var in map[string]string
+		json.NewDecoder(r.Body).Decode(&in)
+		gotCode = in["code"]
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"email":"u@example.com","scopes":"calendar.readonly"}`))
+	}))
+	defer user.Close()
+
+	cfg := testConfig(user.URL, "http://127.0.0.1:1", "http://127.0.0.1:1")
+	srv := newServerT(t, cfg)
+	app := srv.BuildApp()
+
+	uid := "55555555-5555-5555-5555-555555555555"
+	state, err := srv.signState(uid)
+	if err != nil {
+		t.Fatalf("signState: %v", err)
+	}
+
+	// Valid state → exchange called, 302 to WEB_ORIGIN connected.
+	{
+		req := httptest.NewRequest(http.MethodGet,
+			"/auth/google/callback?code=the-auth-code&state="+url.QueryEscape(state), nil)
+		resp, err := app.Test(req, 5000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 302 {
+			t.Fatalf("valid callback status = %d, want 302", resp.StatusCode)
+		}
+		loc := resp.Header.Get("Location")
+		if loc != cfg.WebOrigin+"/?google=connected" {
+			t.Fatalf("valid callback Location = %q, want %q", loc, cfg.WebOrigin+"/?google=connected")
+		}
+		if strings.Contains(loc, "token") || strings.Contains(loc, "the-auth-code") {
+			t.Fatalf("redirect leaked a secret: %q", loc)
+		}
+		if atomic.LoadInt32(&exchangeHits) != 1 {
+			t.Fatalf("exchange hits = %d, want 1", exchangeHits)
+		}
+		if want := "/internal/users/" + uid + "/google/exchange"; gotPath != want {
+			t.Fatalf("exchange path = %q, want %q", gotPath, want)
+		}
+		if gotCode != "the-auth-code" {
+			t.Fatalf("exchange code = %q, want the-auth-code", gotCode)
+		}
+		if gotSecret != cfg.InternalToken {
+			t.Fatalf("exchange X-Internal-Token = %q, want %q", gotSecret, cfg.InternalToken)
+		}
+	}
+
+	// Bad state → NO exchange call, and NOT a success redirect.
+	{
+		before := atomic.LoadInt32(&exchangeHits)
+		req := httptest.NewRequest(http.MethodGet,
+			"/auth/google/callback?code=the-auth-code&state=forged.garbage", nil)
+		resp, err := app.Test(req, 5000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if atomic.LoadInt32(&exchangeHits) != before {
+			t.Fatal("bad state still reached user-svc exchange")
+		}
+		if resp.StatusCode == 302 {
+			if loc := resp.Header.Get("Location"); strings.Contains(loc, "google=connected") {
+				t.Fatalf("bad state 302'd to success: %q", loc)
+			}
+		}
 	}
 }
 

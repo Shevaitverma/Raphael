@@ -54,10 +54,19 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /users/{uid}/profile", s.getProfile)
 	mux.HandleFunc("PUT /users/{uid}/profile", s.putProfile)
 
+	// Google account connection — public routes never return a token (status is
+	// booleans + display email + scope names only).
+	mux.HandleFunc("GET /users/{uid}/google/status", s.googleStatus)
+	mux.HandleFunc("DELETE /users/{uid}/google", s.googleDisconnect)
+
 	// Internal routes — return the decrypted key. Shared-secret gated, and never
 	// routed by the gateway.
 	mux.HandleFunc("GET /internal/users/{uid}/credential/active", s.requireInternal(s.internalActive))
 	mux.HandleFunc("GET /internal/users/{uid}/credential/lifeboat", s.requireInternal(s.internalLifeboat))
+	// Google token exchange/refresh: touches the crown-jewel refresh token, so it
+	// lives behind requireInternal alongside the credential internals.
+	mux.HandleFunc("POST /internal/users/{uid}/google/exchange", s.requireInternal(s.googleExchange))
+	mux.HandleFunc("GET /internal/users/{uid}/google/token", s.requireInternal(s.googleToken))
 	return mux
 }
 

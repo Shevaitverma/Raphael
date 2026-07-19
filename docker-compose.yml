@@ -62,6 +62,12 @@ services:
       DATABASE_URL: postgresql://raphael:raphael@postgres:5432/raphael
       CREDENTIAL_ENC_KEY: ${CREDENTIAL_ENC_KEY:?set CREDENTIAL_ENC_KEY in .env}
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN in .env}
+      # Google connectors (optional). :- not :? — inert when unset, like BRAVE_API_KEY.
+      # user-svc does the token exchange, so it holds the secret; redirect_uri must
+      # match gateway's on the exchange (Google requires it identical).
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8080/auth/google/callback}
     depends_on:
       postgres:
         condition: service_healthy
@@ -110,6 +116,12 @@ services:
       # The whatsapp-bridge (and any internal ingress) authenticates to the
       # gateway's /internal/* with this shared secret.
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN in .env}
+      # Google connectors (optional). Gateway builds the consent URL and redirects
+      # the browser back to WEB_ORIGIN; it forwards the code to user-svc for the
+      # exchange, so it needs CLIENT_ID but not CLIENT_SECRET. :- keeps it inert.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8080/auth/google/callback}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
     depends_on:
       redis:
         condition: service_healthy

@@ -232,6 +232,42 @@ export async function getCapabilities(token: string): Promise<Capabilities> {
   return res.json();
 }
 
+// --- Google connector (read-only Calendar + profile) -------------------------
+
+export type GoogleStatus = {
+  connected: boolean;
+  email: string | null;
+  scopes: string[];
+};
+
+// Returns the Google consent URL to navigate to. A 503 means this deployment has
+// no Google credentials configured — the ApiError carries the 503 so the UI can
+// show the inert "not configured" note instead of a broken button.
+export async function connectGoogle(token: string): Promise<{ auth_url: string }> {
+  const res = await fetch(`${GATEWAY_URL}/api/google/connect`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(await errText(res, "connect Google"), res.status);
+  return res.json();
+}
+
+export async function googleStatus(token: string): Promise<GoogleStatus> {
+  const res = await fetch(`${GATEWAY_URL}/api/google/status`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`google status failed: ${res.status}`, res.status);
+  const data = await res.json();
+  return {
+    connected: !!data.connected,
+    email: data.email ?? null,
+    scopes: Array.isArray(data.scopes) ? data.scopes : [],
+  };
+}
+
+export async function disconnectGoogle(token: string): Promise<void> {
+  const res = await fetch(`${GATEWAY_URL}/api/google`, {
+    method: "DELETE",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "disconnect Google"), res.status);
+}
+
 // Pull a human-readable message out of the {"error": "..."} body.
 async function errText(res: Response, action: string): Promise<string> {
   const body = await safeText(res);

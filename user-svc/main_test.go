@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,7 @@ func TestMain(m *testing.M) {
 			haveDB = true
 			// Ensure a clean test user with no leftover credentials.
 			_, _ = pool.Exec(ctx, `DELETE FROM provider_credentials WHERE user_id = $1`, testUserID)
+			_, _ = pool.Exec(ctx, `DELETE FROM google_credentials WHERE user_id = $1`, testUserID)
 			_, _ = pool.Exec(ctx,
 				`INSERT INTO users (id, email, name) VALUES ($1, 'usersvc-test@raphael.local', 'Test User')
 				 ON CONFLICT (id) DO NOTHING`, testUserID)
@@ -44,6 +46,7 @@ func TestMain(m *testing.M) {
 	if haveDB {
 		ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 		_, _ = testPool.Exec(ctx2, `DELETE FROM provider_credentials WHERE user_id = $1`, testUserID)
+		_, _ = testPool.Exec(ctx2, `DELETE FROM google_credentials WHERE user_id = $1`, testUserID)
 		cancel2()
 		testPool.Close()
 	}
@@ -60,6 +63,10 @@ func newTestServer(t *testing.T) *server {
 		`DELETE FROM provider_credentials WHERE user_id = $1`, testUserID)
 	if err != nil {
 		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := testPool.Exec(context.Background(),
+		`DELETE FROM google_credentials WHERE user_id = $1`, testUserID); err != nil {
+		t.Fatalf("cleanup google: %v", err)
 	}
 	cr, err := newCryptor(testEncKey)
 	if err != nil {
@@ -544,5 +551,281 @@ func TestDuplicateProviderRejected(t *testing.T) {
 	rec := do(t, srv, http.MethodPost, "/users/"+testUserID+"/credentials", body)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409 on duplicate provider, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- Google: status/delete never leak a token, uuid guarded ----------------
+
+// fakeIDToken builds a Google-shaped id_token JWT (header.payload.sig). Only the
+// payload is read (unverified) so the header/signature are placeholders.
+func fakeIDToken(email, sub string) string {
+	payload, _ := json.Marshal(map[string]string{"email": email, "sub": sub})
+	return "e30." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+}
+
+// setGoogleConfig sets the OAuth env for a test and points the token endpoint at
+// a fake, restoring the real URL on cleanup.
+func setGoogleConfig(t *testing.T, fakeURL string) {
+	t.Helper()
+	t.Setenv("GOOGLE_CLIENT_ID", "test-client-id")
+	t.Setenv("GOOGLE_CLIENT_SECRET", "test-client-secret")
+	t.Setenv("GOOGLE_REDIRECT_URI", "https://app.raphael.local/google/callback")
+	old := googleTokenURL
+	googleTokenURL = fakeURL
+	t.Cleanup(func() { googleTokenURL = old })
+}
+
+func TestGoogleStatusNotConnectedNoToken(t *testing.T) {
+	srv := newTestServer(t)
+	rec := do(t, srv, http.MethodGet, "/users/"+testUserID+"/google/status", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var st map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &st)
+	if st["connected"] != false {
+		t.Fatalf("connected = %v, want false", st["connected"])
+	}
+	for _, k := range []string{"access_token", "refresh_token", "token"} {
+		if _, ok := st[k]; ok {
+			t.Fatalf("status leaked a %q field: %s", k, rec.Body.String())
+		}
+	}
+}
+
+func TestGoogleStatusConnectedNeverReturnsToken(t *testing.T) {
+	srv := newTestServer(t)
+	// Insert a row directly via the store with fake (encrypted) tokens.
+	if err := srv.store.upsertGoogle(context.Background(), testUserID,
+		"1//fake-refresh", "ya29.fake-access", time.Now().Add(time.Hour),
+		[]string{"openid", "email", "https://www.googleapis.com/auth/calendar.readonly"},
+		"person@example.com", "sub-abc"); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	rec := do(t, srv, http.MethodGet, "/users/"+testUserID+"/google/status", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "fake-refresh") || strings.Contains(body, "fake-access") {
+		t.Fatalf("status leaked a token: %s", body)
+	}
+	var st map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &st)
+	if st["connected"] != true {
+		t.Fatalf("connected = %v, want true", st["connected"])
+	}
+	if st["email"] != "person@example.com" {
+		t.Fatalf("email = %v, want person@example.com", st["email"])
+	}
+	if _, ok := st["access_token"]; ok {
+		t.Fatalf("status response has an access_token field: %s", body)
+	}
+	scopes, _ := st["scopes"].([]any)
+	if len(scopes) != 3 {
+		t.Fatalf("scopes = %v, want 3", st["scopes"])
+	}
+}
+
+func TestGoogleDeleteIdempotent(t *testing.T) {
+	srv := newTestServer(t)
+	// Delete when absent is still 200 {connected:false}.
+	rec := do(t, srv, http.MethodDelete, "/users/"+testUserID+"/google", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete absent: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if out["connected"] != false {
+		t.Fatalf("delete absent connected = %v, want false", out["connected"])
+	}
+
+	// Insert then delete removes it.
+	if err := srv.store.upsertGoogle(context.Background(), testUserID,
+		"1//r", "ya29.a", time.Now().Add(time.Hour), []string{"openid"}, "x@y.z", "s"); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	rec = do(t, srv, http.MethodDelete, "/users/"+testUserID+"/google", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete present: got %d", rec.Code)
+	}
+	rec = do(t, srv, http.MethodGet, "/users/"+testUserID+"/google/status", nil)
+	var st map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &st)
+	if st["connected"] != false {
+		t.Fatalf("after delete connected = %v, want false", st["connected"])
+	}
+}
+
+func TestGoogleNonUUIDIs404(t *testing.T) {
+	srv := newTestServer(t)
+	rec := do(t, srv, http.MethodGet, "/users/not-a-uuid/google/status", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status non-uuid: got %d, want 404", rec.Code)
+	}
+	rec = do(t, srv, http.MethodDelete, "/users/not-a-uuid/google", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete non-uuid: got %d, want 404", rec.Code)
+	}
+}
+
+// --- Google: exchange via a fake token endpoint stores + status reflects ----
+
+func TestGoogleExchangeStoresAndStatusReflects(t *testing.T) {
+	srv := newTestServer(t)
+
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if r.FormValue("grant_type") != "authorization_code" {
+			t.Errorf("exchange grant_type = %q, want authorization_code", r.FormValue("grant_type"))
+		}
+		if r.FormValue("code") != "auth-code-xyz" {
+			t.Errorf("exchange code = %q", r.FormValue("code"))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "ya29.EXCHANGED",
+			"refresh_token": "1//REFRESH-TOKEN",
+			"expires_in":    3600,
+			"scope":         "openid email profile https://www.googleapis.com/auth/calendar.readonly",
+			"id_token":      fakeIDToken("me@example.com", "sub-123"),
+			"token_type":    "Bearer",
+		})
+	}))
+	defer fake.Close()
+	setGoogleConfig(t, fake.URL)
+
+	rec := do(t, srv, http.MethodPost, "/internal/users/"+testUserID+"/google/exchange",
+		map[string]string{"code": "auth-code-xyz"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("exchange: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if out["email"] != "me@example.com" {
+		t.Fatalf("exchange email = %v, want me@example.com", out["email"])
+	}
+	// The refresh token must never appear in the exchange response.
+	if strings.Contains(rec.Body.String(), "REFRESH-TOKEN") {
+		t.Fatalf("exchange response leaked the refresh token: %s", rec.Body.String())
+	}
+
+	// Public status now reflects the connection, still with no token.
+	rec = do(t, srv, http.MethodGet, "/users/"+testUserID+"/google/status", nil)
+	var st map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &st)
+	if st["connected"] != true || st["email"] != "me@example.com" {
+		t.Fatalf("status after exchange = %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "EXCHANGED") || strings.Contains(rec.Body.String(), "REFRESH-TOKEN") {
+		t.Fatalf("status leaked a token: %s", rec.Body.String())
+	}
+
+	// Internal token returns the cached (valid) access token without refreshing.
+	rec = do(t, srv, http.MethodGet, "/internal/users/"+testUserID+"/google/token", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("token: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if out["access_token"] != "ya29.EXCHANGED" {
+		t.Fatalf("token access_token = %v, want ya29.EXCHANGED", out["access_token"])
+	}
+}
+
+// --- Google: expired access token triggers a refresh call -------------------
+
+func TestGoogleTokenRefreshesOnExpiry(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Store a row whose access token is already expired.
+	if err := srv.store.upsertGoogle(context.Background(), testUserID,
+		"1//OLD-REFRESH", "ya29.OLD", time.Now().Add(-time.Hour),
+		[]string{"openid", "https://www.googleapis.com/auth/calendar.readonly"},
+		"me@example.com", "sub-1"); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	hit := false
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		_ = r.ParseForm()
+		if r.FormValue("grant_type") != "refresh_token" {
+			t.Errorf("refresh grant_type = %q, want refresh_token", r.FormValue("grant_type"))
+		}
+		if r.FormValue("refresh_token") != "1//OLD-REFRESH" {
+			t.Errorf("refresh sent refresh_token %q", r.FormValue("refresh_token"))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "ya29.REFRESHED",
+			"expires_in":   3600,
+			"token_type":   "Bearer",
+		})
+	}))
+	defer fake.Close()
+	setGoogleConfig(t, fake.URL)
+
+	rec := do(t, srv, http.MethodGet, "/internal/users/"+testUserID+"/google/token", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("token: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !hit {
+		t.Fatal("expired token did not trigger a refresh call")
+	}
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if out["access_token"] != "ya29.REFRESHED" {
+		t.Fatalf("token access_token = %v, want ya29.REFRESHED", out["access_token"])
+	}
+}
+
+// --- Google: invalid_grant on refresh deletes the connection ----------------
+
+func TestGoogleRefreshInvalidGrantDeletes(t *testing.T) {
+	srv := newTestServer(t)
+	if err := srv.store.upsertGoogle(context.Background(), testUserID,
+		"1//REVOKED", "ya29.OLD", time.Now().Add(-time.Hour),
+		[]string{"openid"}, "me@example.com", "sub-1"); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":             "invalid_grant",
+			"error_description": "Token has been expired or revoked.",
+		})
+	}))
+	defer fake.Close()
+	setGoogleConfig(t, fake.URL)
+
+	rec := do(t, srv, http.MethodGet, "/internal/users/"+testUserID+"/google/token", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("revoked refresh: got %d, want 404 body=%s", rec.Code, rec.Body.String())
+	}
+	// The dead connection must be gone.
+	rec = do(t, srv, http.MethodGet, "/users/"+testUserID+"/google/status", nil)
+	var st map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &st)
+	if st["connected"] != false {
+		t.Fatalf("after invalid_grant connected = %v, want false", st["connected"])
+	}
+}
+
+// --- Google internal endpoints require the shared secret --------------------
+
+func TestGoogleInternalRequiresToken(t *testing.T) {
+	srv := newTestServer(t)
+	for _, tc := range []struct {
+		method, path string
+	}{
+		{http.MethodGet, "/internal/users/" + testUserID + "/google/token"},
+		{http.MethodPost, "/internal/users/" + testUserID + "/google/exchange"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s %s without token: got %d, want 401", tc.method, tc.path, rec.Code)
+		}
 	}
 }
