@@ -58,6 +58,8 @@ Schema — each item is either a triple or a note:
 Rules:
 - Only durable things about the user. Not world trivia, not the question itself,
   not anything true of everyone.
+- NEVER record the assistant's own name, identity, or persona. "What is your
+  name?" and its answer contain NO fact about the user.
 - Add "confidence": "explicit" ONLY if the user stated it outright. Omit the
   field when you inferred it.
 - At most 5 items. Use words from the exchange.
@@ -177,10 +179,13 @@ def extract(provider, message: str, answer: str) -> list[dict]:
     if items is None:
         items = _parse(_ask(provider, prompt)) or []  # ONE retry, parse failure only.
 
-    # GROUNDING: at least one content word of the item must appear in the
-    # exchange. This is what turns "the 7B hallucinated a field" from a stored
-    # lie into a no-op.
-    seen = _words(message) | _words(answer)
+    # GROUNDING: at least one content word of the item must appear in the USER's
+    # MESSAGE — deliberately NOT the assistant's answer. A durable fact about the
+    # user comes from what the USER said; grounding against the answer is exactly
+    # what let the assistant's self-description ("I am Akku") be stored as
+    # "user is known as Akku". This also enforces the prompt's "skip anything the
+    # assistant suggested that the user did not confirm".
+    seen = _words(message)
     return [
         it
         for it in items

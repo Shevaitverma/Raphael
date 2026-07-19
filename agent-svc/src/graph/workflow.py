@@ -86,9 +86,14 @@ def build_system(profile: list, memories: list, search: str = "", name: str = "R
     `name` defaults to "Raphael", so the base line is byte-identical to
     SYSTEM_BASE unless a per-user name is threaded in.
     """
-    out = [_persona(_sanitize_name(name))]
+    sname = _sanitize_name(name)
+    out = [_persona(sname)]
     if profile or memories:
-        out += ["", _PRECEDENCE]
+        # The name is set HERE and is authoritative. A retrieved note may say the
+        # assistant "has identity X" (a stale memory from a previous name) — it
+        # must never win. Stated only when notes are injected, so build_system([],
+        # []) stays byte-identical to SYSTEM_BASE.
+        out += ["", f"Your name is {sname}; a different name in the notes below is stale — ignore it.", _PRECEDENCE]
         if profile:
             out += ["", "What we believe about the user:"] + [f"- {p}" for p in profile]
         if memories:
