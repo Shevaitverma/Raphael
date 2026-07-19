@@ -14,6 +14,10 @@ type Config struct {
 	UserSvcURL     string
 	ConvSvcURL     string
 	AgentSvcURL    string
+	// InternalToken gates the trusted internal chat-ingress route (the WhatsApp
+	// bridge), which takes user_id from the body instead of a JWT. Empty means
+	// the route FAILS CLOSED — an unconfigured gateway never exposes open ingress.
+	InternalToken   string
 	RateLimitPerMin int
 	// CORSOrigins is the comma-separated allow-list for the browser SPA. The web
 	// app runs on a different origin than the gateway, so cross-origin requests
@@ -43,6 +47,7 @@ func LoadConfig() Config {
 		UserSvcURL:      getenv("USER_SVC_URL", "http://localhost:8081"),
 		ConvSvcURL:      getenv("CONV_SVC_URL", "http://localhost:8082"),
 		AgentSvcURL:     getenv("AGENT_SVC_URL", "http://localhost:8000"),
+		InternalToken:   getenv("INTERNAL_TOKEN", ""),
 		RateLimitPerMin: 60,
 		CORSOrigins:     getenv("CORS_ORIGINS", "http://localhost:3000"),
 	}

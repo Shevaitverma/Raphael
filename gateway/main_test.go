@@ -24,6 +24,7 @@ func testConfig(userSvc, convSvc, agentSvc string) Config {
 	c.ConvSvcURL = convSvc
 	c.AgentSvcURL = agentSvc
 	c.DevAuthEnabled = true
+	c.InternalToken = "test-internal-secret" // so /internal/chat's valid-token case works
 	return c
 }
 
@@ -360,6 +361,82 @@ func TestInternalUnreachable(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&internalHits); got != 0 {
 		t.Fatalf("user-svc /internal/* was hit %d times through the gateway", got)
+	}
+}
+
+// TestInternalChat proves the trusted internal chat-ingress: it is secret-gated
+// (no token and a wrong token both get 401 with no pipeline call), and on the
+// right token it reaches agent-svc with the BODY-supplied user_id (no JWT). It
+// sits outside the /api JWT group. Fails against pre-change code: the route did
+// not exist (404/405).
+func TestInternalChat(t *testing.T) {
+	var agentHits int32
+	var gotUserID string
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&agentHits, 1)
+		var in map[string]any
+		json.NewDecoder(r.Body).Decode(&in)
+		if v, ok := in["user_id"].(string); ok {
+			gotUserID = v
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		fmt.Fprint(w, "event: done\ndata: {}\n\n")
+	}))
+	defer agent.Close()
+
+	cfg := testConfig("http://127.0.0.1:1", "http://127.0.0.1:1", agent.URL)
+	app := newServerT(t, cfg).BuildApp()
+
+	bodyUID := "22222222-2222-2222-2222-222222222222"
+	newReq := func(token string) *http.Request {
+		body, _ := json.Marshal(map[string]any{
+			"user_id":         bodyUID,
+			"conversation_id": "33333333-3333-3333-3333-333333333333",
+			"message":         "hi from whatsapp",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/internal/chat", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			req.Header.Set("X-Internal-Token", token)
+		}
+		return req
+	}
+
+	// No token → 401, no pipeline call.
+	resp, err := app.Test(newReq(""), 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 401 {
+		t.Fatalf("no-token status = %d, want 401", resp.StatusCode)
+	}
+
+	// Wrong token → 401, no pipeline call.
+	resp, err = app.Test(newReq("nope-wrong-secret"), 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 401 {
+		t.Fatalf("wrong-token status = %d, want 401", resp.StatusCode)
+	}
+	if got := atomic.LoadInt32(&agentHits); got != 0 {
+		t.Fatalf("agent-svc was called %d times without a valid token", got)
+	}
+
+	// Right token → 200, and agent-svc receives the BODY user_id.
+	resp, err = app.Test(newReq(cfg.InternalToken), 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("valid-token status = %d, want 200", resp.StatusCode)
+	}
+	if atomic.LoadInt32(&agentHits) != 1 {
+		t.Fatalf("agent-svc hits = %d, want 1", agentHits)
+	}
+	if gotUserID != bodyUID {
+		t.Fatalf("agent-svc user_id = %q, want body-supplied %q", gotUserID, bodyUID)
 	}
 }
 

@@ -182,10 +182,21 @@ func (s *Server) handleChat(c *fiber.Ctx) error {
 	if err := c.BodyParser(&in); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid body")
 	}
+	// uid comes from the JWT; the other fields from the client body. The internal
+	// (WhatsApp) ingress calls the same helper with a body-supplied uid instead.
+	return s.streamChatTo(c, uid, in.ConversationID, in.Message, in.Search)
+}
+
+// streamChatTo runs a full chat turn against agent-svc and relays the SSE stream
+// back to the client. It is the shared machinery behind both the JWT-gated
+// /api/chat and the secret-gated /internal/chat: only the source of uid and the
+// other fields differs, so the delicate stream-writer lifecycle lives here once.
+func (s *Server) streamChatTo(c *fiber.Ctx, uid, conversationID, message string, search bool) error {
 	// Assistant name goes into the system prompt server-side, so it is read from
-	// the DB keyed by the JWT uid — NEVER from the client body. Best-effort: any
+	// the DB keyed by the uid — NEVER from the client body. Best-effort: any
 	// failure (query error, no row, timeout) falls back to "Raphael" and never
-	// blocks or delays the chat turn. Single indexed PK lookup.
+	// blocks or delays the chat turn. Single indexed PK lookup. Both callers get
+	// it, so a WhatsApp turn also uses the user's chosen assistant name.
 	assistantName := "Raphael"
 	nctx, ncancel := context.WithTimeout(c.Context(), 2*time.Second)
 	if err := s.db.QueryRow(nctx, `SELECT assistant_name FROM users WHERE id=$1`, uid).Scan(&assistantName); err != nil {
@@ -196,11 +207,11 @@ func (s *Server) handleChat(c *fiber.Ctx) error {
 	// The body is rebuilt field by field, not copied: anything not named here is
 	// dropped before it reaches agent-svc.
 	payload, _ := json.Marshal(map[string]any{
-		"user_id":         uid, // from the JWT, never the body
-		"conversation_id": in.ConversationID,
-		"message":         in.Message,
-		"search":          in.Search,
-		"assistant_name":  assistantName, // from the DB (JWT-keyed), never the body
+		"user_id":         uid, // from the JWT (or the internal caller), never the client chat body
+		"conversation_id": conversationID,
+		"message":         message,
+		"search":          search,
+		"assistant_name":  assistantName, // from the DB (uid-keyed), never the body
 	})
 
 	// A cancellable background context: it must outlive the handler return

@@ -101,6 +101,13 @@ func (s *Server) BuildApp() *fiber.App {
 		app.Post("/auth/dev-login", s.handleDevLogin)
 	}
 
+	// Trusted internal chat-ingress (Phase 1 of the WhatsApp bridge). An inbound
+	// WhatsApp message has no JWT, so this route takes user_id from the body and is
+	// gated by requireInternal's shared secret. It is mounted at TOP LEVEL, OUTSIDE
+	// the /api JWT group, deliberately — the secret is its only auth. It fails
+	// closed when INTERNAL_TOKEN is unset.
+	app.Post("/internal/chat", s.requireInternal, s.handleInternalChat)
+
 	// Everything under /api requires a valid JWT and is rate limited.
 	api := app.Group("/api", s.authMiddleware, s.rateLimitMiddleware)
 

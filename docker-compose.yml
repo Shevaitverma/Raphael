@@ -107,6 +107,9 @@ services:
       JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
       DEV_AUTH_ENABLED: "true"
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      # The whatsapp-bridge (and any internal ingress) authenticates to the
+      # gateway's /internal/* with this shared secret.
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN in .env}
     depends_on:
       redis:
         condition: service_healthy
@@ -125,6 +128,33 @@ services:
     ports: ["3000:3000"]
     depends_on: [gateway]
 
+  # Single-user WhatsApp edge. Behind a profile so a plain `docker compose up`
+  # SKIPS it — the stack runs fine without WhatsApp. Enable with:
+  #   docker compose --profile whatsapp up -d whatsapp-bridge
+  # UNOFFICIAL library (Baileys) — can get the linked number banned. See
+  # whatsapp-bridge/README.md before enabling.
+  whatsapp-bridge:
+    build: ./whatsapp-bridge
+    profiles: ["whatsapp"]
+    environment:
+      GATEWAY_URL: http://gateway:8080
+      CONV_SVC_URL: http://conv-svc:8082
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN in .env}
+      # Not :? — compose interpolates every service's env regardless of profile,
+      # so a required-check here would break a plain `docker compose up`. If
+      # unset the bridge itself logs "not configured" and exits 0 cleanly.
+      WHATSAPP_OWNER_JID: ${WHATSAPP_OWNER_JID:-}
+      WHATSAPP_OWNER_USER_ID: ${WHATSAPP_OWNER_USER_ID:-}
+      WHATSAPP_MAX_CHARS: ${WHATSAPP_MAX_CHARS:-3500}
+    volumes:
+      - wa_auth:/data
+    depends_on:
+      gateway:
+        condition: service_started
+      conv-svc:
+        condition: service_started
+
 volumes:
   pgdata:
   ollama:
+  wa_auth:

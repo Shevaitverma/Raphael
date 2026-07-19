@@ -38,6 +38,10 @@ out/
 volumes/
 *.db
 
+# whatsapp bridge session — the Baileys auth state IS a login credential.
+whatsapp-bridge/data/
+whatsapp-bridge/auth/
+
 # editors / os
 .DS_Store
 Thumbs.db
