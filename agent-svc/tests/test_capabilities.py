@@ -251,7 +251,9 @@ def test_reasoning_false_disables_thinking(monkeypatch):
     p, fake = _provider(monkeypatch)
     p.chat([{"role": "user", "content": "hi"}], json_mode=True, reasoning=False)
 
-    assert fake.calls[0]["extra_body"] == {"reasoning_effort": "none"}
+    # Ollama ignores reasoning_effort silently; its native `think` boolean is what
+    # actually stops a thinking model, so a local deployment gets both.
+    assert fake.calls[0]["extra_body"] == {"reasoning_effort": "none", "think": False}
     assert fake.calls[0]["response_format"] == {"type": "json_object"}
 
 

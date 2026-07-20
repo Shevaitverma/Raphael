@@ -561,7 +561,7 @@ def extract(state: GState) -> None:
         # CONTENT WORD of the user's message, so a message with none can produce
         # nothing — extraction is a provable no-op. Skip it before spending a
         # token resolving/calling the extractor. Catches "ok"/"2+2"/emoji turns.
-        if not extractor_mod._words(state.get("message") or ""):
+        if not extractor_mod._words(state.get("message") or "", 3):
             _log.info("extract skipped: no content words in message")
             return
         provider = resolver.extractor(state["user_id"])

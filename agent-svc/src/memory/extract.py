@@ -33,12 +33,17 @@ THE JSON LADDER, cheapest first:
 from __future__ import annotations
 
 import json
+import logging
 
 from llm.openai_compat import OpenAICompatProvider
 
+_log = logging.getLogger(__name__)
+
 MAX_ITEMS = 5
 MAX_INPUT_CHARS = 1200  # head-biased: a truncated fact is a FABRICATED fact.
-MAX_OUTPUT_TOKENS = 512
+# ponytail: 768 gives a thinking cred room to finish deliberating and still emit
+# content; the real fix is the provider honoring reasoning_effort (outOfScope).
+MAX_OUTPUT_TOKENS = 768
 
 # Mirror the db CHECKs (db/003_memory.sql:95-97) so an overlong item is dropped
 # HERE rather than aborting the whole batch on an INSERT.
@@ -60,6 +65,9 @@ Rules:
   not anything true of everyone.
 - NEVER record the assistant's own name, identity, or persona. "What is your
   name?" and its answer contain NO fact about the user.
+- Never store the answer to a question the user asked, or anything the assistant
+  said about itself — only what the USER asserted about themselves.
+- Prefer a triple; use a note only when it truly cannot be one.
 - Add "confidence": "inferred" ONLY when you GUESSED something the user did not
   say outright. Omit the field for anything the user stated directly.
 - At most 5 items. Use words from the exchange.
@@ -71,18 +79,73 @@ Answer: Congrats on the move!
 Output: {"items": [{"subject": "user", "predicate": "lives in", "object": "Berlin"}, {"note": "moved to Berlin recently and plans to stay"}]}"""
 
 # Grounding stopwords: enough to stop "the"/"and" from grounding a hallucination.
+# The two-char block matters since _words admits len>=2: without it a fabricated
+# "in Paris" grounds against any message containing "in" (function-word overlap,
+# not evidence). Content two-char tokens ("AI", "42") are NOT here, so still keep.
 _STOP = {
     "the", "and", "for", "you", "your", "our", "this", "that", "with", "was",
     "are", "have", "has", "had", "not", "but", "his", "her", "its", "they",
     "them", "their", "user", "assistant", "can", "will", "would", "should",
     "about", "from", "there", "here", "what", "when", "who", "how", "why",
+    "am", "an", "as", "at", "be", "by", "do", "he", "if", "in", "is", "it",
+    "me", "my", "no", "of", "on", "or", "so", "to", "up", "us", "we",
 }
 
 
-def _words(s: str) -> set[str]:
-    """Content words, no regex: fold every non-alphanumeric to a space."""
+def _words(s: str, min_len: int = 2) -> set[str]:
+    """Content words, no regex: fold every non-alphanumeric to a space.
+
+    min_len defaults to 2 for GROUNDING, where a two-char object is a real claim
+    ("AI", "42"). The skip-gate (workflow.py) passes min_len=3 instead: a message
+    whose only tokens are two-char fillers ("ok", "hi", "no") is not worth an
+    extraction call. One rule, two thresholds, so the gate never fires on "ok"
+    while grounding still rescues "AI".
+    """
     flat = "".join(c if c.isalnum() else " " for c in s.lower())
-    return {w for w in flat.split() if len(w) > 2 and w not in _STOP}
+    return {w for w in flat.split() if len(w) >= min_len and w not in _STOP}
+
+
+# A recall turn asks the assistant to REMEMBER, so its answer is retrieval, not a
+# user assertion — grounding a fact against that answer would re-inscribe recalled
+# data as a fresh explicit user fact (retrieval-feedback poisoning).
+_WH_AUX = {
+    "where", "what", "when", "who", "why", "how", "which",
+    "do", "did", "does", "is", "are", "was", "were", "can", "could",
+}
+
+# Request-for-information markers: recall phrased as an imperative or statement
+# ("tell me where I was born", "remind me of my birthplace") never reaches a '?'
+# and never leads with a WH/aux word, so the answer — still retrieved data — would
+# re-inscribe as a fresh explicit user fact. Match the phrase so answer-grounding
+# stays OFF on these turns too.
+_RECALL_MARKERS = ("tell me", "remind me", "show me", "recall", "what's my", "who's my")
+
+
+def _is_recall(msg: str) -> bool:
+    m = (msg or "").strip().lower()
+    if not m:
+        return False
+    if m.endswith("?") or m.split()[0] in _WH_AUX:
+        return True
+    return any(k in m for k in _RECALL_MARKERS)
+
+
+def _grounded(payload: str, message: str, answer: str) -> bool:
+    # A content word of the PAYLOAD (a triple's OBJECT / a note's content) must
+    # appear in the USER's MESSAGE, OR — when this is NOT a recall turn — in the
+    # assistant's ANSWER. Message-grounding alone dropped valid facts a 7B
+    # rephrases ("I do not eat meat" -> object "vegetarian", which only echoes in
+    # the answer). Answer-grounding rescues them, but ONLY off a recall turn: on
+    # "where was I born?" the answer is retrieved data, so grounding an object
+    # ("Reykjavik") against it would re-inscribe a recalled value as a fresh
+    # explicit user fact (retrieval feedback poisoning). Subject/predicate are not
+    # payload; a recall turn shares its predicate word with the remembered fact,
+    # so only the object/content counts. Grounding is NOT skipped on
+    # confidence=="explicit": the poisoning object is itself explicit.
+    pw = _words(payload)
+    if pw & _words(message):
+        return True
+    return not _is_recall(message) and bool(pw & _words(answer))
 
 
 def _text(v, cap: int) -> str | None:
@@ -183,23 +246,39 @@ def extract(provider, message: str, answer: str) -> list[dict]:
     if items is None:
         items = _parse(_ask(provider, prompt)) or []  # ONE retry, parse failure only.
 
-    # GROUNDING: at least one content word of the item must appear in the USER's
-    # MESSAGE — deliberately NOT the assistant's answer. A durable fact about the
-    # user comes from what the USER said; grounding against the answer is exactly
-    # what let the assistant's self-description ("I am Akku") be stored as
-    # "user is known as Akku". This also enforces the prompt's "skip anything the
-    # assistant suggested that the user did not confirm".
-    seen = _words(message)
+    # GROUNDING keeps only items whose payload traces to what the USER said (or,
+    # off a recall turn, what the assistant echoed). See _grounded above.
+    def _payload(it: dict) -> str:
+        return (it.get("object") if it.get("kind") == "triple" else it.get("content")) or ""
 
-    def _grounded(it: dict) -> bool:
-        # Ground the PAYLOAD in the USER's words — for a triple that is the OBJECT
-        # (the claim), for a note the content. NOT "any word of the item": a RECALL
-        # question ("where was I born?") shares its predicate word with the
-        # remembered fact, so grounding the whole triple let an answer-sourced
-        # object ("Reykjavik") ride in and be RE-INSCRIBED as a fresh user fact —
-        # now at explicit 0.95, i.e. retrieval feedback poisoning. Subject and
-        # predicate are not payload; only what the user actually said counts.
-        payload = it.get("object") if it.get("kind") == "triple" else it.get("content")
-        return bool(_words(payload or "") & seen)
+    kept = [it for it in items if _grounded(_payload(it), message, answer)]
+    # parsed vs kept separates "the model found nothing" from "grounding dropped
+    # it": workflow.py's items= now equals kept, so a high parsed/low kept is the
+    # signal that grounding is over-tight, not that extraction is silent.
+    _log.info("extract parsed=%d kept=%d", len(items), len(kept))
+    return kept
 
-    return [it for it in items if _grounded(it)]
+
+def demo() -> None:
+    """Grounding must rescue 7B paraphrase yet still block recall poisoning."""
+    # KEEP: object rephrases the message but echoes in the answer (non-recall).
+    assert _grounded("vegetarian", "I do not eat meat", "Got it, noting you are vegetarian")
+    # KEEP: short objects (>=2 chars) that the old len>2 gate made unpromotable.
+    assert _grounded("AI", "I work in AI", "")
+    assert _grounded("42", "I am 42", "")
+    assert _grounded("Acme", "I work at Acme", "")
+    # DROP: recall turn — answer is retrieved data, not a user assertion.
+    assert not _grounded("Reykjavik", "where was I born?", "You were born in Reykjavik")
+    # DROP: imperative/statement recall never reaches a '?' — same poisoning risk.
+    assert not _grounded("Reykjavik", "tell me where I was born", "You were born in Reykjavik")
+    assert not _grounded("Reykjavik", "remind me of my birthplace", "You were born in Reykjavik")
+    # DROP: two-char function-word overlap is not evidence ("in" alone must fail).
+    assert not _grounded("in Paris", "I am interested in cooking", "")
+    # The skip-gate threshold (min_len=3) must reject 2-char fillers so an "ok"
+    # turn is never sent to the extractor, while grounding (default 2) keeps "AI".
+    assert _words("ok", 3) == set() and _words("AI") == {"ai"}
+    print("extract.demo OK")
+
+
+if __name__ == "__main__":
+    demo()

@@ -44,10 +44,20 @@ REAP_AFTER_DAYS = int(os.environ.get("MEMORY_REAP_AFTER_DAYS", "90"))
 # Computed, never stored: a stored importance is stale the moment the clock
 # moves and needs a recompute cron to stay honest. ::float8 keeps exp() off
 # numeric, where a very old row is an expensive way to reach zero.
+#
+# Two orthogonal signals: times_seen/last_seen = how often the WORLD re-asserted
+# the memory (re-hearings, write side); access_count/last_accessed = how often WE
+# reached for it (recall, touch side). Used memory hardens even if never re-heard,
+# so both frequency terms and both recency terms carry weight. last_accessed is
+# NULL until first recall — a never-used row simply scores 0 on those two terms.
 _IMPORTANCE = """(
-      0.3 * confidence
-    + 0.3 * LEAST(1.0, times_seen / 5.0)
-    + 0.4 * exp(-EXTRACT(epoch FROM (now() - last_seen))::float8 / (60 * 86400))
+      0.25 * confidence
+    + 0.20 * LEAST(1.0, times_seen / 5.0)
+    + 0.15 * LEAST(1.0, access_count / 5.0)
+    + 0.25 * exp(-EXTRACT(epoch FROM (now() - last_seen))::float8 / (60 * 86400))
+    + 0.15 * CASE WHEN last_accessed IS NULL THEN 0.0
+                  ELSE exp(-EXTRACT(epoch FROM (now() - last_accessed))::float8 / (60 * 86400))
+             END
 )"""
 
 
@@ -174,7 +184,8 @@ def retrieve(user_id: str, query: str, mem_budget: int, prof_budget: int, k: int
 
 
 def _bump(cur, table: str, user_id: str, ids) -> None:
-    # `table` is a module-level literal at every call site, never user input.
+    # Re-hearing: the world re-asserted this memory (a note dedup-hit, a fact
+    # upsert). `table` is a module-level literal at every call site, never input.
     cur.execute(
         f"UPDATE {table} SET times_seen = times_seen + 1, last_seen = now() "
         "WHERE id = ANY(%s::uuid[]) AND user_id = %s",
@@ -182,25 +193,38 @@ def _bump(cur, table: str, user_id: str, ids) -> None:
     )
 
 
+def _reinforce(cur, table: str, user_id: str, ids) -> None:
+    # Access-driven reinforcement: WE recalled this row. Deliberately NOT
+    # times_seen — recall is not a re-hearing. This is the signal reap() shields
+    # and _IMPORTANCE ranks by, so used memory hardens on its own axis.
+    cur.execute(
+        f"UPDATE {table} SET access_count = access_count + 1, last_accessed = now() "
+        "WHERE id = ANY(%s::uuid[]) AND user_id = %s",
+        ([str(i) for i in ids], user_id),
+    )
+
+
 def touch(user_id: str, ids) -> None:
-    """Mark injected rows as seen — the decay signal importance rides on.
+    """Reinforce the rows we just recalled — the human-memory pattern: use hardens.
+
+    Runs post-stream (off the critical path). Bumps access_count + last_accessed,
+    NOT times_seen: recall is us reaching for a memory, a different signal from the
+    world re-asserting it. That access recency is what _IMPORTANCE ranks by and
+    what reap() shields from archival.
 
     injected_ids mixes memories ids (retrieval) and facts ids (profile). A uuid
-    lives in exactly one of the two tables, so bumping both with the whole list
-    is one extra statement instead of threading id provenance out of retrieve().
-    Skipping the facts bump would leave every profile row's recency term decaying
-    to zero no matter how often it was injected.
-
-    The user_id clause is defence in depth: the ids came from our own query, but
-    scoping the write to the owner costs nothing.
+    lives in exactly one of the two tables, so reinforcing both with the whole
+    list is one extra statement instead of threading id provenance out of
+    retrieve(). The user_id clause is defence in depth: the ids came from our own
+    query, but scoping the write to the owner costs nothing.
     """
     if not ids:
         return
     try:
         with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor() as cur:
-                _bump(cur, "memories", user_id, ids)
-                _bump(cur, "facts", user_id, ids)
+                _reinforce(cur, "memories", user_id, ids)
+                _reinforce(cur, "facts", user_id, ids)
     except Exception:
         pass
 
@@ -215,8 +239,10 @@ def reap() -> int:
     from retrieval and from the partial index in one statement.
 
     Scope is deliberate: kind='episodic' only (facts are superseded via upsert,
-    never archived) and times_seen <= 1 (a re-heard memory earned its keep). Never
-    raises; a failed reap is a no-op, not a downed turn.
+    never archived) and times_seen <= 1 (a re-heard memory earned its keep). A row
+    recalled within the window is also spared even at times_seen <= 1 — used memory
+    is not dormant, the whole point of access-driven reinforcement. Never raises; a
+    failed reap is a no-op, not a downed turn.
     """
     try:
         with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
@@ -226,8 +252,10 @@ def reap() -> int:
                         WHERE valid_until IS NULL
                           AND kind = 'episodic'
                           AND times_seen <= 1
-                          AND last_seen < now() - make_interval(days => %s)""",
-                    (REAP_AFTER_DAYS,),
+                          AND last_seen < now() - make_interval(days => %s)
+                          AND (last_accessed IS NULL
+                               OR last_accessed < now() - make_interval(days => %s))""",
+                    (REAP_AFTER_DAYS, REAP_AFTER_DAYS),
                 )
                 return cur.rowcount
     except Exception:

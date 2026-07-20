@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from functools import lru_cache
 
 import httpx
@@ -34,6 +35,15 @@ _log = logging.getLogger(__name__)
 # Keyed by base_url too — the same model id on Ollama and OpenRouter is not the
 # same deployment and need not accept the same params.
 _UNSUPPORTED: set[tuple[str, str, str]] = set()
+
+# A leading chain-of-thought block. Some thinking models emit it INLINE into
+# `content` even with thinking turned off, so we strip a single leading block as
+# a belt-and-suspenders after the native `think`/`reasoning_effort` knobs.
+_THINK_RE = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
+
+
+def _strip_leading_think(text: str) -> str:
+    return _THINK_RE.sub("", text, count=1)
 
 
 def _ollama_caps(base_url: str, model: str) -> Capabilities | None:
@@ -160,7 +170,18 @@ class OpenAICompatProvider:
             # A THINKING model leaves content EMPTY until it stops deliberating,
             # so a verbose thinker burns the whole budget and returns "". You
             # cannot outspend it by raising max_tokens; you turn it off.
-            kw["extra_body"] = {"reasoning_effort": "none"}
+            #
+            # reasoning_effort:'none' is the OpenRouter/OpenAI knob. Ollama SILENTLY
+            # IGNORES it (no 400, no effect), so it needs its NATIVE `think` boolean
+            # — which the OpenAI-compat path accepts via extra_body. We send `think`
+            # only to Ollama: to OpenRouter/Anthropic it is an unknown param that
+            # would 400 (and there the effort knob already does the job). If a given
+            # Ollama deployment ever 400s on either, the whole extra_body is dropped
+            # and memoed under reasoning_effort — degrades, never fatal.
+            body = {"reasoning_effort": "none"}
+            if self.backend == "ollama":
+                body["think"] = False
+            kw["extra_body"] = body
         return kw
 
     def chat(
@@ -195,7 +216,7 @@ class OpenAICompatProvider:
                 kw.pop(drop)
 
         choice = resp.choices[0]
-        text = choice.message.content or ""
+        text = _strip_leading_think(choice.message.content or "")
         finish = getattr(choice, "finish_reason", None)
         if finish == "length" and not text.strip():
             # The caller cannot tell "nothing to say" from "cut off mid-thought"
@@ -243,6 +264,10 @@ class OpenAICompatProvider:
                 _UNSUPPORTED.add((self.base_url, self.model, "reasoning_effort"))
                 _log.info("%s rejected reasoning_effort on stream; retrying without", self.model)
                 kw.pop(drop)
+        # Belt-and-suspenders think-strip, but streamed: a leading <think>..</think>
+        # can straddle chunks, so buffer until we either pass </think> or can prove
+        # the head is NOT a think block, then stop buffering and pass content through.
+        buf, stripping = "", True
         for chunk in stream:
             # The usage chunk typically has empty choices, so read usage before the
             # choices guard — whichever chunk carries it wins; None stays if none do.
@@ -256,5 +281,23 @@ class OpenAICompatProvider:
                 continue
             delta = chunk.choices[0].delta
             content = getattr(delta, "content", None)
-            if content:
+            if not content:
+                continue
+            if not stripping:
                 yield content
+                continue
+            buf += content
+            head = buf.lstrip()
+            if head.startswith("<think>"):
+                end = buf.find("</think>")
+                if end == -1:
+                    continue  # close tag not here yet — keep buffering
+                rest, buf, stripping = buf[end + len("</think>") :].lstrip(), "", False
+                if rest:
+                    yield rest
+            elif "<think>".startswith(head):
+                continue  # still could be a think block forming ("<thi"…) — wait
+            else:
+                stripping = False  # definitely not a think block — flush and pass through
+                yield buf
+                buf = ""
