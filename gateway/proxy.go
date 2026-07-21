@@ -215,6 +215,15 @@ func (s *Server) proxyMemoryStats(c *fiber.Ctx) error {
 	return s.forward(c, http.MethodGet, target, nil)
 }
 
+// GET /api/memory/portrait → agent-svc GET /memory/portrait?user_id=<jwt sub>
+// The user-portrait transparency door: what the assistant has inferred about
+// the user, read-only. uid from the JWT only. Clone of proxyMemoryStats.
+func (s *Server) proxyMemoryPortrait(c *fiber.Ctx) error {
+	uid := c.Locals(userIDKey).(string)
+	target := s.cfg.AgentSvcURL + "/memory/portrait?user_id=" + url.QueryEscape(uid)
+	return s.forward(c, http.MethodGet, target, nil)
+}
+
 // --- chat proxy → agent-svc (SSE passthrough) ------------------------------
 //
 // POST /api/chat {conversation_id, message, search} → agent-svc POST /chat

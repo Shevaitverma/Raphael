@@ -123,6 +123,7 @@ func (s *Server) BuildApp() *fiber.App {
 	// Memory reads: uid forced from the JWT, proxied to agent-svc.
 	api.Get("/memory/graph", s.proxyMemoryGraph)
 	api.Get("/memory/stats", s.proxyMemoryStats)
+	api.Get("/memory/portrait", s.proxyMemoryPortrait)
 
 	// Conversations: exactly the three routes in the contract. Message *writes*
 	// are agent-svc's job (it posts to conv-svc directly), so there is no

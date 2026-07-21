@@ -12,7 +12,7 @@ credential must never cost the user their memory.
 from __future__ import annotations
 import threading
 
-from config import EMBEDDING_MODEL, EMBEDDING_MODEL_NAME, EMBEDDING_DIM
+from config import EMBEDDING_MODEL, EMBEDDING_MODEL_NAME
 
 _encoder = None
 _lock = threading.Lock()
@@ -22,7 +22,6 @@ class LocalEmbeddingProvider:
     """EmbeddingProvider over an already-loaded SentenceTransformer."""
 
     model_name = EMBEDDING_MODEL_NAME
-    dim = EMBEDDING_DIM
 
     def __init__(self, model):
         self._model = model

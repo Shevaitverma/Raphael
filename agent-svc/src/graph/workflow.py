@@ -27,7 +27,7 @@ import httpx
 
 from config import CONV_SVC_URL
 from llm import resolver
-from memory import budget, extract as extractor_mod, history, retriever
+from memory import budget, extract as extractor_mod, history, portrait as portrait_mod, retriever
 from tools import google as google_tool
 from tools import search as search_tool
 from tools import tasks as tasks_tool
@@ -87,25 +87,49 @@ def _sanitize_name(name: str) -> str:
     return cleaned[:40] or "Raphael"
 
 
-def build_system(profile: list, memories: list, search: str = "", name: str = "Raphael") -> str:
-    """Stable prefix first: base, then profile, then memories, then search.
+def _sanitize_portrait(text: str) -> str:
+    """Defence in depth: portrait.py already sanitized this at write time, but it
+    lands verbatim in the system prompt, so strip control chars/newlines and hard-
+    cap AGAIN here (600, not the name's 40). Same isprintable pattern as
+    _sanitize_name. Empty -> "" (caller skips the section)."""
+    cleaned = "".join(c for c in (text or "") if c.isprintable()).strip()
+    return cleaned[:600]
 
-    Ordered for prompt caching — the base never changes, the profile changes
-    rarely, retrieved memories change every turn, and search results change
+
+# Static (0 per-turn tokens), and lives only INSIDE the notes block so it never
+# reaches an anonymous turn — it points at "the portrait/profile below", which
+# only exists once notes are injected. Adapts tone WITHOUT touching _PRECEDENCE:
+# the live turn still wins.
+_BINDING = (
+    "When you can see who you're talking to below (their portrait and what we "
+    "believe about them), match your tone, warmth, and level of detail to them."
+)
+
+
+def build_system(profile: list, memories: list, search: str = "", name: str = "Raphael", portrait: str | None = None) -> str:
+    """Stable prefix first: base, then portrait, then profile, then memories, then search.
+
+    Ordered for prompt caching — the base never changes, the portrait/profile
+    change rarely, retrieved memories change every turn, and search results change
     every turn AND are the biggest block. A cache prefix only pays if the
     volatile part is last.
 
-    `name` defaults to "Raphael", so the base line is byte-identical to
-    SYSTEM_BASE unless a per-user name is threaded in.
+    `name` defaults to "Raphael" and `portrait` to None, so the base line is
+    byte-identical to SYSTEM_BASE unless a per-user name/portrait is threaded in.
     """
     sname = _sanitize_name(name)
     out = [_persona(sname)]
-    if profile or memories:
+    sportrait = _sanitize_portrait(portrait or "")
+    if profile or memories or sportrait:
         # The name is set HERE and is authoritative. A retrieved note may say the
         # assistant "has identity X" (a stale memory from a previous name) — it
         # must never win. Stated only when notes are injected, so build_system([],
         # []) stays byte-identical to SYSTEM_BASE.
-        out += ["", f"Your name is {sname}; a different name in the notes below is stale — ignore it.", _PRECEDENCE]
+        out += ["", f"Your name is {sname}; a different name in the notes below is stale — ignore it.", _PRECEDENCE, _BINDING]
+        if sportrait:
+            # A synthesized persona card: still retrieved belief (under _PRECEDENCE),
+            # ABOVE the fact list so the model reads a coherent person first.
+            out += ["", "Who you are talking to:", sportrait]
         if profile:
             out += ["", "What we believe about the user:"] + [f"- {p}" for p in profile]
         if memories:
@@ -203,6 +227,7 @@ class GState(TypedDict, total=False):
     summary: list
     memories: list
     profile: list
+    portrait: str | None
     injected_ids: list
     answer: str
     model: str
@@ -223,17 +248,23 @@ def context_node(state: GState) -> dict:
     # retrieve() is embed + three queries — both I/O- or torch-bound and both
     # release the GIL, so latency is the slower of the two, not the sum. Putting
     # the fetch first would serialize it behind the embed for no reason.
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         h = pool.submit(history.fetch, state["conversation_id"], hist_budget, state["user_id"])
         r = pool.submit(retriever.retrieve, state["user_id"], state["message"], mem_budget, prof_budget)
+        # Best-effort: portrait.get() reads one stored string and NEVER raises
+        # (returns None on any DB problem), so a missing card just leaves the turn
+        # unaltered. Concurrent with the rest -> zero added latency on the path.
+        p = pool.submit(portrait_mod.get, state["user_id"])
         kept, dropped = h.result()
         mem = r.result()
+        port = p.result()
 
     return {
         "history": kept,
         "summary": dropped,
         "memories": mem["memories"],
         "profile": mem["profile"],
+        "portrait": port,
         "injected_ids": mem["injected_ids"],
     }
 
@@ -445,6 +476,7 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
 
 def generate_node(state: GState) -> dict:
     profile, memories = state.get("profile") or [], state.get("memories") or []
+    portrait = state.get("portrait")  # str | None; build_system no-ops on None
     # LUCKY ORDERING, stated because it breaks silently: run() calls context,
     # generate, persist IN THAT ORDER, so at generate time the current message
     # is not yet in conv-svc. history is exactly the prior turns and we append
@@ -452,12 +484,13 @@ def generate_node(state: GState) -> dict:
     # day someone moves persist_node above generate_node.
     messages = [*(state.get("history") or []), {"role": "user", "content": state["message"]}]
     try:
-        block, tool_calls = _preflight(state, messages, build_system(profile, memories))
+        block, tool_calls = _preflight(state, messages, build_system(profile, memories, portrait=portrait))
     except Exception:
         block, tool_calls = "", []  # a search problem may never break the turn.
     name = state.get("assistant_name") or "Raphael"
     out = stream_with_lifeboat(
-        state["user_id"], state["provider"], messages, build_system(profile, memories, block, name), state["emit"]
+        state["user_id"], state["provider"], messages,
+        build_system(profile, memories, block, name, portrait), state["emit"]
     )
     out["tool_calls"] = tool_calls
     return out

@@ -17,7 +17,6 @@ export type DevLoginResponse = {
 
 export type Conversation = {
   id: string;
-  user_id?: string;
   title?: string;
   created_at?: string;
 };
@@ -401,12 +400,21 @@ export async function getMemoryStats(token: string): Promise<MemoryStats> {
   };
 }
 
+// The user-portrait transparency door: the prose sketch Raphael injects into every
+// system prompt, surfaced read-only so the user can see what it thinks of them.
+// Empty string means nothing believed yet.
+export async function getPortrait(token: string): Promise<string> {
+  const res = await fetch(`${GATEWAY_URL}/api/memory/portrait`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`portrait failed: ${res.status}`, res.status);
+  const d = await res.json();
+  return d.portrait ?? "";
+}
+
 // --- Google connector (read-only Calendar + profile) -------------------------
 
 export type GoogleStatus = {
   connected: boolean;
   email: string | null;
-  scopes: string[];
 };
 
 // Returns the Google consent URL to navigate to. A 503 means this deployment has
@@ -425,7 +433,6 @@ export async function googleStatus(token: string): Promise<GoogleStatus> {
   return {
     connected: !!data.connected,
     email: data.email ?? null,
-    scopes: Array.isArray(data.scopes) ? data.scopes : [],
   };
 }
 

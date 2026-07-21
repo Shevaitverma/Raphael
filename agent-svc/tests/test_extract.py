@@ -172,6 +172,24 @@ def test_grounded_item_survives():
     assert extract.extract(p, "I live in Berlin", "Nice!")[0]["object"] == "Berlin"
 
 
+def test_communication_style_directive_is_captured_and_grounded():
+    # "short" and "version" are the user's own words, so the style item grounds.
+    style = ('{"items": [{"subject": "user", "predicate": "prefers", "object": "short version"},'
+             ' {"note": "wants the short version from now on"}]}')
+    p = FakeProvider(style)
+    kept = extract.extract(p, "just give me the short version from now on", "Sure.")
+    assert kept, "an explicit style directive must survive grounding"
+    assert any("short" in (it.get("object") or it.get("content")) for it in kept)
+    # explicit directive -> no inferred tag -> high confidence
+    assert all(it["confidence"] == extract.CONF_EXPLICIT for it in kept)
+
+
+def test_trivia_turn_yields_no_style_item():
+    # The model correctly returns nothing on a plain fact question.
+    p = FakeProvider('{"items": []}')
+    assert extract.extract(p, "what's the capital of France?", "Paris.") == []
+
+
 def test_retry_on_parse_failure_only():
     p = FakeProvider("here is my answer: none", GOOD)
     assert extract.extract(p, "I live in Berlin", "Nice!")[0]["object"] == "Berlin"

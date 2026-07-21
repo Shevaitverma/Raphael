@@ -60,6 +60,17 @@ Schema — each item is either a triple or a note:
 {"items": [{"subject": "user", "predicate": "works at", "object": "Acme"},
            {"note": "prefers short answers"}]}
 
+Also capture HOW the user wants to be talked to and their durable traits, when
+they express it — this is what lets you adapt to them:
+- Communication style: preferred verbosity ("prefers short answers", "wants
+  detail"), tone/formality, language.
+- Preferences, interests, working style — durable likes/dislikes about how they
+  work, not one-off mood.
+- Explicit behavioral directives — "always...", "never...", "from now on...",
+  "call me X", "stop doing Y". These are commands about your behaviour; record
+  them as a note or a "user prefers"/"user wants" triple, NOT as inferred (the
+  user said it outright, so confidence is explicit).
+
 Rules:
 - Only durable things about the user. Not world trivia, not the question itself,
   not anything true of everyone.
@@ -76,7 +87,12 @@ Rules:
 Example
 Message: I moved to Berlin last month, think I'll stay a while.
 Answer: Congrats on the move!
-Output: {"items": [{"subject": "user", "predicate": "lives in", "object": "Berlin"}, {"note": "moved to Berlin recently and plans to stay"}]}"""
+Output: {"items": [{"subject": "user", "predicate": "lives in", "object": "Berlin"}, {"note": "moved to Berlin recently and plans to stay"}]}
+
+Example
+Message: from now on just give me the short version, skip the preamble.
+Answer: Got it, I'll keep it short.
+Output: {"items": [{"subject": "user", "predicate": "prefers", "object": "short answers"}, {"note": "wants the short version, skip preamble"}]}"""
 
 # Grounding stopwords: enough to stop "the"/"and" from grounding a hallucination.
 # The two-char block matters since _words admits len>=2: without it a fabricated

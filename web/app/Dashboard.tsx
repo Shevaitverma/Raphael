@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
   getCapabilities,
   getMemoryStats,
+  getPortrait,
   getTasks,
   listProviders,
   type Capabilities,
@@ -32,6 +33,8 @@ export default function Dashboard({
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [creds, setCreds] = useState<Credential[] | null>(null);
   const [tasks, setTasks] = useState<Task[] | null>(null);
+  // undefined = not loaded yet; "" = loaded but no portrait; string = the portrait.
+  const [portrait, setPortrait] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -41,13 +44,15 @@ export default function Dashboard({
       getCapabilities(token),
       listProviders(token),
       getTasks(token),
+      getPortrait(token),
     ])
-      .then(([s, c, p, t]) => {
+      .then(([s, c, p, t, pt]) => {
         if (!live) return;
         setStats(s);
         setCaps(c);
         setCreds(p);
         setTasks(t);
+        setPortrait(pt);
       })
       .catch((e) => {
         if (!live) return;
@@ -182,6 +187,22 @@ export default function Dashboard({
               Start a conversation
             </span>
           </button>
+        </section>
+
+        {/* How Raphael sees you — the exact persona portrait.synthesize() writes
+            and workflow injects into every system prompt. Read-only 0-token door;
+            completes transparency so the user can see what Raphael assumes about them. */}
+        <section className="rounded-2xl border border-edge bg-panel p-5">
+          <h3 className="text-base font-semibold text-on-surface">How Raphael sees you</h3>
+          {portrait === undefined ? (
+            <p className="mt-3 text-sm text-faint">Loading…</p>
+          ) : portrait ? (
+            <p className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-muted">{portrait}</p>
+          ) : (
+            <p className="mt-3 text-sm text-faint">
+              No portrait yet — Raphael forms one as it learns about you.
+            </p>
+          )}
         </section>
 
         {/* Recent knowledge — the strongest facts Raphael actually knows. */}

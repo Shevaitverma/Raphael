@@ -7,12 +7,14 @@ import {
   deleteConversation,
   deleteTask,
   disconnectGoogle,
+  getCapabilities,
   getMemoryGraph,
   getMemoryStats,
   getProfile,
   getTasks,
   googleStatus,
   listMessages,
+  listProviders,
   storedDegraded,
   streamChat,
   updateProfile,
@@ -320,28 +322,26 @@ test("connectGoogle raises a 503 ApiError when Google isn't configured", async (
   );
 });
 
-test("googleStatus parses connected, email and scopes", async () => {
+test("googleStatus parses connected and email", async () => {
   const s = await withFetch(
     async () =>
       new Response(
-        '{"connected":true,"email":"a@b.com","scopes":["calendar.readonly","userinfo.email"]}',
+        '{"connected":true,"email":"a@b.com"}',
         { status: 200 },
       ),
     () => googleStatus("t"),
   );
   assert.equal(s.connected, true);
   assert.equal(s.email, "a@b.com");
-  assert.deepEqual(s.scopes, ["calendar.readonly", "userinfo.email"]);
 });
 
 test("googleStatus normalizes the disconnected shape", async () => {
   const s = await withFetch(
-    async () => new Response('{"connected":false,"email":null,"scopes":[]}', { status: 200 }),
+    async () => new Response('{"connected":false,"email":null}', { status: 200 }),
     () => googleStatus("t"),
   );
   assert.equal(s.connected, false);
   assert.equal(s.email, null);
-  assert.deepEqual(s.scopes, []);
 });
 
 test("disconnectGoogle resolves on a 200", async () => {
@@ -556,6 +556,82 @@ test("getMemoryStats raises ApiError carrying the status", async () => {
     withFetch(
       async () => new Response("nope", { status: 503 }),
       () => getMemoryStats("t"),
+    ),
+    (e) => e instanceof ApiError && (e as ApiError).status === 503,
+  );
+});
+
+// --- providers + capabilities ------------------------------------------------
+
+test("listProviders accepts a bare array", async () => {
+  const creds = await withFetch(
+    async () =>
+      new Response(
+        JSON.stringify([
+          { id: "p1", provider: "local", auth_type: "api_key", model_id: "qwen2.5:7b", is_active: true, is_lifeboat: false },
+        ]),
+        { status: 200 },
+      ),
+    () => listProviders("t"),
+  );
+  assert.equal(creds.length, 1);
+  assert.equal(creds[0].provider, "local");
+});
+
+test("listProviders normalizes the {credentials:[]} shape", async () => {
+  const creds = await withFetch(
+    async () =>
+      new Response(
+        JSON.stringify({
+          credentials: [
+            { id: "p2", provider: "anthropic", auth_type: "oauth", model_id: "claude", is_active: false, is_lifeboat: true },
+          ],
+        }),
+        { status: 200 },
+      ),
+    () => listProviders("t"),
+  );
+  assert.equal(creds.length, 1);
+  assert.equal(creds[0].is_lifeboat, true);
+});
+
+test("listProviders raises ApiError carrying the status", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response("nope", { status: 500 }),
+      () => listProviders("t"),
+    ),
+    (e) => e instanceof ApiError && (e as ApiError).status === 500,
+  );
+});
+
+test("getCapabilities parses provider, model, context window and search", async () => {
+  const cap = await withFetch(
+    async () =>
+      new Response(
+        JSON.stringify({
+          provider: "local",
+          model: "qwen2.5:7b",
+          max_context_tokens: 32768,
+          source: "discovered",
+          web_search: true,
+          google_connected: false,
+        }),
+        { status: 200 },
+      ),
+    () => getCapabilities("t"),
+  );
+  assert.equal(cap.provider, "local");
+  assert.equal(cap.model, "qwen2.5:7b");
+  assert.equal(cap.max_context_tokens, 32768);
+  assert.equal(cap.web_search, true);
+});
+
+test("getCapabilities raises ApiError carrying the status", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response("nope", { status: 503 }),
+      () => getCapabilities("t"),
     ),
     (e) => e instanceof ApiError && (e as ApiError).status === 503,
   );

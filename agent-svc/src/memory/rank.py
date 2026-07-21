@@ -22,10 +22,10 @@ def rrf(*passes: list[dict]) -> dict:
 
 
 def rerank(rows: dict, scores: dict, k: int) -> list[dict]:
-    """Top-k rows by fused rank, importance, and verification.
+    """Top-k rows by fused rank and importance.
 
     rows: id -> row dict. scores: id -> rrf score. Relevance dominates (0.7);
-    importance breaks near-ties (0.2); a verified row gets a small edge (0.1).
+    importance breaks near-ties (0.2).
     """
     if not scores:
         return []
@@ -33,12 +33,9 @@ def rerank(rows: dict, scores: dict, k: int) -> list[dict]:
 
     def score(i) -> float:
         row = rows[i]
-        # ponytail: nothing writes `verified` yet — the bonus is inert until a
-        # confirmation path exists. Wire it there, not here.
         return (
             (scores[i] / top) * 0.7
             + float(row.get("importance") or 0.0) * 0.2
-            + (0.1 if row.get("verified") else 0.0)
         )
 
     ids = sorted((i for i in scores if i in rows), key=score, reverse=True)

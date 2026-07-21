@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from config import DATABASE_URL
 from graph import workflow
 from llm import embeddings, resolver
-from memory import read, retriever
+from memory import portrait, read, retriever
 from tools import google as google_tool
 from tools import search as search_tool
 
@@ -35,7 +35,29 @@ def _reaper_loop() -> None:
     # double-run under multi-instance is harmless; revisit only if it ever scales out.
     while True:
         retriever.reap()
+        _regen_portraits()
         time.sleep(REAP_INTERVAL_SECONDS)
+
+
+def _regen_portraits() -> None:
+    # Daily, after reap: refresh each fact-having user's portrait. synthesize()
+    # fingerprint-skips unchanged facts (idle users cost ZERO tokens) and never
+    # raises; the per-user guard keeps one bad row from stopping the pass.
+    # ponytail: iterate all fact-having users; gate on recent activity only if
+    # the user count ever explodes.
+    try:
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT DISTINCT user_id FROM facts")
+                user_ids = [row[0] for row in cur.fetchall()]
+    except Exception:
+        logging.exception("portrait regen: could not list fact-having users")
+        return
+    for user_id in user_ids:
+        try:
+            portrait.synthesize(str(user_id))
+        except Exception:
+            logging.exception("portrait regen failed for user %s", user_id)
 
 
 @app.on_event("startup")
@@ -97,6 +119,13 @@ def memory_graph(user_id: str):
 @app.get("/memory/stats")
 def memory_stats(user_id: str):
     return read.stats(user_id)
+
+
+@app.get("/memory/portrait")
+def memory_portrait(user_id: str):
+    # The read-door for the portrait synthesize() writes daily and workflow injects
+    # into every system prompt. Pure 0-token read; portrait.get never raises.
+    return {"portrait": portrait.get(user_id)}
 
 
 class ChatBody(BaseModel):

@@ -34,7 +34,6 @@ OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.
 # In-process embeddings — no key, no network at inference.
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-ai/nomic-embed-text-v1.5")
 EMBEDDING_MODEL_NAME = "nomic-embed-text-v1.5"  # stored next to each vector
-EMBEDDING_DIM = 768
 
 ANTHROPIC_DEFAULT_MODEL = "claude-opus-4-8"
 

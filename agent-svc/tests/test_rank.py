@@ -21,14 +21,6 @@ def test_both_passes_beats_one():
     assert [r["id"] for r in out] == ["a", "c", "b"]
 
 
-def test_verified_breaks_a_tie():
-    # Identical rank in identical passes -> identical rrf. Only the bonus differs.
-    scores = rank.rrf([{"id": "x"}], [{"id": "y"}])
-    assert scores["x"] == scores["y"]
-    rows = _rows("x", "y", y={"verified": True})
-    assert [r["id"] for r in rank.rerank(rows, scores, 2)] == ["y", "x"]
-
-
 def test_importance_breaks_a_tie():
     scores = rank.rrf([{"id": "x"}], [{"id": "y"}])
     rows = _rows("x", "y", y={"importance": 1.0})
@@ -40,7 +32,7 @@ def test_relevance_outweighs_importance():
     # 0.7 of the score is relevance, 0.2 is importance. Ordering must reflect it.
     fts = [{"id": "hit"}] + [{"id": f"f{i}"} for i in range(9)] + [{"id": "meh"}]
     vec = [{"id": "hit"}]
-    rows = _rows("hit", "meh", meh={"importance": 1.0, "verified": True})
+    rows = _rows("hit", "meh", meh={"importance": 1.0})
     out = rank.rerank(rows, rank.rrf(fts, vec), 2)
     assert [r["id"] for r in out] == ["hit", "meh"]
 

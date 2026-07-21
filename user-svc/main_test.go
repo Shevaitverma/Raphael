@@ -514,7 +514,7 @@ func TestPutNameOnlyLeavesOnboardedUnchanged(t *testing.T) {
 		t.Fatalf("reset: %v", err)
 	}
 	rec := do(t, srv, http.MethodPut, "/users/"+testUserID+"/profile",
-		map[string]string{"assistant_name": "Friday"})
+		map[string]string{"assistant_name": "Aria"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("put: got %d body=%s", rec.Code, rec.Body.String())
 	}
