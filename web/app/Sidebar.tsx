@@ -4,7 +4,7 @@
 // signed in. Groups its items under muted section labels and pins Settings +
 // the account row to the bottom. Inline SVG icons — no icon dependency.
 
-export type View = "dashboard" | "chat" | "graph" | "settings" | "tasks" | "reminders" | "admin";
+export type View = "dashboard" | "chat" | "graph" | "settings" | "tasks" | "reminders" | "fitness" | "admin";
 
 type Item = { view: View; label: string; icon: React.ReactNode };
 
@@ -59,6 +59,18 @@ const ICONS = {
       <path d="M13.73 21a2 2 0 0 1-3.46 0" />
     </Icon>
   ),
+  // Dumbbell — the fitness area (workouts + body metrics).
+  fitness: (
+    <Icon>
+      <path d="m6.5 6.5 11 11" />
+      <path d="m21 21-1-1" />
+      <path d="m3 3 1 1" />
+      <path d="m18 22 4-4" />
+      <path d="m2 6 4-4" />
+      <path d="m3 10 7-7" />
+      <path d="m14 21 7-7" />
+    </Icon>
+  ),
   settings: (
     <Icon>
       <circle cx="12" cy="12" r="3" />
@@ -88,6 +100,7 @@ const GROUPS: { label: string; items: Item[] }[] = [
       { view: "dashboard", label: "Dashboard", icon: ICONS.dashboard },
       { view: "tasks", label: "Tasks", icon: ICONS.tasks },
       { view: "reminders", label: "Reminders", icon: ICONS.reminders },
+      { view: "fitness", label: "Fitness", icon: ICONS.fitness },
     ],
   },
 ];

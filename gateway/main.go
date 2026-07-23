@@ -186,6 +186,16 @@ func (s *Server) BuildApp() *fiber.App {
 	// Timezone: web auto-detects + Settings picker PUTs the IANA tz.
 	api.Put("/timezone", s.proxyTimezone)
 
+	// Fitness: workouts + body metrics + stats, same JWT-uid-forcing proxy as
+	// tasks/reminders. The :id and ?type= ride inside proxyFitness's guarded path.
+	api.Get("/fitness/workouts", s.proxyFitness)
+	api.Post("/fitness/workouts", s.proxyFitness)
+	api.Delete("/fitness/workouts/:id", s.proxyFitness)
+	api.Get("/fitness/metrics", s.proxyFitness)
+	api.Post("/fitness/metrics", s.proxyFitness)
+	api.Delete("/fitness/metrics/:id", s.proxyFitness)
+	api.Get("/fitness/stats", s.proxyFitness)
+
 	// Google: connect builds the consent URL (JWT-gated, returns JSON not a 302
 	// so the JWT stays out of the browser URL); status/disconnect proxy to
 	// user-svc rooted at the JWT uid. The callback is public and mounted above.

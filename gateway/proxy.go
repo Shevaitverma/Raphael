@@ -269,6 +269,42 @@ func (s *Server) proxyTimezone(c *fiber.Ctx) error {
 	return s.forward(c, c.Method(), target, body)
 }
 
+// --- fitness proxy → user-svc (PUBLIC routes only) -------------------------
+//
+// Workouts + body metrics + stats. Rooted at /users/<uid>/fitness so the uid
+// always comes from the JWT, never a client-supplied one. The full subpath
+// after /api/fitness (workouts, workouts/<id>, metrics, metrics/<id>, stats) is
+// preserved and the query (?type=) passed through. Same TrimPrefix + traversal
+// guards as proxyProfile; the :id lands inside `rest` and is covered by the ".."
+// guard. One handler covers every fitness verb/path.
+//
+// GET/POST  /api/fitness/workouts     → …/users/<uid>/fitness/workouts
+// DELETE    /api/fitness/workouts/:id → …/users/<uid>/fitness/workouts/<id>
+// GET/POST  /api/fitness/metrics      → …/users/<uid>/fitness/metrics
+// DELETE    /api/fitness/metrics/:id  → …/users/<uid>/fitness/metrics/<id>
+// GET       /api/fitness/stats        → …/users/<uid>/fitness/stats
+func (s *Server) proxyFitness(c *fiber.Ctx) error {
+	uid := c.Locals(userIDKey).(string)
+
+	rest := strings.TrimPrefix(c.Path(), "/api/fitness")
+	if strings.Contains(rest, "..") || strings.Contains(strings.ToLower(rest), "internal") {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid path")
+	}
+	target := s.cfg.UserSvcURL + "/users/" + uid + "/fitness" + rest
+
+	// List reads carry ?type=; pass it through verbatim. Safe — uid is fixed in
+	// the path above, so no client value overrides isolation.
+	if qs := c.Request().URI().QueryString(); len(qs) > 0 {
+		target += "?" + string(qs)
+	}
+
+	var body []byte
+	if len(c.Body()) > 0 {
+		body = c.Body()
+	}
+	return s.forward(c, c.Method(), target, body)
+}
+
 // --- capabilities proxy → agent-svc ----------------------------------------
 //
 // GET /api/capabilities → agent-svc GET /capabilities?user_id=<jwt sub>. What

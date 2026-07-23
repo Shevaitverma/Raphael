@@ -5,6 +5,7 @@ import Admin from "./Admin";
 import Dashboard from "./Dashboard";
 import MemoryGraph from "./MemoryGraph";
 import Reminders from "./Reminders";
+import Fitness from "./Fitness";
 import Sidebar, { type View } from "./Sidebar";
 import Tasks from "./Tasks";
 import {
@@ -655,6 +656,8 @@ export default function Page() {
         <Tasks token={token} onFail={failed} />
       ) : view === "reminders" ? (
         <Reminders token={token} onFail={failed} />
+      ) : view === "fitness" ? (
+        <Fitness token={token} onFail={failed} />
       ) : view === "settings" ? (
         <SettingsView
           token={token}

@@ -455,6 +455,117 @@ export async function setTimezone(token: string, timezone: string): Promise<void
   if (!res.ok) throw new ApiError(await errText(res, "save timezone"), res.status);
 }
 
+// --- fitness ------------------------------------------------------------------
+// Per-user workouts + body metrics (same fetch/ApiError/authHeader shape as the
+// reminders calls above). performed_on / recorded_on are dates; the server owns
+// created_at. stats is a small server-computed rollup for the overview tiles.
+
+export type Workout = {
+  id: string;
+  category: string | null;
+  title: string;
+  duration_min: number | null;
+  calories: number | null;
+  distance_km: number | null;
+  notes: string | null;
+  performed_on: string | null;
+  created_at?: string;
+};
+
+export type Metric = {
+  id: string;
+  metric_type: string;
+  value: number;
+  unit: string | null;
+  notes: string | null;
+  recorded_on: string | null;
+  created_at?: string;
+};
+
+export type FitnessStats = {
+  workouts_this_week: number;
+  streak_days: number;
+  total_workouts: number;
+  latest_weight: { value: number; unit: string; recorded_on: string } | null;
+};
+
+export async function getWorkouts(token: string): Promise<Workout[]> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/workouts`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`list workouts failed: ${res.status}`, res.status);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.workouts ?? []);
+}
+
+export async function createWorkout(
+  token: string,
+  w: {
+    title: string;
+    category?: string;
+    duration_min?: number | null;
+    calories?: number | null;
+    distance_km?: number | null;
+    notes?: string;
+    performed_on?: string;
+  },
+): Promise<Workout> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/workouts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify(w),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "create workout"), res.status);
+  return res.json();
+}
+
+export async function deleteWorkout(token: string, id: string): Promise<void> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/workouts/${id}`, {
+    method: "DELETE",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "delete workout"), res.status);
+}
+
+export async function getMetrics(token: string, type?: string): Promise<Metric[]> {
+  const q = type ? `?type=${encodeURIComponent(type)}` : "";
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/metrics${q}`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`list metrics failed: ${res.status}`, res.status);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.metrics ?? []);
+}
+
+export async function createMetric(
+  token: string,
+  m: {
+    metric_type: string;
+    value: number;
+    unit?: string;
+    notes?: string;
+    recorded_on?: string;
+  },
+): Promise<Metric> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/metrics`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify(m),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "create metric"), res.status);
+  return res.json();
+}
+
+export async function deleteMetric(token: string, id: string): Promise<void> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/metrics/${id}`, {
+    method: "DELETE",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "delete metric"), res.status);
+}
+
+export async function getFitnessStats(token: string): Promise<FitnessStats> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/stats`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`fitness stats failed: ${res.status}`, res.status);
+  return res.json();
+}
+
 // --- profile (display-only assistant name) -----------------------------------
 
 export type Profile = { assistant_name: string; onboarded: boolean };

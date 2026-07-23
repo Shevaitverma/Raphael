@@ -28,6 +28,7 @@ import httpx
 from config import CONV_SVC_URL
 from llm import resolver
 from memory import budget, extract as extractor_mod, history, portrait as portrait_mod, retriever
+from tools import fitness as fitness_tool
 from tools import google as google_tool
 from tools import reminders as reminders_tool
 from tools import search as search_tool
@@ -369,6 +370,34 @@ def _dispatch_reminder(name: str, uid: str, args: dict) -> tuple[dict, str]:
     return {}, ""
 
 
+def _dispatch_fitness(name: str, uid: str, args: dict) -> tuple[dict, str]:
+    """Route one fitness tool call to its fitness.py handler (pure httpx, NEVER an
+    LLM call — a nested LLM deadlocks the queue drain). Returns (neutral arguments,
+    result string). Neutral args carry no field named the literal "id"; empties are
+    dropped so the persisted shape stays minimal and numerics stay numeric. The
+    turn's LLM already compiled the NL into the fields; this is pure I/O."""
+    a = args or {}
+    if name == fitness_tool.LIST_WORKOUTS["name"]:
+        return {}, fitness_tool.list_workouts(uid)
+    if name == fitness_tool.FITNESS_STATS["name"]:
+        return {}, fitness_tool.fitness_stats(uid)
+    if name == fitness_tool.LOG_WORKOUT["name"]:
+        keys = ("title", "category", "duration_min", "calories", "distance_km", "notes", "performed_on")
+        na = {k: a[k] for k in keys if a.get(k) not in (None, "")}
+        return na, fitness_tool.log_workout(
+            uid, na.get("title", ""), na.get("category"), na.get("duration_min"),
+            na.get("calories"), na.get("distance_km"), na.get("notes"), na.get("performed_on"),
+        )
+    if name == fitness_tool.LOG_METRIC["name"]:
+        keys = ("metric_type", "value", "unit", "notes", "recorded_on")
+        na = {k: a[k] for k in keys if a.get(k) not in (None, "")}
+        return na, fitness_tool.log_metric(
+            uid, na.get("metric_type", ""), na.get("value"), na.get("unit"),
+            na.get("notes"), na.get("recorded_on"),
+        )
+    return {}, ""
+
+
 def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
     """Pre-flight chat() calls before streaming; returns (system-prompt block, tool_calls).
 
@@ -402,8 +431,9 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
     # the pre-flight chat() below. A cheap keyword check, no LLM.
     tasks_on = tasks_tool.looks_task_related(state["message"])
     reminders_on = reminders_tool.looks_reminder_related(state["message"])
+    fitness_on = fitness_tool.looks_fitness_related(state["message"])
 
-    if not search_on and not cal_on and not tasks_on and not reminders_on:
+    if not search_on and not cal_on and not tasks_on and not reminders_on and not fitness_on:
         return "", []  # nothing to offer: nothing leaves the box.
 
     provider = state["provider"]
@@ -430,12 +460,15 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
         tools.extend(tasks_tool.ALL_TOOLS)
     if reminders_on:
         tools.extend(reminders_tool.ALL_TOOLS)
+    if fitness_on:
+        tools.extend(fitness_tool.ALL_TOOLS)
 
     blocks: list[str] = []
     tool_calls: list = []
     cal_done = False
     task_mutated = False  # a create/update/delete already fired this turn
     reminder_mutated = False  # a create/delete reminder already fired this turn
+    fitness_mutated = False  # a log_workout/log_metric already fired this turn
     empty_q = None  # a search that came back with zero hits and may still refine
     convo = list(messages)
     for _ in range(_MAX_PREFLIGHT_ROUNDS):
@@ -517,7 +550,24 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
                 ]
                 reminder_progressed = True
 
-        if task_mutated or reminder_mutated:
+        # --- fitness tools: reads (list_workouts, fitness_stats) just add a block;
+        # a mutating tool (log_workout/log_metric) fires AT MOST ONCE this turn, and
+        # any write ends the loop, so a confused model cannot double-log. No id to
+        # resolve, so a read needs no follow-up round.
+        for c in calls:
+            fname = c.get("name")
+            reads = (fitness_tool.LIST_WORKOUTS["name"], fitness_tool.FITNESS_STATS["name"])
+            if fname not in reads and fname not in fitness_tool.MUTATING:
+                continue
+            if fname in fitness_tool.MUTATING:
+                if fitness_mutated:
+                    continue
+                fitness_mutated = True
+            neutral_args, result = _dispatch_fitness(fname, uid, c.get("arguments") or {})
+            tool_calls.append({"name": fname, "arguments": neutral_args})
+            blocks.append(result)
+
+        if task_mutated or reminder_mutated or fitness_mutated:
             break  # a write is terminal.
 
         srch = next((c for c in calls if c.get("name") == search_tool.WEB_SEARCH["name"]), None)

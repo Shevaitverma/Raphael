@@ -72,6 +72,16 @@ func (s *server) routes() http.Handler {
 	// Timezone force-stamped onto reminders server-side; web auto-detects + Settings picker.
 	mux.HandleFunc("PUT /users/{uid}/timezone", s.putTimezone)
 
+	// Per-user fitness — public, uid-scoped like tasks/reminders; ownership
+	// re-checked in the store by user_id. Workouts + body metrics + a stats roll-up.
+	mux.HandleFunc("GET /users/{uid}/fitness/workouts", s.listWorkoutsHandler)
+	mux.HandleFunc("POST /users/{uid}/fitness/workouts", s.createWorkoutHandler)
+	mux.HandleFunc("DELETE /users/{uid}/fitness/workouts/{id}", s.deleteWorkoutHandler)
+	mux.HandleFunc("GET /users/{uid}/fitness/metrics", s.listMetricsHandler)
+	mux.HandleFunc("POST /users/{uid}/fitness/metrics", s.createMetricHandler)
+	mux.HandleFunc("DELETE /users/{uid}/fitness/metrics/{id}", s.deleteMetricHandler)
+	mux.HandleFunc("GET /users/{uid}/fitness/stats", s.fitnessStatsHandler)
+
 	// Google account connection — public routes never return a token (status is
 	// booleans + display email + scope names only).
 	mux.HandleFunc("GET /users/{uid}/google/status", s.googleStatus)
