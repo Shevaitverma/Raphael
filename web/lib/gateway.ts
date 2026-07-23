@@ -11,6 +11,10 @@ export type User = {
   // Set by google-login and dev-login. Admins see the Admin area; the server
   // re-checks role on every privileged mutation, so this claim is UI-only.
   role?: "admin" | "member";
+  // Only present in the admin listUsers() unified list: "active" = a real users
+  // row (with last_active), "pending" = an allowed_emails invite not signed up yet.
+  status?: "active" | "pending";
+  last_active?: string | null;
 };
 
 export type DevLoginResponse = {

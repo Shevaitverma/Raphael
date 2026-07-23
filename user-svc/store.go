@@ -789,33 +789,63 @@ func (s *store) allowlistRemove(ctx context.Context, email string) error {
 // adminUser is the User Management row: identity + role, no secrets. google_connected
 // reports whether this account has ever completed a Google sign-in (google_sub set).
 type adminUser struct {
-	ID              string    `json:"id"`
-	Email           string    `json:"email"`
-	Name            string    `json:"name"`
-	Role            string    `json:"role"`
-	GoogleConnected bool      `json:"google_connected"`
-	CreatedAt       time.Time `json:"created_at"`
+	ID              string     `json:"id"`
+	Email           string     `json:"email"`
+	Name            string     `json:"name"`
+	Role            string     `json:"role"`
+	GoogleConnected bool       `json:"google_connected"`
+	CreatedAt       time.Time  `json:"created_at"`
+	Status          string     `json:"status"`               // "active" (real users row) | "pending" (invited, not signed up)
+	LastActive      *time.Time `json:"last_active,omitempty"` // last activity stamp; nil for pending / never-active
 }
 
-// usersList returns every user for the admin User Management view.
+// usersList returns the UNIFIED admin view: every real user (status="active",
+// with last_active), plus allowlisted emails that have no user yet
+// (status="pending"). Cross-user read — callers gate it behind requireAdmin.
 func (s *store) usersList(ctx context.Context) ([]adminUser, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, email, name, role, google_sub IS NOT NULL, created_at
+		SELECT id, email, name, role, google_sub IS NOT NULL, created_at, last_active
 		FROM users
 		ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []adminUser{}
+	active := []adminUser{}
 	for rows.Next() {
 		var u adminUser
-		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.GoogleConnected, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.GoogleConnected, &u.CreatedAt, &u.LastActive); err != nil {
 			return nil, err
 		}
-		out = append(out, u)
+		u.Status = "active"
+		active = append(active, u)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	pending, err := s.allowlistList(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return mergePending(active, pending), nil
+}
+
+// mergePending appends allowlisted emails that have no matching active user
+// (case-insensitive) as status="pending" rows. An active user is never
+// double-listed even if their email is also on the allowlist.
+func mergePending(active []adminUser, pending []allowlistEntry) []adminUser {
+	seen := make(map[string]bool, len(active))
+	for _, u := range active {
+		seen[strings.ToLower(u.Email)] = true
+	}
+	out := active
+	for _, e := range pending {
+		if seen[strings.ToLower(e.Email)] {
+			continue
+		}
+		out = append(out, adminUser{Email: e.Email, Status: "pending", CreatedAt: e.CreatedAt})
+	}
+	return out
 }
 
 // userSetRole promotes/demotes a user. The caller validates the role value. The

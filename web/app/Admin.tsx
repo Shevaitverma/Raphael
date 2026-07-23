@@ -13,14 +13,12 @@ import {
   addSystemProvider,
   activateSystemProvider,
   clearSystemLifeboat,
-  listAllowedEmails,
   listSystemProviders,
   listUsers,
   removeAllowedEmail,
   removeUser,
   setSystemLifeboat,
   setUserRole,
-  type AllowedEmail,
   type Credential,
   type NewCredential,
   type User,
@@ -73,7 +71,6 @@ export default function Admin({
             provider everyone inherits. Members configure none of this.
           </p>
         </div>
-        <AllowlistSection token={token} onFail={onFail} />
         <UsersSection token={token} onFail={onFail} />
         <SystemProvidersSection token={token} onFail={onFail} />
       </div>
@@ -81,26 +78,45 @@ export default function Admin({
   );
 }
 
-// --- allowlist ---------------------------------------------------------------
-// Adding an email is the invite: it is what permits that person to sign in with
-// Google. No mail is sent. Removing it revokes future sign-in (existing sessions
-// are unaffected — that is what removing the user is for).
+// --- users -------------------------------------------------------------------
+// ONE list. Active users (a real users row, status !== 'pending') get role +
+// last-active + Promote/Demote/Remove. Pending invites (an allowed_emails row
+// with no user yet, status === 'pending') get an "invited" tag + a Remove that
+// revokes the invite. Adding an email is the invite itself — no mail is sent; it
+// is what permits that person to sign in with Google. The server re-checks
+// requireAdmin + role on every mutation, so this UI's disabling is convenience.
 
-function AllowlistSection({
+// Relative "last active" label from an ISO timestamp. Null/absent (a pending
+// invite, or an active user never stamped) reads as "—". Exported so the bucket
+// boundaries are checkable in isolation.
+export function lastActiveLabel(iso?: string | null, now: number = Date.now()): string {
+  if (!iso) return "—";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "—";
+  const s = Math.max(0, Math.floor((now - then) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `active ${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `active ${h}h ago`;
+  return `active ${Math.floor(h / 24)}d ago`;
+}
+
+function UsersSection({
   token,
   onFail,
 }: {
   token: string;
   onFail: (e: unknown) => void;
 }) {
-  const [emails, setEmails] = useState<AllowedEmail[] | null>(null);
+  const [users, setUsers] = useState<User[] | null>(null);
   const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null); // email currently mutating
+  const [busy, setBusy] = useState<string | null>(null); // row key currently mutating
 
   const load = useCallback(async () => {
     try {
-      setEmails(await listAllowedEmails(token));
+      setUsers(await listUsers(token));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       onFail(e);
@@ -136,11 +152,12 @@ function AllowlistSection({
   return (
     <section className="flex flex-col gap-3">
       <div>
-        <h2 className="text-lg font-semibold text-on-surface">Allowed emails</h2>
+        <h2 className="text-lg font-semibold text-on-surface">Users</h2>
         <p className="mt-1 text-sm text-muted">
-          An email listed here may sign in with Google and becomes a{" "}
-          <span className="font-medium text-on-surface">member</span>. Anyone not
-          listed is rejected at the callback.
+          Everyone with access. Adding an email invites that person to sign in with
+          Google; once they do they become a{" "}
+          <span className="font-medium text-on-surface">member</span> you can
+          promote or remove.
         </p>
       </div>
 
@@ -159,7 +176,7 @@ function AllowlistSection({
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && add()}
-          placeholder="person@example.com"
+          placeholder="invite person@example.com"
           className="flex-1 rounded-md border border-edge bg-raised px-3 py-1.5 text-sm text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent"
         />
         <button
@@ -167,98 +184,45 @@ function AllowlistSection({
           disabled={busy === "__add__" || !email.trim()}
           className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
         >
-          {busy === "__add__" ? "Adding…" : "Add"}
+          {busy === "__add__" ? "Inviting…" : "Invite"}
         </button>
       </div>
-
-      <div className="flex flex-col gap-1.5">
-        {emails === null && <p className="text-sm text-faint">Loading…</p>}
-        {emails?.length === 0 && (
-          <p className="text-sm text-faint">No emails allowlisted yet.</p>
-        )}
-        {emails?.map((a) => (
-          <div
-            key={a.email}
-            className="flex items-center justify-between rounded-lg border border-edge bg-panel px-3 py-2"
-          >
-            <span className="truncate text-sm text-on-surface">{a.email}</span>
-            <button
-              disabled={busy === a.email}
-              onClick={() => void run(a.email, () => removeAllowedEmail(token, a.email))}
-              className="shrink-0 rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-error disabled:opacity-40"
-            >
-              Remove
-            </button>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-// --- users -------------------------------------------------------------------
-// Promote/demote and remove. The last admin and the protected sentinel accounts
-// are frozen (see userGuards); the server re-checks all of this on the mutation.
-
-function UsersSection({
-  token,
-  onFail,
-}: {
-  token: string;
-  onFail: (e: unknown) => void;
-}) {
-  const [users, setUsers] = useState<User[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null); // user id currently mutating
-
-  const load = useCallback(async () => {
-    try {
-      setUsers(await listUsers(token));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      onFail(e);
-    }
-  }, [token, onFail]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  async function run(id: string, fn: () => Promise<unknown>) {
-    setBusy(id);
-    setError(null);
-    try {
-      await fn();
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  return (
-    <section className="flex flex-col gap-3">
-      <div>
-        <h2 className="text-lg font-semibold text-on-surface">Users</h2>
-        <p className="mt-1 text-sm text-muted">
-          Everyone who has signed in. Promote a member to admin, or remove them.
-        </p>
-      </div>
-
-      {error && (
-        <div
-          role="alert"
-          className="border-l-2 border-error bg-error/10 px-3 py-2 text-sm text-error"
-        >
-          {error}
-        </div>
-      )}
 
       <div className="flex flex-col gap-1.5">
         {users === null && <p className="text-sm text-faint">Loading…</p>}
         {users?.length === 0 && <p className="text-sm text-faint">No users yet.</p>}
         {users?.map((u) => {
+          // Pending = an allowlisted email with no user row yet. Its row key is
+          // the email (a pending row has no meaningful id); active rows key on id.
+          const pending = u.status === "pending";
+          if (pending) {
+            const key = u.email ?? u.id;
+            return (
+              <div
+                key={key}
+                className="flex items-center justify-between rounded-lg border border-dashed border-edge bg-panel px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <span className="truncate text-sm text-on-surface">
+                    {u.email ?? u.id}
+                  </span>
+                  <div className="text-xs text-faint">
+                    Invited — hasn&apos;t signed up yet
+                  </div>
+                </div>
+                <button
+                  disabled={busy === key}
+                  onClick={() =>
+                    void run(key, () => removeAllowedEmail(token, u.email ?? ""))
+                  }
+                  className="shrink-0 rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-error disabled:opacity-40"
+                >
+                  Remove
+                </button>
+              </div>
+            );
+          }
+
           const g = userGuards(users, u);
           const isAdmin = u.role === "admin";
           return (
@@ -281,7 +245,10 @@ function UsersSection({
                     {u.role ?? "member"}
                   </span>
                 </div>
-                {g.reason && <div className="text-xs text-faint">{g.reason}</div>}
+                <div className="text-xs text-faint">
+                  {lastActiveLabel(u.last_active)}
+                  {g.reason ? ` · ${g.reason}` : ""}
+                </div>
               </div>
 
               <div className="flex shrink-0 items-center gap-2">

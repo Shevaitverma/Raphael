@@ -39,3 +39,23 @@ func TestValidRole(t *testing.T) {
 		}
 	}
 }
+
+// mergePending: pending invites surface once; an active user is never
+// double-listed even when their email is also on the allowlist (any case).
+func TestMergePending(t *testing.T) {
+	active := []adminUser{{Email: "Alice@x.com", Status: "active"}}
+	pending := []allowlistEntry{
+		{Email: "bob@x.com"},   // no user -> should surface as pending
+		{Email: "ALICE@x.com"}, // matches active (case-insensitive) -> must NOT be added
+	}
+	out := mergePending(active, pending)
+	if len(out) != 2 {
+		t.Fatalf("len(out) = %d; want 2 (1 active + 1 pending)", len(out))
+	}
+	if out[0].Email != "Alice@x.com" || out[0].Status != "active" {
+		t.Errorf("out[0] = %+v; want active Alice", out[0])
+	}
+	if out[1].Email != "bob@x.com" || out[1].Status != "pending" {
+		t.Errorf("out[1] = %+v; want pending bob", out[1])
+	}
+}

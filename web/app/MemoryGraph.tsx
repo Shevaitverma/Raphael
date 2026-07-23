@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   getMemoryGraph,
   type GraphData,
@@ -11,19 +11,125 @@ import {
 const fmt = (n: number) => n.toLocaleString();
 const pct = (c: number) => `${Math.round(c * 100)}%`;
 
-// Fixed canvas. The data is a user-centric STAR (an identity node with facts
-// radiating out), so a deterministic radial layout beats a physics engine and
-// needs zero dependencies.
+// Fixed viewBox; pan/zoom is a transform on the inner <g>, so the coordinate
+// system the sim runs in never changes.
 const VB_W = 820;
 const VB_H = 560;
 const CX = VB_W / 2;
 const CY = VB_H / 2;
-// Radius per BFS ring (0 = center). Chosen so ring 2 + its node + label stay
-// inside the canvas and inside the decorative outer circle at RING_OUTER.
-const RINGS = [0, 120, 210];
-const RING_OUTER = 250;
+const CANVAS = "#0b0b12";
 
-type Placed = GraphNode & { x: number; y: number; r: number };
+// Hand-rolled force sim (no dependency; d3-force would pull 4 transitive
+// packages for dozens of nodes). O(n²) repulsion + edge springs + gentle
+// centering, integrated with damping. Identity node is pinned at center so the
+// user stays put.
+const REPULSION = 6000;
+const SPRING_LEN = 90;
+const SPRING_K = 0.06;
+const CENTER_K = 0.02;
+const DAMPING = 0.9;
+
+type Sim = GraphNode & {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  fx: number; // force accumulator
+  fy: number;
+  r: number;
+  pinned: boolean; // identity: held at center
+  dragging: boolean;
+};
+
+function seed(graph: GraphData): Sim[] {
+  const rootId =
+    graph.nodes.find((n) => n.kind === "identity")?.id ?? graph.nodes[0]?.id;
+  const n = Math.max(1, graph.nodes.length);
+  return graph.nodes.map((node, i) => {
+    const identity = node.id === rootId;
+    const a = (i / n) * Math.PI * 2;
+    return {
+      ...node,
+      x: identity ? CX : CX + Math.cos(a) * 150 + (Math.random() - 0.5) * 40,
+      y: identity ? CY : CY + Math.sin(a) * 150 + (Math.random() - 0.5) * 40,
+      vx: 0,
+      vy: 0,
+      fx: 0,
+      fy: 0,
+      r: radiusFor(node),
+      pinned: identity,
+      dragging: false,
+    };
+  });
+}
+
+// One integration step. alpha scales the applied force (d3-style cooling).
+// Returns total kinetic energy so the loop knows when to freeze.
+function stepSim(sim: Sim[], edges: GraphEdge[], alpha: number): number {
+  const byId = new Map(sim.map((s) => [s.id, s]));
+  for (const s of sim) {
+    s.fx = 0;
+    s.fy = 0;
+  }
+  // repulsion (every pair)
+  for (let i = 0; i < sim.length; i++) {
+    for (let j = i + 1; j < sim.length; j++) {
+      const a = sim[i];
+      const b = sim[j];
+      let dx = a.x - b.x;
+      let dy = a.y - b.y;
+      let d2 = dx * dx + dy * dy;
+      if (d2 < 0.01) {
+        d2 = 0.01;
+        dx = 0.1;
+        dy = 0;
+      }
+      const d = Math.sqrt(d2);
+      const f = REPULSION / d2;
+      const ux = dx / d;
+      const uy = dy / d;
+      a.fx += ux * f;
+      a.fy += uy * f;
+      b.fx -= ux * f;
+      b.fy -= uy * f;
+    }
+  }
+  // edge springs
+  for (const e of edges) {
+    const a = byId.get(e.source);
+    const b = byId.get(e.target);
+    if (!a || !b) continue;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+    const f = (d - SPRING_LEN) * SPRING_K;
+    const ux = dx / d;
+    const uy = dy / d;
+    a.fx += ux * f;
+    a.fy += uy * f;
+    b.fx -= ux * f;
+    b.fy -= uy * f;
+  }
+  // centering + integrate
+  let energy = 0;
+  for (const s of sim) {
+    s.fx += (CX - s.x) * CENTER_K;
+    s.fy += (CY - s.y) * CENTER_K;
+    if (s.pinned || s.dragging) {
+      s.vx = 0;
+      s.vy = 0;
+      continue;
+    }
+    s.vx = (s.vx + s.fx * alpha) * DAMPING;
+    s.vy = (s.vy + s.fy * alpha) * DAMPING;
+    s.x += s.vx;
+    s.y += s.vy;
+    energy += s.vx * s.vx + s.vy * s.vy;
+  }
+  return energy;
+}
+
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
 export default function MemoryGraph({
   token,
@@ -67,8 +173,6 @@ export default function MemoryGraph({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, onFail]);
 
-  const placed = useMemo(() => (graph ? layout(graph) : new Map<string, Placed>()), [graph]);
-
   // Adjacency for neighbor-highlighting on hover/select.
   const neighbors = useMemo(() => {
     const m = new Map<string, Set<string>>();
@@ -81,10 +185,9 @@ export default function MemoryGraph({
     return m;
   }, [graph]);
 
-  // Honour prefers-reduced-motion: when reduced, we render the graph fully
-  // static (no SMIL rotation, no pulse) — the decorative motion is the only
-  // thing gated; data and interactions are untouched.
-  const [motion, setMotion] = useState(false);
+  // Honour prefers-reduced-motion: when reduced, the sim is run to convergence
+  // once (synchronously) and never animated — no RAF, no in-flight motion.
+  const [motion, setMotion] = useState(true);
   useEffect(() => {
     const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
     const apply = () => setMotion(!mq.matches);
@@ -92,6 +195,123 @@ export default function MemoryGraph({
     mq.addEventListener("change", apply);
     return () => mq.removeEventListener("change", apply);
   }, []);
+
+  // --- force sim + interaction plumbing --------------------------------------
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const simRef = useRef<Sim[]>([]);
+  const alphaRef = useRef(0);
+  const rafRef = useRef<number | null>(null);
+  const gestureRef = useRef<
+    | { mode: "node"; id: string }
+    | { mode: "pan"; startX: number; startY: number; ox: number; oy: number }
+    | null
+  >(null);
+  const [view, setView] = useState({ x: 0, y: 0, k: 1 });
+  const [, tick] = useReducer((c: number) => c + 1, 0);
+
+  const reheat = useCallback(() => {
+    if (!motion) return;
+    alphaRef.current = Math.max(alphaRef.current, 0.6);
+    if (rafRef.current != null) return;
+    const loop = () => {
+      stepSim(simRef.current, graph?.edges ?? [], alphaRef.current);
+      alphaRef.current *= 0.985;
+      tick();
+      if (alphaRef.current > 0.02 || gestureRef.current?.mode === "node") {
+        rafRef.current = requestAnimationFrame(loop);
+      } else {
+        rafRef.current = null;
+      }
+    };
+    rafRef.current = requestAnimationFrame(loop);
+  }, [motion, graph]);
+
+  // (Re)seed and settle whenever the data or the motion preference changes.
+  useEffect(() => {
+    if (!graph || graph.nodes.length === 0) return;
+    simRef.current = seed(graph);
+    if (!motion) {
+      for (let i = 0; i < 300; i++) stepSim(simRef.current, graph.edges, 0.4);
+      tick();
+      return;
+    }
+    reheat();
+    return () => {
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [graph, motion]);
+
+  // clientX/Y -> viewBox coords (no rotation/skew, so a/d + e/f suffice).
+  const toVB = useCallback((clientX: number, clientY: number) => {
+    const svg = svgRef.current;
+    const ctm = svg?.getScreenCTM();
+    if (!ctm) return { x: 0, y: 0 };
+    return { x: (clientX - ctm.e) / ctm.a, y: (clientY - ctm.f) / ctm.d };
+  }, []);
+
+  // Non-passive wheel so preventDefault actually blocks page scroll. Zoom keeps
+  // the point under the cursor fixed.
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const h = (e: WheelEvent) => {
+      e.preventDefault();
+      const p = toVB(e.clientX, e.clientY);
+      setView((v) => {
+        const k = clamp(v.k * (e.deltaY < 0 ? 1.12 : 0.9), 0.35, 3);
+        const gx = (p.x - v.x) / v.k;
+        const gy = (p.y - v.y) / v.k;
+        return { k, x: p.x - gx * k, y: p.y - gy * k };
+      });
+    };
+    el.addEventListener("wheel", h, { passive: false });
+    return () => el.removeEventListener("wheel", h);
+  }, [toVB]);
+
+  const onDownNode = (e: React.PointerEvent, id: string) => {
+    e.stopPropagation();
+    svgRef.current?.setPointerCapture(e.pointerId);
+    const s = simRef.current.find((s) => s.id === id);
+    if (s) s.dragging = true;
+    gestureRef.current = { mode: "node", id };
+    reheat();
+  };
+
+  const onDownBg = (e: React.PointerEvent) => {
+    svgRef.current?.setPointerCapture(e.pointerId);
+    const p = toVB(e.clientX, e.clientY);
+    gestureRef.current = { mode: "pan", startX: p.x, startY: p.y, ox: view.x, oy: view.y };
+  };
+
+  const onMove = (e: React.PointerEvent) => {
+    const g = gestureRef.current;
+    if (!g) return;
+    const p = toVB(e.clientX, e.clientY);
+    if (g.mode === "node") {
+      const s = simRef.current.find((s) => s.id === g.id);
+      if (s) {
+        s.x = (p.x - view.x) / view.k;
+        s.y = (p.y - view.y) / view.k;
+      }
+      if (motion) reheat();
+      else tick();
+    } else {
+      setView((v) => ({ ...v, x: g.ox + (p.x - g.startX), y: g.oy + (p.y - g.startY) }));
+    }
+  };
+
+  const onUp = (e: React.PointerEvent) => {
+    const g = gestureRef.current;
+    if (g?.mode === "node") {
+      const s = simRef.current.find((s) => s.id === g.id);
+      if (s) s.dragging = false;
+      reheat();
+    }
+    gestureRef.current = null;
+    svgRef.current?.releasePointerCapture?.(e.pointerId);
+  };
 
   if (error) {
     return (
@@ -119,6 +339,10 @@ export default function MemoryGraph({
   const nodeById = new Map(graph.nodes.map((n) => [n.id, n]));
   const empty = graph.nodes.length === 0;
   const activeId = hovered ?? selected;
+  const pos = new Map(simRef.current.map((s) => [s.id, s]));
+  // Showing every edge label at once is noise past a couple dozen edges; below
+  // that show them all, above it show them only for the active node.
+  const showAllLabels = graph.edges.length <= 22;
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
@@ -171,29 +395,31 @@ export default function MemoryGraph({
           </div>
         ) : mode === "graph" ? (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_18rem]">
-            <div className="overflow-x-auto rounded-xl border border-edge bg-[#0b0b12]">
+            <div
+              className="relative overflow-hidden rounded-xl border border-edge"
+              style={{ background: CANVAS }}
+            >
               <svg
+                ref={svgRef}
                 viewBox={`0 0 ${VB_W} ${VB_H}`}
                 role="img"
                 aria-label={`knowledge graph, ${fmt(graph.edges.length)} facts`}
-                className="w-full select-none"
+                className="w-full touch-none select-none"
+                style={{ cursor: gestureRef.current?.mode === "pan" ? "grabbing" : "grab" }}
+                onPointerDown={onDownBg}
+                onPointerMove={onMove}
+                onPointerUp={onUp}
+                onPointerCancel={onUp}
               >
                 <defs>
-                  {/* Celestial violet field behind everything. */}
-                  <radialGradient id="mg-field" cx="50%" cy="50%" r="55%">
-                    <stop offset="0%" stopColor="#5b4bd6" stopOpacity="0.22" />
-                    <stop offset="55%" stopColor="#3a2f8a" stopOpacity="0.08" />
-                    <stop offset="100%" stopColor="#3a2f8a" stopOpacity="0" />
-                  </radialGradient>
-                  {/* Core aura of the identity node. */}
+                  {/* Core aura of the identity node + lit entities. */}
                   <radialGradient id="mg-core" cx="50%" cy="50%" r="50%">
-                    <stop offset="0%" stopColor="var(--color-accent-strong)" stopOpacity="0.95" />
-                    <stop offset="45%" stopColor="var(--color-accent)" stopOpacity="0.55" />
+                    <stop offset="0%" stopColor="var(--color-accent-strong)" stopOpacity="0.9" />
+                    <stop offset="45%" stopColor="var(--color-accent)" stopOpacity="0.5" />
                     <stop offset="100%" stopColor="var(--color-accent)" stopOpacity="0" />
                   </radialGradient>
-                  {/* Soft halo for glowing strokes/nodes. */}
                   <filter id="mg-glow" x="-120%" y="-120%" width="340%" height="340%">
-                    <feGaussianBlur stdDeviation="3.2" result="b" />
+                    <feGaussianBlur stdDeviation="2.6" result="b" />
                     <feMerge>
                       <feMergeNode in="b" />
                       <feMergeNode in="SourceGraphic" />
@@ -201,171 +427,119 @@ export default function MemoryGraph({
                   </filter>
                 </defs>
 
-                {/* ---- decorative sage's circle (purely ornamental) ---- */}
-                <g aria-hidden="true">
-                  <circle cx={CX} cy={CY} r={RING_OUTER + 10} fill="url(#mg-field)" />
+                {/* Full-canvas hit area so a pointerdown on empty space pans. */}
+                <rect x={0} y={0} width={VB_W} height={VB_H} fill="transparent" />
 
-                  {/* Concentric magic-circle rings. */}
-                  {[RINGS[1], RINGS[2], RING_OUTER].map((r, i) => (
-                    <circle
-                      key={r}
-                      cx={CX}
-                      cy={CY}
-                      r={r}
-                      fill="none"
-                      stroke="var(--color-accent)"
-                      strokeOpacity={0.12 + i * 0.04}
-                      strokeWidth={i === 2 ? 1 : 0.6}
-                      strokeDasharray={i === 1 ? "2 8" : undefined}
-                    />
-                  ))}
-
-                  {/* Slowly rotating tick ring — the "analytical" dial. */}
-                  <g>
-                    {motion && (
-                      <animateTransform
-                        attributeName="transform"
-                        type="rotate"
-                        from={`0 ${CX} ${CY}`}
-                        to={`360 ${CX} ${CY}`}
-                        dur="90s"
-                        repeatCount="indefinite"
+                <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
+                  {/* ---- edges ---- */}
+                  {graph.edges.map((e, i) => {
+                    const a = pos.get(e.source);
+                    const b = pos.get(e.target);
+                    if (!a || !b) return null;
+                    const active = activeId === e.source || activeId === e.target;
+                    const dim = activeId != null && !active;
+                    return (
+                      <line
+                        key={i}
+                        x1={a.x}
+                        y1={a.y}
+                        x2={b.x}
+                        y2={b.y}
+                        stroke="var(--color-accent)"
+                        strokeOpacity={active ? 0.9 : dim ? 0.06 : 0.2}
+                        strokeWidth={strokeFor(e.times_seen)}
+                        style={{ transition: "stroke-opacity 200ms ease" }}
                       />
-                    )}
-                    {Array.from({ length: 60 }).map((_, i) => {
-                      const a = (i / 60) * Math.PI * 2;
-                      const major = i % 5 === 0;
-                      const r1 = RING_OUTER;
-                      const r2 = RING_OUTER - (major ? 12 : 6);
-                      return (
-                        <line
-                          key={i}
-                          x1={CX + Math.cos(a) * r1}
-                          y1={CY + Math.sin(a) * r1}
-                          x2={CX + Math.cos(a) * r2}
-                          y2={CY + Math.sin(a) * r2}
-                          stroke="var(--color-accent)"
-                          strokeOpacity={major ? 0.4 : 0.18}
-                          strokeWidth={major ? 1.1 : 0.6}
-                        />
-                      );
-                    })}
-                  </g>
+                    );
+                  })}
 
-                  {/* Counter-rotating dashed inner ring, for gentle depth. */}
-                  <g>
-                    {motion && (
-                      <animateTransform
-                        attributeName="transform"
-                        type="rotate"
-                        from={`360 ${CX} ${CY}`}
-                        to={`0 ${CX} ${CY}`}
-                        dur="70s"
-                        repeatCount="indefinite"
-                      />
-                    )}
-                    <circle
-                      cx={CX}
-                      cy={CY}
-                      r={RINGS[1] - 14}
-                      fill="none"
-                      stroke="var(--color-accent)"
-                      strokeOpacity={0.18}
-                      strokeWidth={0.8}
-                      strokeDasharray="1 10"
-                    />
-                  </g>
-                </g>
-
-                {/* ---- edges (glowing filaments) ---- */}
-                {graph.edges.map((e, i) => {
-                  const a = placed.get(e.source);
-                  const b = placed.get(e.target);
-                  if (!a || !b) return null;
-                  const active = activeId === e.source || activeId === e.target;
-                  const dim = activeId != null && !active;
-                  return (
-                    <line
-                      key={i}
-                      x1={a.x}
-                      y1={a.y}
-                      x2={b.x}
-                      y2={b.y}
-                      stroke="var(--color-accent)"
-                      strokeOpacity={active ? 0.95 : dim ? 0.06 : 0.22}
-                      strokeWidth={strokeFor(e.times_seen)}
-                      filter={active ? "url(#mg-glow)" : undefined}
-                      style={{ transition: "stroke-opacity 200ms ease" }}
-                    />
-                  );
-                })}
-
-                {/* ---- nodes ---- */}
-                {[...placed.values()].map((n) => {
-                  const isActive = activeId === n.id;
-                  const isNeighbor = activeId != null && (neighbors.get(activeId)?.has(n.id) ?? false);
-                  const dim = activeId != null && !isActive && !isNeighbor;
-                  const lit = isActive || isNeighbor || selected === n.id;
-                  const identity = n.kind === "identity";
-                  return (
-                    <g
-                      key={n.id}
-                      className="cursor-pointer"
-                      onMouseEnter={() => setHovered(n.id)}
-                      onMouseLeave={() => setHovered(null)}
-                      onClick={() => setSelected(n.id)}
-                      style={{ transition: "opacity 200ms ease" }}
-                      opacity={dim ? 0.35 : 1}
-                    >
-                      {/* Aura: pulsing for identity, on-demand for lit entities. */}
-                      {(identity || lit) && (
-                        <circle
-                          cx={n.x}
-                          cy={n.y}
-                          r={n.r * (identity ? 2.6 : 1.9)}
-                          fill="url(#mg-core)"
-                          opacity={identity ? 0.9 : 0.6}
-                        >
-                          {identity && motion && (
-                            <animate
-                              attributeName="opacity"
-                              values="0.55;0.95;0.55"
-                              dur="4s"
-                              repeatCount="indefinite"
-                            />
-                          )}
-                        </circle>
-                      )}
-                      <circle
-                        cx={n.x}
-                        cy={n.y}
-                        r={n.r}
-                        fill={identity ? "var(--color-accent)" : "var(--color-raised)"}
-                        stroke={
-                          identity
-                            ? "var(--color-accent-strong)"
-                            : lit
-                              ? "var(--color-accent)"
-                              : "var(--color-edge)"
-                        }
-                        strokeWidth={identity ? 2.5 : lit ? 2 : 1.25}
-                        filter={lit ? "url(#mg-glow)" : undefined}
-                        style={{ transition: "stroke 200ms ease" }}
-                      />
+                  {/* ---- edge labels ---- */}
+                  {graph.edges.map((e, i) => {
+                    const a = pos.get(e.source);
+                    const b = pos.get(e.target);
+                    if (!a || !b) return null;
+                    const active = activeId === e.source || activeId === e.target;
+                    if (!active && !showAllLabels) return null;
+                    return (
                       <text
-                        x={n.x}
-                        y={n.y + n.r + 13}
+                        key={i}
+                        x={(a.x + b.x) / 2}
+                        y={(a.y + b.y) / 2}
                         textAnchor="middle"
-                        fontSize="11"
-                        fill={lit || identity ? "var(--color-on-surface)" : "var(--color-muted)"}
-                        style={{ transition: "fill 200ms ease" }}
+                        fontSize={9}
+                        className="pointer-events-none"
+                        fill={active ? "var(--color-on-surface)" : "var(--color-faint)"}
+                        opacity={active ? 1 : 0.7}
+                        style={{ paintOrder: "stroke", stroke: CANVAS, strokeWidth: 3 }}
                       >
-                        {truncate(n.label, 18)}
+                        {e.label}
                       </text>
-                    </g>
-                  );
-                })}
+                    );
+                  })}
+
+                  {/* ---- nodes ---- */}
+                  {simRef.current.map((s) => {
+                    const isActive = activeId === s.id;
+                    const isNeighbor =
+                      activeId != null && (neighbors.get(activeId)?.has(s.id) ?? false);
+                    const dim = activeId != null && !isActive && !isNeighbor;
+                    const lit = isActive || isNeighbor || selected === s.id;
+                    const identity = s.kind === "identity";
+                    return (
+                      <g
+                        key={s.id}
+                        className="cursor-pointer"
+                        onPointerDown={(e) => onDownNode(e, s.id)}
+                        onPointerEnter={() => setHovered(s.id)}
+                        onPointerLeave={() => setHovered(null)}
+                        onClick={() => setSelected(s.id)}
+                        opacity={dim ? 0.35 : 1}
+                        style={{ transition: "opacity 200ms ease" }}
+                      >
+                        {(identity || lit) && (
+                          <circle
+                            cx={s.x}
+                            cy={s.y}
+                            r={s.r * (identity ? 2.4 : 1.8)}
+                            fill="url(#mg-core)"
+                            opacity={identity ? 0.8 : 0.5}
+                          />
+                        )}
+                        <circle
+                          cx={s.x}
+                          cy={s.y}
+                          r={s.r}
+                          fill={identity ? "var(--color-accent)" : "var(--color-raised)"}
+                          stroke={
+                            identity
+                              ? "var(--color-accent-strong)"
+                              : lit
+                                ? "var(--color-accent)"
+                                : "var(--color-edge)"
+                          }
+                          strokeWidth={identity ? 2.5 : lit ? 2 : 1.25}
+                          filter={lit ? "url(#mg-glow)" : undefined}
+                          style={{ transition: "stroke 200ms ease" }}
+                        />
+                        <text
+                          x={s.x}
+                          y={s.y + s.r + 12}
+                          textAnchor="middle"
+                          fontSize={11}
+                          className="pointer-events-none"
+                          fill={lit || identity ? "var(--color-on-surface)" : "var(--color-muted)"}
+                          style={{ paintOrder: "stroke", stroke: CANVAS, strokeWidth: 3 }}
+                        >
+                          {truncate(s.label, 18)}
+                        </text>
+                      </g>
+                    );
+                  })}
+                </g>
               </svg>
+              <div className="pointer-events-none absolute bottom-2 right-3 text-[10px] text-faint">
+                drag a node · scroll to zoom · drag canvas to pan
+              </div>
             </div>
 
             <InspectPanel
@@ -506,66 +680,6 @@ function ListView({
   );
 }
 
-// --- radial layout -----------------------------------------------------------
-// BFS ring levels from the identity node; place each ring evenly by angle.
-function layout(graph: GraphData): Map<string, Placed> {
-  const out = new Map<string, Placed>();
-  if (graph.nodes.length === 0) return out;
-
-  const adj = new Map<string, string[]>();
-  for (const n of graph.nodes) adj.set(n.id, []);
-  for (const e of graph.edges) {
-    adj.get(e.source)?.push(e.target);
-    adj.get(e.target)?.push(e.source);
-  }
-
-  const root =
-    graph.nodes.find((n) => n.kind === "identity")?.id ?? graph.nodes[0].id;
-
-  // BFS to assign a ring (capped at 2 — anything deeper rides on ring 2).
-  const ring = new Map<string, number>([[root, 0]]);
-  const queue = [root];
-  while (queue.length) {
-    const id = queue.shift()!;
-    const level = ring.get(id)!;
-    for (const nb of adj.get(id) ?? []) {
-      if (!ring.has(nb)) {
-        ring.set(nb, Math.min(level + 1, 2));
-        queue.push(nb);
-      }
-    }
-  }
-  // Disconnected nodes (no path to root) land on the outer ring.
-  for (const n of graph.nodes) if (!ring.has(n.id)) ring.set(n.id, 2);
-
-  const byRing = new Map<number, GraphNode[]>();
-  for (const n of graph.nodes) {
-    const r = ring.get(n.id)!;
-    (byRing.get(r) ?? byRing.set(r, []).get(r)!).push(n);
-  }
-
-  for (const [r, nodes] of byRing) {
-    if (r === 0) {
-      const n = nodes[0];
-      out.set(n.id, { ...n, x: CX, y: CY, r: radiusFor(n) });
-      continue;
-    }
-    const radius = RINGS[Math.min(r, RINGS.length - 1)];
-    // Offset odd rings by half a step so ring 2 nodes sit between ring 1 spokes.
-    const offset = r % 2 === 0 ? 0 : Math.PI / nodes.length;
-    nodes.forEach((n, i) => {
-      const angle = (i / nodes.length) * Math.PI * 2 - Math.PI / 2 + offset;
-      out.set(n.id, {
-        ...n,
-        x: CX + Math.cos(angle) * radius,
-        y: CY + Math.sin(angle) * radius,
-        r: radiusFor(n),
-      });
-    });
-  }
-  return out;
-}
-
 function radiusFor(n: GraphNode): number {
   if (n.kind === "identity") return 26;
   return Math.min(22, 8 + Math.sqrt(Math.max(0, n.degree)) * 3);
@@ -583,3 +697,41 @@ function shortDate(iso: string): string {
   const d = new Date(iso);
   return isNaN(d.getTime()) ? iso : d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
+
+// --- self-check (runs in dev) ------------------------------------------------
+// If the force step breaks, these fail loudly in the console. Invariants:
+// overlapping nodes must repel apart, a connected pair must relax toward the
+// spring rest length, and the sim must settle to ~0 energy.
+function verifySim(): void {
+  const mk = (id: string, kind: GraphNode["kind"], x: number, y: number): Sim => ({
+    id,
+    label: id,
+    kind,
+    degree: 1,
+    x,
+    y,
+    vx: 0,
+    vy: 0,
+    fx: 0,
+    fy: 0,
+    r: 10,
+    pinned: false,
+    dragging: false,
+  });
+
+  // two overlapping, unconnected nodes must push apart and settle
+  const a = [mk("a", "entity", CX, CY), mk("b", "entity", CX, CY)];
+  for (let i = 0; i < 400; i++) stepSim(a, [], 0.4);
+  const sep = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y);
+  console.assert(sep > 20, "repulsion should separate overlapping nodes", sep);
+  console.assert(stepSim(a, [], 0.4) < 1, "unconnected pair should settle", sep);
+
+  // a connected pair started far apart should relax near SPRING_LEN
+  const c = [mk("a", "entity", CX - 200, CY), mk("b", "entity", CX + 200, CY)];
+  const edge: GraphEdge = { source: "a", target: "b", label: "rel", confidence: 1, times_seen: 1 };
+  for (let i = 0; i < 400; i++) stepSim(c, [edge], 0.4);
+  const d = Math.hypot(c[0].x - c[1].x, c[0].y - c[1].y);
+  console.assert(Math.abs(d - SPRING_LEN) < SPRING_LEN, "spring should relax near rest length", d);
+}
+
+if (process.env.NODE_ENV !== "production") verifySim();

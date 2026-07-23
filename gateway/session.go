@@ -62,6 +62,40 @@ func (s *Server) lookupSession(ctx context.Context, id string) (sessionData, boo
 	return d, true
 }
 
+// activePrefix namespaces the last-active throttle keys. The presence of
+// active:<uid> means "this uid was stamped within the last activeThrottle" —
+// while the key lives, we skip the DB write.
+const activePrefix = "active:"
+
+// activeThrottle is the write ceiling: at most one last_active UPDATE per uid
+// per this window, no matter how often /auth/session is hit (every page refresh
+// hits it). ponytail: fixed 5-min ceiling; if per-user activity granularity ever
+// matters, shorten it or stamp elsewhere — do NOT drop the throttle (that turns
+// every refresh into a write).
+const activeThrottle = 5 * time.Minute
+
+// stampActive records that uid is currently active, throttled so it is at most
+// one write per uid per activeThrottle. It SET NX EX on active:<uid>: only when
+// the key was NEWLY created (SetNX true) does it run the uid-scoped UPDATE. A
+// Redis error, or an already-present key, means "recently stamped or can't tell"
+// -> skip silently. This is fire-and-forget from handleSession: a stamp failure
+// must NEVER fail the session refresh, so all errors here are swallowed.
+//
+// Isolation: the UPDATE is scoped to WHERE id=$1 (the caller's own uid from the
+// verified session) — single-user by construction, never a cross-user write.
+func (s *Server) stampActive(ctx context.Context, uid string) {
+	if uid == "" {
+		return
+	}
+	fresh, err := s.redis.SetNX(ctx, activePrefix+uid, "1", activeThrottle).Result()
+	if err != nil || !fresh {
+		return // Redis down, or stamped within the throttle window -> skip
+	}
+	// Best-effort: an UPDATE failure just means we miss this stamp; the next
+	// touch after the throttle key expires will retry. Never surfaced.
+	_, _ = s.db.Exec(ctx, `UPDATE users SET last_active=now() WHERE id=$1`, uid)
+}
+
 // deleteSession revokes a durable session server-side — this is what makes logout
 // real. Idempotent: DEL of an absent key is a no-op.
 func (s *Server) deleteSession(ctx context.Context, id string) {

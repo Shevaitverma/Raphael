@@ -261,6 +261,10 @@ func (s *Server) handleSession(c *fiber.Ctx) error {
 		s.expireSession(c) // clear a stale/forged/revoked cookie; fail closed
 		return fiber.NewError(fiber.StatusUnauthorized, "no session")
 	}
+	// Stamp last-active on this recurring authenticated touch (every refresh hits
+	// /auth/session). Fire-and-forget + uid-scoped + Redis-throttled inside
+	// stampActive — a stamp failure must never 500 the session refresh.
+	s.stampActive(c.Context(), d.UID)
 	token, err := s.mintToken(d.UID, d.Role)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "could not mint token")
