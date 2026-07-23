@@ -278,11 +278,17 @@ func (s *Server) proxyTimezone(c *fiber.Ctx) error {
 // guards as proxyProfile; the :id lands inside `rest` and is covered by the ".."
 // guard. One handler covers every fitness verb/path.
 //
-// GET/POST  /api/fitness/workouts     → …/users/<uid>/fitness/workouts
-// DELETE    /api/fitness/workouts/:id → …/users/<uid>/fitness/workouts/<id>
-// GET/POST  /api/fitness/metrics      → …/users/<uid>/fitness/metrics
-// DELETE    /api/fitness/metrics/:id  → …/users/<uid>/fitness/metrics/<id>
-// GET       /api/fitness/stats        → …/users/<uid>/fitness/stats
+// GET/POST  /api/fitness/workouts       → …/users/<uid>/fitness/workouts
+// DELETE    /api/fitness/workouts/:id   → …/users/<uid>/fitness/workouts/<id>
+// GET/POST  /api/fitness/metrics        → …/users/<uid>/fitness/metrics
+// DELETE    /api/fitness/metrics/:id    → …/users/<uid>/fitness/metrics/<id>
+// GET       /api/fitness/stats          → …/users/<uid>/fitness/stats
+// v2 (same passthrough, no per-path code — the full subpath rides `rest`):
+// GET       /api/fitness/bmi            → …/users/<uid>/fitness/bmi
+// GET/POST  /api/fitness/goals          + PATCH/DELETE /goals/:id
+// GET/POST  /api/fitness/nutrition      + PATCH/DELETE /nutrition/:id
+// GET       /api/fitness/nutrition/stats
+// GET/PUT   /api/fitness/config
 func (s *Server) proxyFitness(c *fiber.Ctx) error {
 	uid := c.Locals(userIDKey).(string)
 

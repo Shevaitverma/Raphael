@@ -195,6 +195,19 @@ func (s *Server) BuildApp() *fiber.App {
 	api.Post("/fitness/metrics", s.proxyFitness)
 	api.Delete("/fitness/metrics/:id", s.proxyFitness)
 	api.Get("/fitness/stats", s.proxyFitness)
+	// Fitness v2 — same uid-forcing passthrough proxy. BMI, goals, nutrition, config.
+	api.Get("/fitness/bmi", s.proxyFitness)
+	api.Get("/fitness/goals", s.proxyFitness)
+	api.Post("/fitness/goals", s.proxyFitness)
+	api.Patch("/fitness/goals/:id", s.proxyFitness)
+	api.Delete("/fitness/goals/:id", s.proxyFitness)
+	api.Get("/fitness/nutrition", s.proxyFitness)
+	api.Post("/fitness/nutrition", s.proxyFitness)
+	api.Get("/fitness/nutrition/stats", s.proxyFitness)
+	api.Patch("/fitness/nutrition/:id", s.proxyFitness)
+	api.Delete("/fitness/nutrition/:id", s.proxyFitness)
+	api.Get("/fitness/config", s.proxyFitness)
+	api.Put("/fitness/config", s.proxyFitness)
 
 	// Google: connect builds the consent URL (JWT-gated, returns JSON not a 302
 	// so the JWT stays out of the browser URL); status/disconnect proxy to

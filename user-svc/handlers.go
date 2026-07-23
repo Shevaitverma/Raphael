@@ -81,6 +81,21 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /users/{uid}/fitness/metrics", s.createMetricHandler)
 	mux.HandleFunc("DELETE /users/{uid}/fitness/metrics/{id}", s.deleteMetricHandler)
 	mux.HandleFunc("GET /users/{uid}/fitness/stats", s.fitnessStatsHandler)
+	// Fitness v2: BMI, goals CRUD, nutrition CRUD + stats, coach config.
+	mux.HandleFunc("GET /users/{uid}/fitness/bmi", s.bmiHandler)
+	mux.HandleFunc("GET /users/{uid}/fitness/goals", s.listGoalsHandler)
+	mux.HandleFunc("POST /users/{uid}/fitness/goals", s.createGoalHandler)
+	mux.HandleFunc("PATCH /users/{uid}/fitness/goals/{id}", s.updateGoalHandler)
+	mux.HandleFunc("DELETE /users/{uid}/fitness/goals/{id}", s.deleteGoalHandler)
+	// nutrition/stats registered before nutrition/{id} — ServeMux prefers the more
+	// specific pattern, but keeping it explicit avoids any "stats" being read as an id.
+	mux.HandleFunc("GET /users/{uid}/fitness/nutrition/stats", s.nutritionStatsHandler)
+	mux.HandleFunc("GET /users/{uid}/fitness/nutrition", s.listMealsHandler)
+	mux.HandleFunc("POST /users/{uid}/fitness/nutrition", s.createMealHandler)
+	mux.HandleFunc("PATCH /users/{uid}/fitness/nutrition/{id}", s.patchMealHandler)
+	mux.HandleFunc("DELETE /users/{uid}/fitness/nutrition/{id}", s.deleteMealHandler)
+	mux.HandleFunc("GET /users/{uid}/fitness/config", s.getConfigHandler)
+	mux.HandleFunc("PUT /users/{uid}/fitness/config", s.putConfigHandler)
 
 	// Google account connection — public routes never return a token (status is
 	// booleans + display email + scope names only).

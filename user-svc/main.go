@@ -52,6 +52,10 @@ func main() {
 	// after Ping so a dead DB fails at boot, not silently inside the ticker.
 	startScheduler(pool)
 
+	// LLM-free fitness coaching scheduler: sibling of startScheduler. Ticks every
+	// 60s and writes templated check-in / weekly-summary / goal-nudge notifications.
+	startFitnessCoach(pool)
+
 	httpSrv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           srv.routes(),

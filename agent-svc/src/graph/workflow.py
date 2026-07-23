@@ -30,6 +30,7 @@ from llm import resolver
 from memory import budget, extract as extractor_mod, history, portrait as portrait_mod, retriever
 from tools import fitness as fitness_tool
 from tools import google as google_tool
+from tools import nutrition as nutrition_tool
 from tools import reminders as reminders_tool
 from tools import search as search_tool
 from tools import tasks as tasks_tool
@@ -381,19 +382,82 @@ def _dispatch_fitness(name: str, uid: str, args: dict) -> tuple[dict, str]:
         return {}, fitness_tool.list_workouts(uid)
     if name == fitness_tool.FITNESS_STATS["name"]:
         return {}, fitness_tool.fitness_stats(uid)
-    if name == fitness_tool.LOG_WORKOUT["name"]:
-        keys = ("title", "category", "duration_min", "calories", "distance_km", "notes", "performed_on")
-        na = {k: a[k] for k in keys if a.get(k) not in (None, "")}
-        return na, fitness_tool.log_workout(
-            uid, na.get("title", ""), na.get("category"), na.get("duration_min"),
-            na.get("calories"), na.get("distance_km"), na.get("notes"), na.get("performed_on"),
-        )
     if name == fitness_tool.LOG_METRIC["name"]:
         keys = ("metric_type", "value", "unit", "notes", "recorded_on")
         na = {k: a[k] for k in keys if a.get(k) not in (None, "")}
         return na, fitness_tool.log_metric(
             uid, na.get("metric_type", ""), na.get("value"), na.get("unit"),
             na.get("notes"), na.get("recorded_on"),
+        )
+    if name == fitness_tool.LOG_WORKOUT["name"]:
+        keys = ("title", "category", "duration_min", "calories", "distance_km",
+                "pace_min_km", "avg_heart_rate", "perceived_effort", "exercises",
+                "mood", "location", "notes", "performed_on")
+        na = {k: a[k] for k in keys if a.get(k) not in (None, "", [])}
+        return na, fitness_tool.log_workout(
+            uid, na.get("title", ""), na.get("category"), na.get("duration_min"),
+            na.get("calories"), na.get("distance_km"), na.get("pace_min_km"),
+            na.get("avg_heart_rate"), na.get("perceived_effort"), na.get("exercises"),
+            na.get("mood"), na.get("location"), na.get("notes"), na.get("performed_on"),
+        )
+    if name == fitness_tool.BMI["name"]:
+        return {}, fitness_tool.bmi(uid)
+    if name == fitness_tool.SET_GOAL["name"]:
+        keys = ("goal_type", "title", "target_value", "target_unit", "metric_type",
+                "category", "direction", "starting_value", "deadline")
+        na = {k: a[k] for k in keys if a.get(k) not in (None, "")}
+        return na, fitness_tool.set_goal(
+            uid, na.get("goal_type", ""), na.get("title", ""), na.get("target_value"),
+            na.get("target_unit"), na.get("metric_type"), na.get("category"),
+            na.get("direction"), na.get("starting_value"), na.get("deadline"),
+        )
+    if name == fitness_tool.LIST_GOALS["name"]:
+        st = str(a.get("status") or "").strip()
+        return ({"status": st} if st else {}), fitness_tool.list_goals(uid, st)
+    if name == fitness_tool.UPDATE_GOAL["name"]:
+        keys = ("goal_id", "target_value", "direction", "starting_value", "status", "deadline")
+        na = {k: a[k] for k in keys if a.get(k) not in (None, "")}
+        return na, fitness_tool.update_goal(
+            uid, na.get("goal_id", ""), na.get("target_value"), na.get("direction"),
+            na.get("starting_value"), na.get("status"), na.get("deadline"),
+        )
+    if name == fitness_tool.COACH_CONFIG["name"]:
+        keys = ("enabled", "checkin_time", "workout_split", "rest_days", "daily_macro_targets")
+        na = {k: a[k] for k in keys if a.get(k) not in (None, "", [], {})}
+        return na, fitness_tool.coach_config(
+            uid, na.get("enabled"), na.get("checkin_time"), na.get("workout_split"),
+            na.get("rest_days"), na.get("daily_macro_targets"),
+        )
+    return {}, ""
+
+
+def _dispatch_nutrition(name: str, uid: str, args: dict) -> tuple[dict, str]:
+    """Route one nutrition tool call to its nutrition.py handler (pure httpx, NEVER
+    an LLM call — a nested LLM deadlocks the queue drain). Returns (neutral
+    arguments, result string). Empties are dropped so the persisted shape stays
+    minimal and numerics stay numeric. The turn's LLM already compiled the NL into
+    the fields (including estimated macros); this is pure I/O."""
+    a = args or {}
+    if name == nutrition_tool.LIST_MEALS["name"]:
+        na = {k: a[k] for k in ("date_from", "date_to") if a.get(k) not in (None, "")}
+        return na, nutrition_tool.list_meals(uid, na.get("date_from"), na.get("date_to"))
+    if name == nutrition_tool.NUTRITION_STATS["name"]:
+        return {}, nutrition_tool.nutrition_stats(uid)
+    if name == nutrition_tool.LOG_MEAL["name"]:
+        keys = ("items_text", "meal_type", "calories", "protein_g", "carbs_g",
+                "fat_g", "fiber_g", "water_ml", "notes")
+        na = {k: a[k] for k in keys if a.get(k) not in (None, "")}
+        return na, nutrition_tool.log_meal(
+            uid, na.get("items_text", ""), na.get("meal_type"), na.get("calories"),
+            na.get("protein_g"), na.get("carbs_g"), na.get("fat_g"),
+            na.get("fiber_g"), na.get("water_ml"), na.get("notes"),
+        )
+    if name == nutrition_tool.SET_TARGETS["name"]:
+        keys = ("calories", "protein_g", "carbs_g", "fat_g", "water_ml")
+        na = {k: a[k] for k in keys if a.get(k) not in (None, "")}
+        return na, nutrition_tool.set_targets(
+            uid, na.get("calories"), na.get("protein_g"), na.get("carbs_g"),
+            na.get("fat_g"), na.get("water_ml"),
         )
     return {}, ""
 
@@ -432,8 +496,9 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
     tasks_on = tasks_tool.looks_task_related(state["message"])
     reminders_on = reminders_tool.looks_reminder_related(state["message"])
     fitness_on = fitness_tool.looks_fitness_related(state["message"])
+    nutrition_on = nutrition_tool.looks_nutrition_related(state["message"])
 
-    if not search_on and not cal_on and not tasks_on and not reminders_on and not fitness_on:
+    if not search_on and not cal_on and not tasks_on and not reminders_on and not fitness_on and not nutrition_on:
         return "", []  # nothing to offer: nothing leaves the box.
 
     provider = state["provider"]
@@ -462,13 +527,16 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
         tools.extend(reminders_tool.ALL_TOOLS)
     if fitness_on:
         tools.extend(fitness_tool.ALL_TOOLS)
+    if nutrition_on:
+        tools.extend(nutrition_tool.ALL_TOOLS)
 
     blocks: list[str] = []
     tool_calls: list = []
     cal_done = False
     task_mutated = False  # a create/update/delete already fired this turn
     reminder_mutated = False  # a create/delete reminder already fired this turn
-    fitness_mutated = False  # a log_workout/log_metric already fired this turn
+    fitness_mutated = False  # a log_workout/log_metric/goal/config write fired this turn
+    nutrition_mutated = False  # a log_meal/set_targets write already fired this turn
     empty_q = None  # a search that came back with zero hits and may still refine
     convo = list(messages)
     for _ in range(_MAX_PREFLIGHT_ROUNDS):
@@ -550,13 +618,17 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
                 ]
                 reminder_progressed = True
 
-        # --- fitness tools: reads (list_workouts, fitness_stats) just add a block;
-        # a mutating tool (log_workout/log_metric) fires AT MOST ONCE this turn, and
-        # any write ends the loop, so a confused model cannot double-log. No id to
-        # resolve, so a read needs no follow-up round.
+        # --- fitness tools: reads (list_workouts, fitness_stats, bmi, list_goals)
+        # just add a block; a mutating tool (log_workout/log_metric/set_goal/
+        # update_goal/coach_config) fires AT MOST ONCE this turn, and any write ends
+        # the loop, so a confused model cannot double-write. A read needs no
+        # follow-up round (update_goal's goal_id comes from a prior turn's list).
         for c in calls:
             fname = c.get("name")
-            reads = (fitness_tool.LIST_WORKOUTS["name"], fitness_tool.FITNESS_STATS["name"])
+            reads = (
+                fitness_tool.LIST_WORKOUTS["name"], fitness_tool.FITNESS_STATS["name"],
+                fitness_tool.BMI["name"], fitness_tool.LIST_GOALS["name"],
+            )
             if fname not in reads and fname not in fitness_tool.MUTATING:
                 continue
             if fname in fitness_tool.MUTATING:
@@ -567,7 +639,23 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
             tool_calls.append({"name": fname, "arguments": neutral_args})
             blocks.append(result)
 
-        if task_mutated or reminder_mutated or fitness_mutated:
+        # --- nutrition tools: reads (list_meals, nutrition_stats) just add a block;
+        # a mutating tool (log_meal/set_targets) fires AT MOST ONCE this turn. Mirror
+        # of the fitness block.
+        for c in calls:
+            mname = c.get("name")
+            reads = (nutrition_tool.LIST_MEALS["name"], nutrition_tool.NUTRITION_STATS["name"])
+            if mname not in reads and mname not in nutrition_tool.MUTATING:
+                continue
+            if mname in nutrition_tool.MUTATING:
+                if nutrition_mutated:
+                    continue
+                nutrition_mutated = True
+            neutral_args, result = _dispatch_nutrition(mname, uid, c.get("arguments") or {})
+            tool_calls.append({"name": mname, "arguments": neutral_args})
+            blocks.append(result)
+
+        if task_mutated or reminder_mutated or fitness_mutated or nutrition_mutated:
             break  # a write is terminal.
 
         srch = next((c for c in calls if c.get("name") == search_tool.WEB_SEARCH["name"]), None)

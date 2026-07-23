@@ -460,6 +460,17 @@ export async function setTimezone(token: string, timezone: string): Promise<void
 // reminders calls above). performed_on / recorded_on are dates; the server owns
 // created_at. stats is a small server-computed rollup for the overview tiles.
 
+// One line of a workout — the server stores these as a jsonb array. All fields
+// but name are optional; the model fills whatever the NL implied.
+export type Exercise = {
+  name: string;
+  sets?: number | null;
+  reps?: number | null;
+  weight_kg?: number | null;
+  duration_min?: number | null;
+  distance_km?: number | null;
+};
+
 export type Workout = {
   id: string;
   category: string | null;
@@ -467,6 +478,12 @@ export type Workout = {
   duration_min: number | null;
   calories: number | null;
   distance_km: number | null;
+  pace_min_km: number | null;
+  avg_heart_rate: number | null;
+  perceived_effort: number | null; // RPE 1..10
+  exercises: Exercise[];
+  mood: string | null;
+  location: string | null;
   notes: string | null;
   performed_on: string | null;
   created_at?: string;
@@ -485,8 +502,70 @@ export type Metric = {
 export type FitnessStats = {
   workouts_this_week: number;
   streak_days: number;
+  longest_streak: number;
   total_workouts: number;
+  avg_per_week: number; // 12-wk count / 12
+  avg_duration_min: number; // avg of duration_min>0
   latest_weight: { value: number; unit: string; recorded_on: string } | null;
+  weight_trend_30d: number | null; // latest weight minus most-recent >30d weight
+  weekly: { week_start: string; count: number }[]; // last 12 ISO weeks, oldest→newest
+  by_category: { category: string; count: number }[];
+};
+
+// weight/height come from the latest metric of each type; missing either → null bmi.
+export type Bmi =
+  | { bmi: number; category: "underweight" | "normal" | "overweight" | "obese"; weight_kg: number; height_cm: number }
+  | { bmi: null; reason: string };
+
+// A fitness goal. progress_pct is server-computed (direction-aware), 0..1.
+export type Goal = {
+  id: string;
+  goal_type: "frequency" | "metric_target" | "streak" | "duration";
+  title: string;
+  target_value: number;
+  target_unit: string | null;
+  metric_type: string | null;
+  category: string | null;
+  direction: "gte" | "lte" | "eq";
+  deadline: string | null; // "YYYY-MM-DD"
+  status: "active" | "achieved" | "abandoned";
+  starting_value: number | null;
+  current_value: number | null;
+  progress_pct: number; // 0..1
+  notes: string | null;
+  created_at?: string;
+};
+
+export type Meal = {
+  id: string;
+  meal_type: string | null;
+  items_text: string;
+  calories: number | null;
+  protein_g: number | null;
+  carbs_g: number | null;
+  fat_g: number | null;
+  fiber_g: number | null;
+  water_ml: number | null;
+  notes: string | null;
+  logged_on: string | null;
+  logged_at?: string;
+};
+
+export type NutritionStats = {
+  today: { calories: number; protein_g: number; carbs_g: number; fat_g: number; fiber_g: number; water_ml: number };
+  week_avg: { calories: number; protein_g: number; carbs_g: number; fat_g: number };
+  targets: { calories?: number; protein_g?: number; carbs_g?: number; fat_g?: number; water_ml?: number };
+  meals_today: number;
+};
+
+export type FitnessConfig = {
+  enabled: boolean;
+  checkin_time: string; // "HH:MM"
+  workout_split: Record<string, unknown>;
+  rest_days: unknown[];
+  daily_macro_targets: Record<string, number>;
+  last_checkin_at: string | null;
+  last_weekly_at: string | null;
 };
 
 export async function getWorkouts(token: string): Promise<Workout[]> {
@@ -504,6 +583,12 @@ export async function createWorkout(
     duration_min?: number | null;
     calories?: number | null;
     distance_km?: number | null;
+    pace_min_km?: number | null;
+    avg_heart_rate?: number | null;
+    perceived_effort?: number | null;
+    exercises?: Exercise[];
+    mood?: string;
+    location?: string;
     notes?: string;
     performed_on?: string;
   },
@@ -563,6 +648,141 @@ export async function deleteMetric(token: string, id: string): Promise<void> {
 export async function getFitnessStats(token: string): Promise<FitnessStats> {
   const res = await fetch(`${GATEWAY_URL}/api/fitness/stats`, { headers: authHeader(token) });
   if (!res.ok) throw new ApiError(`fitness stats failed: ${res.status}`, res.status);
+  return res.json();
+}
+
+// --- fitness v2: bmi, goals, nutrition, config --------------------------------
+// Same fetch/ApiError/authHeader shape as the v1 fitness calls. All routed under
+// /api/fitness/*; the gateway forces uid from the JWT.
+
+export async function getBmi(token: string): Promise<Bmi> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/bmi`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`bmi failed: ${res.status}`, res.status);
+  return res.json();
+}
+
+export async function getGoals(token: string): Promise<Goal[]> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/goals`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`list goals failed: ${res.status}`, res.status);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.goals ?? []);
+}
+
+export async function createGoal(
+  token: string,
+  g: {
+    goal_type: Goal["goal_type"];
+    title: string;
+    target_value: number;
+    target_unit?: string;
+    metric_type?: string;
+    category?: string;
+    direction?: Goal["direction"];
+    starting_value?: number | null;
+    deadline?: string | null;
+  },
+): Promise<Goal> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/goals`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify(g),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "create goal"), res.status);
+  return res.json();
+}
+
+export async function updateGoal(
+  token: string,
+  id: string,
+  patch: Partial<Pick<Goal, "title" | "target_value" | "target_unit" | "direction" | "starting_value" | "deadline" | "status" | "category" | "metric_type">>,
+): Promise<Goal> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/goals/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "update goal"), res.status);
+  return res.json();
+}
+
+export async function deleteGoal(token: string, id: string): Promise<void> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/goals/${id}`, {
+    method: "DELETE",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "delete goal"), res.status);
+}
+
+export async function getMeals(
+  token: string,
+  opts?: { date_from?: string; date_to?: string },
+): Promise<Meal[]> {
+  const q = new URLSearchParams();
+  if (opts?.date_from) q.set("date_from", opts.date_from);
+  if (opts?.date_to) q.set("date_to", opts.date_to);
+  const qs = q.toString();
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/nutrition${qs ? `?${qs}` : ""}`, {
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(`list meals failed: ${res.status}`, res.status);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.meals ?? []);
+}
+
+export async function createMeal(
+  token: string,
+  m: {
+    items_text: string;
+    meal_type?: string;
+    calories?: number | null;
+    protein_g?: number | null;
+    carbs_g?: number | null;
+    fat_g?: number | null;
+    fiber_g?: number | null;
+    water_ml?: number | null;
+    notes?: string;
+    logged_on?: string;
+  },
+): Promise<Meal> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/nutrition`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify(m),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "create meal"), res.status);
+  return res.json();
+}
+
+export async function deleteMeal(token: string, id: string): Promise<void> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/nutrition/${id}`, {
+    method: "DELETE",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "delete meal"), res.status);
+}
+
+export async function getNutritionStats(token: string): Promise<NutritionStats> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/nutrition/stats`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`nutrition stats failed: ${res.status}`, res.status);
+  return res.json();
+}
+
+export async function getFitnessConfig(token: string): Promise<FitnessConfig> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/config`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`fitness config failed: ${res.status}`, res.status);
+  return res.json();
+}
+
+export async function putFitnessConfig(
+  token: string,
+  patch: Partial<Pick<FitnessConfig, "enabled" | "checkin_time" | "workout_split" | "rest_days" | "daily_macro_targets">>,
+): Promise<FitnessConfig> {
+  const res = await fetch(`${GATEWAY_URL}/api/fitness/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "save fitness config"), res.status);
   return res.json();
 }
 
