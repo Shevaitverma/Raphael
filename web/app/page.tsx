@@ -565,7 +565,11 @@ export default function Page() {
       { conversation_id: conversationId, message: text, search: searchOn },
       {
         onToken: (t) => appendToken(t),
-        onDegraded: (d) => patchAssistant({ degraded: d }),
+        // Dead-credential mid-stream: the server emits 'degraded' then re-streams
+        // the FULL lifeboat answer as fresh tokens. Clear the partial-primary
+        // buffer here (degraded arrives before the first lifeboat token, so no
+        // race) so the lifeboat answer replaces it instead of gluing onto it.
+        onDegraded: (d) => patchAssistant({ degraded: d, content: "" }),
         // Keep the row's database id so it stops being identified by position;
         // stash the model so the "— {model}" label matches a reloaded row.
         onDone: (d) =>

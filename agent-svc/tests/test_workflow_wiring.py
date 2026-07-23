@@ -123,3 +123,37 @@ def test_mutating_task_tool_runs_at_most_once_and_ends_the_loop(monkeypatch):
     )
     assert creates == ["buy milk"]  # exactly one write despite the loop
     assert [c["name"] for c in tool_calls] == ["create_task"]
+
+
+def test_zero_hit_admission_survives_the_srch_none_break(monkeypatch):
+    # Round 1: model searches, gets zero hits (empty_q set, refine turns appended).
+    # Round 2: model asks for NO further search (srch is None -> break). The break
+    # skips the for/else, so without the flush the "found nothing" admission would
+    # be dropped and the answer turn would hallucinate freely.
+    monkeypatch.setattr(workflow.search_tool, "enabled", lambda: True)
+    monkeypatch.setattr(workflow.search_tool, "search", lambda q: [])  # zero hits
+    monkeypatch.setattr(workflow.tasks_tool, "looks_task_related", lambda m: False)
+    monkeypatch.setattr(workflow.reminders_tool, "looks_reminder_related", lambda m: False)
+
+    rounds = iter([
+        [{"name": "web_search", "arguments": {"query": "foo"}}],  # round 1: search
+        [],                                                        # round 2: nothing
+    ])
+
+    class _Caps:
+        native_tools = True
+
+    class _Prov:
+        provider, model = "local", "m"
+
+        def capabilities(self):
+            return _Caps()
+
+        def chat(self, convo, system=None, tools=None, max_tokens=512, reasoning=True):
+            return type("R", (), {"tool_calls": next(rounds)})()
+
+    block, _ = workflow._preflight(
+        {"user_id": "u", "message": "who won the match today", "provider": _Prov(), "search": True},
+        [{"role": "user", "content": "who won the match today"}], "sys",
+    )
+    assert "NO RESULTS" in block  # the zero-hit admission reached the answer turn

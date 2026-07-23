@@ -64,14 +64,20 @@ class AnthropicAPIProvider:
             source="static",
         )
 
-    def _params(self, messages, system, max_tokens, tools=None) -> dict:
+    def _params(self, messages, system, max_tokens, tools=None, reasoning=True) -> dict:
         params = dict(
             model=self.model,
             max_tokens=max_tokens,
-            thinking={"type": "adaptive"},
-            output_config={"effort": "high"},
             messages=[{"role": m["role"], "content": m["content"]} for m in messages],
         )
+        # reasoning=False (e.g. workflow.py's 512-token tool preflight): omit
+        # thinking + effort:high so the small budget funds the tool decision, not
+        # deliberation — parity with Ollama/OpenRouter, which honor reasoning=False.
+        # Omit rather than send thinking={"type":"disabled"}: models that force
+        # thinking on (e.g. Fable) 400 on an explicit disable but accept omission.
+        if reasoning:
+            params["thinking"] = {"type": "adaptive"}
+            params["output_config"] = {"effort": "high"}
         if system:
             params["system"] = system
         if tools:
@@ -85,9 +91,12 @@ class AnthropicAPIProvider:
         return params
 
     def chat(self, messages, system=None, tools=None, max_tokens=1024, reasoning=True) -> ChatResponse:
-        # reasoning is accepted for a uniform signature but ignored: Claude manages
-        # thinking itself via thinking={"type":"adaptive"} in _params.
-        resp = self._client.messages.create(**self._params(messages, system, max_tokens, tools))
+        # reasoning threads through to _params: True keeps adaptive thinking +
+        # effort:high; False drops both so a small tool-preflight budget isn't
+        # spent deliberating (see workflow.py:429). stream() always reasons.
+        resp = self._client.messages.create(
+            **self._params(messages, system, max_tokens, tools, reasoning)
+        )
         # Check stop_reason before reading content; handle a refusal.
         if getattr(resp, "stop_reason", None) == "refusal":
             return ChatResponse(

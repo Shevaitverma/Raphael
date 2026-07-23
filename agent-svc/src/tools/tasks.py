@@ -110,7 +110,7 @@ MUTATING = {CREATE_TASK["name"], UPDATE_TASK["name"], DELETE_TASK["name"]}
 
 # ponytail: keyword gate; a cheap classifier if recall matters. UI is the free fallback.
 _TASK_KEYWORDS = (
-    "task", "todo", "to-do", "reminder", "remind me", "to my list", "my list",
+    "task", "todo", "to-do", "to my list", "my list",
     "my tasks", "mark ", "complete", "finish", "done", "due", "kanban",
     "backlog", "in progress",
 )

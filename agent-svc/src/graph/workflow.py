@@ -175,7 +175,7 @@ def stream_with_lifeboat(user_id, provider, messages, system, emit, lifeboat_fn=
     }
     parts: list[str] = []
     try:
-        for chunk in provider.stream(messages, system=system):
+        for chunk in provider.stream(messages, system=system, max_tokens=4096):
             if chunk:
                 parts.append(chunk)
                 emit("token", {"text": chunk})
@@ -202,7 +202,7 @@ def stream_with_lifeboat(user_id, provider, messages, system, emit, lifeboat_fn=
         emit("degraded", {"reason": "credential rejected", "provider": lb.provider, "model": lb.model})
         parts = []
         try:
-            for chunk in lb.stream(messages, system=system):
+            for chunk in lb.stream(messages, system=system, max_tokens=4096):
                 if chunk:
                     parts.append(chunk)
                     emit("token", {"text": chunk})
@@ -505,6 +505,11 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
         if srch is None:
             if task_progressed or reminder_progressed:
                 continue  # a read (task or reminder) asked for a follow-up round to write.
+            # This break skips the for/else, so a pending zero-hit admission would
+            # be dropped. Flush it here (results/None paths already added their own
+            # block, so empty_q is only set when nothing else was recorded).
+            if empty_q is not None:
+                blocks.append(search_tool.block(empty_q, []))
             break  # no (further) search asked — the tool working, not failing.
         q = str((srch.get("arguments") or {}).get("query") or "").strip()
         if not q:
