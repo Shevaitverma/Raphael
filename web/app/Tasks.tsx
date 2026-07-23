@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   closestCorners,
   DndContext,
@@ -101,10 +102,29 @@ export default function Tasks({
   token: string;
   onFail: (e: unknown) => void;
 }) {
+  const qc = useQueryClient();
+  const { data, error, isPending, refetch } = useQuery({
+    queryKey: ["tasks", token],
+    queryFn: () => getTasks(token),
+    enabled: !!token,
+  });
+
+  // Local mirror of the fetched board so drag-reorder feels instant: the drag
+  // handlers mutate this optimistically, then the drop's mutation invalidates
+  // and the refetch re-syncs canonical order back into it. `null` until first
+  // load, which the render below reads as the loading/error gate.
   const [tasks, setTasks] = useState<Task[] | null>(null);
-  const [error, setError] = useState<unknown>(null); // set when the initial load fails
-  const [busy, setBusy] = useState<string | null>(null); // id currently mutating
+  useEffect(() => {
+    if (data) setTasks(data);
+  }, [data]);
+
   const [activeId, setActiveId] = useState<string | null>(null); // dragged card
+
+  // Surface a load failure to the shell — drives the single-flight token
+  // refresh in page.tsx. A token change re-keys the query and refetches.
+  useEffect(() => {
+    if (error) onFail(error);
+  }, [error, onFail]);
 
   // A click must not start a drag, or inline-edit and the delete button break.
   // 6px of travel is the Notion-ish threshold between "click" and "drag".
@@ -113,75 +133,43 @@ export default function Tasks({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  const load = useCallback(async () => {
-    try {
-      setError(null);
-      setTasks(await getTasks(token));
-    } catch (e) {
-      setError(e); // so a failed first load can render Retry instead of a stuck spinner
-      onFail(e); // still surface for auth handling (e.g. token refresh / logout)
-    }
-  }, [token, onFail]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  // A single mutation guarded by the row id, then a reload for canonical order.
-  const mutate = useCallback(
-    async (id: string, fn: () => Promise<unknown>) => {
-      setBusy(id);
-      try {
-        await fn();
-        await load();
-      } catch (e) {
-        onFail(e);
-      } finally {
-        setBusy(null);
-      }
-    },
-    [load, onFail],
-  );
+  // One mutation guarded by the row id; on success invalidate so the board
+  // refetches canonical order. Per-row "busy" comes from the mutation vars.
+  const mutation = useMutation({
+    mutationFn: ({ fn }: { id: string; fn: () => Promise<unknown> }) => fn(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["tasks"] }),
+    onError: onFail,
+  });
+  const busy = mutation.isPending ? mutation.variables?.id ?? null : null;
+  const mutate = (id: string, fn: () => Promise<unknown>) => mutation.mutate({ id, fn });
 
   // Column contents, sorted by position ascending (equal positions keep their
   // fetch order via stable sort).
-  const columnTasks = useCallback(
-    (status: Status): Task[] =>
-      (tasks ?? []).filter((t) => t.status === status).sort((a, b) => a.position - b.position),
-    [tasks],
-  );
+  const columnTasks = (status: Status): Task[] =>
+    (tasks ?? []).filter((t) => t.status === status).sort((a, b) => a.position - b.position);
 
   // Which column an id belongs to: a column id is its own container; a card id
   // resolves to its task's status.
-  const findContainer = useCallback(
-    (id: string): Status | undefined =>
-      STATUSES.includes(id as Status) ? (id as Status) : tasks?.find((t) => t.id === id)?.status,
-    [tasks],
-  );
+  const findContainer = (id: string): Status | undefined =>
+    STATUSES.includes(id as Status) ? (id as Status) : tasks?.find((t) => t.id === id)?.status;
 
   // ◂ ▸ keyboard/click fallback: status-only column move (position carries over,
-  // the reload re-sorts). The guaranteed a11y path.
-  const move = useCallback(
-    (task: Task, to: Status) => {
-      if (task.status === to) return;
-      setTasks((prev) =>
-        prev ? prev.map((t) => (t.id === task.id ? { ...t, status: to } : t)) : prev,
-      );
-      void mutate(task.id, () => updateTask(token, task.id, { status: to }));
-    },
-    [mutate, token],
-  );
+  // the refetch re-sorts). The guaranteed a11y path.
+  const move = (task: Task, to: Status) => {
+    if (task.status === to) return;
+    setTasks((prev) =>
+      prev ? prev.map((t) => (t.id === task.id ? { ...t, status: to } : t)) : prev,
+    );
+    void mutate(task.id, () => updateTask(token, task.id, { status: to }));
+  };
 
-  const setPriority = useCallback(
-    (task: Task, priority: Task["priority"]) => {
-      if (task.priority === priority) return;
-      setTasks((prev) =>
-        prev ? prev.map((t) => (t.id === task.id ? { ...t, priority } : t)) : prev,
-      );
-      void mutate(task.id, () => updateTask(token, task.id, { priority }));
-    },
-    [mutate, token],
-  );
+  const setPriority = (task: Task, priority: Task["priority"]) => {
+    if (task.priority === priority) return;
+    setTasks((prev) =>
+      prev ? prev.map((t) => (t.id === task.id ? { ...t, priority } : t)) : prev,
+    );
+    void mutate(task.id, () => updateTask(token, task.id, { priority }));
+  };
 
   function onDragStart(e: DragStartEvent) {
     setActiveId(String(e.active.id));
@@ -254,21 +242,20 @@ export default function Tasks({
 
         {tasks !== null && <SystemBar tasks={tasks} />}
 
-        {tasks === null ? (
-          error ? (
-            <div className="flex flex-col items-start gap-2 rounded-xl border border-edge bg-panel px-4 py-3">
-              <p className="text-sm text-error">Couldn’t load your quests.</p>
-              <button
-                type="button"
-                onClick={() => void load()}
-                className="rounded-md border border-edge bg-raised px-3 py-1 text-xs text-on-surface transition-colors hover:bg-panel"
-              >
-                Retry
-              </button>
-            </div>
-          ) : (
-            <p className="text-sm text-faint">Loading…</p>
-          )
+        {isPending ? (
+          <p className="text-sm text-faint">Loading…</p>
+        ) : tasks === null ? (
+          // Settled with no data → the load failed; offer a retry.
+          <div className="flex flex-col items-start gap-2 rounded-xl border border-edge bg-panel px-4 py-3">
+            <p className="text-sm text-error">Couldn’t load your quests.</p>
+            <button
+              type="button"
+              onClick={() => void refetch()}
+              className="rounded-md border border-edge bg-raised px-3 py-1 text-xs text-on-surface transition-colors hover:bg-panel"
+            >
+              Retry
+            </button>
+          </div>
         ) : (
           <DndContext
             sensors={sensors}

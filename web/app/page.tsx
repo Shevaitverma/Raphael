@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Admin from "./Admin";
 import Dashboard from "./Dashboard";
 import MemoryGraph from "./MemoryGraph";
@@ -62,6 +63,10 @@ function detectedTz(): string {
 
 const DEV_EMAIL = "dev@raphael.local";
 const SEARCH_KEY = "raphael.search";
+const VIEW_KEY = "raphael.view";
+// Views a hard refresh may restore to. "admin" is intentionally excluded — it is
+// role-gated, so restoring it for a non-admin would show an empty/forbidden panel.
+const RESTORABLE_VIEWS: readonly View[] = ["dashboard", "chat", "graph", "settings", "tasks", "reminders", "fitness"];
 
 // Dev-login is a local/dev convenience only. It shows in the UI solely when this
 // build was compiled with NEXT_PUBLIC_DEV_AUTH=1; production builds omit the env
@@ -234,6 +239,16 @@ export default function Page() {
   useEffect(() => {
     setSearch(localStorage.getItem(SEARCH_KEY) === "1");
   }, []);
+
+  // Restore the last-viewed tab across a hard refresh (localStorage, client-only).
+  // Runs once on mount; the persist effect below writes it on every change.
+  useEffect(() => {
+    const saved = localStorage.getItem(VIEW_KEY) as View | null;
+    if (saved && RESTORABLE_VIEWS.includes(saved)) setView(saved);
+  }, []);
+  useEffect(() => {
+    localStorage.setItem(VIEW_KEY, view);
+  }, [view]);
 
   // Session restore. Runs once on EVERY mount (fresh load, page refresh, or the
   // return from a Google/dev login), before a token exists, so it drives the
@@ -1490,33 +1505,30 @@ function NotificationsBell({
   token: string;
   onFail: (e: unknown) => void;
 }) {
-  const [unread, setUnread] = useState<Notification[]>([]);
+  const qc = useQueryClient();
   const [viewing, setViewing] = useState<Notification[]>([]);
   const [open, setOpen] = useState(false);
 
-  const poll = useCallback(async () => {
-    try {
-      setUnread(await getNotifications(token, { unread: true }));
-    } catch (e) {
-      onFail(e);
-    }
-  }, [token, onFail]);
-
-  // Poll on mount, then every ~45s. Cleared on unmount / token change.
+  // Poll unread every 45s via TanStack's refetchInterval (replaces a manual
+  // setInterval). enabled on token; the query re-keys on token change.
+  const { data: unread = [], error } = useQuery({
+    queryKey: ["notifications", token],
+    queryFn: () => getNotifications(token, { unread: true }),
+    enabled: !!token,
+    refetchInterval: 45000,
+  });
   useEffect(() => {
-    void poll();
-    const t = setInterval(() => void poll(), 45000);
-    return () => clearInterval(t);
-  }, [poll]);
+    if (error) onFail(error);
+  }, [error, onFail]);
 
-  // Opening snapshots the current unread batch, clears the badge optimistically,
-  // and marks each read server-side; the next poll confirms. Closing just hides.
+  // Opening snapshots the current unread batch, clears the badge optimistically
+  // (setQueryData), and marks each read server-side; the next poll confirms.
   function toggle() {
     if (!open) {
       setViewing(unread);
       if (unread.length > 0) {
         const ids = unread.map((n) => n.id);
-        setUnread([]);
+        qc.setQueryData<Notification[]>(["notifications", token], []);
         ids.forEach((id) => void markNotificationRead(token, id).catch(onFail));
       }
     }

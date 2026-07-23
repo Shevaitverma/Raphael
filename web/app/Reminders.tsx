@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createReminder,
   deleteReminder,
@@ -133,39 +134,34 @@ export default function Reminders({
   token: string;
   onFail: (e: unknown) => void;
 }) {
-  const [reminders, setReminders] = useState<Reminder[] | null>(null);
-  const [error, setError] = useState<unknown>(null); // load failure; enables inline retry
-  const [busy, setBusy] = useState<string | null>(null); // id currently mutating
+  const qc = useQueryClient();
+  const {
+    data: reminders,
+    error,
+    isPending,
+    refetch,
+  } = useQuery({
+    queryKey: ["reminders", token],
+    queryFn: () => getReminders(token),
+    enabled: !!token,
+  });
 
-  const load = useCallback(async () => {
-    try {
-      setError(null);
-      setReminders(await getReminders(token));
-    } catch (e) {
-      setError(e);
-      onFail(e);
-    }
-  }, [token, onFail]);
-
+  // Surface a load failure to the shell — this is what drives the single-flight
+  // token refresh in page.tsx when a call 401s. A token change re-keys the query
+  // above, so a successful refresh refetches automatically.
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (error) onFail(error);
+  }, [error, onFail]);
 
-  // One guarded mutation, then a reload for canonical state (Tasks.tsx pattern).
-  const mutate = useCallback(
-    async (id: string, fn: () => Promise<unknown>) => {
-      setBusy(id);
-      try {
-        await fn();
-        await load();
-      } catch (e) {
-        onFail(e);
-      } finally {
-        setBusy(null);
-      }
-    },
-    [load, onFail],
-  );
+  // One mutation for pause/delete/create: run the op, then invalidate so the list
+  // refetches canonical state. Per-row "busy" comes from the mutation's variables.
+  const mutation = useMutation({
+    mutationFn: ({ fn }: { id: string; fn: () => Promise<unknown> }) => fn(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["reminders"] }),
+    onError: onFail,
+  });
+  const busy = mutation.isPending ? mutation.variables?.id ?? null : null;
+  const mutate = (id: string, fn: () => Promise<unknown>) => mutation.mutate({ id, fn });
 
   const items = reminders ?? [];
 
@@ -185,17 +181,17 @@ export default function Reminders({
           onCreate={(payload) => mutate("__add__", () => createReminder(token, payload))}
         />
 
-        {reminders === null && error ? (
+        {error && !reminders ? (
           <p className="text-sm text-error">
             Couldn’t load your reminders.{" "}
             <button
-              onClick={() => void load()}
+              onClick={() => void refetch()}
               className="underline underline-offset-2 hover:text-on-surface"
             >
               Retry
             </button>
           </p>
-        ) : reminders === null ? (
+        ) : isPending ? (
           <p className="text-sm text-faint">Loading…</p>
         ) : items.length === 0 ? (
           <p className="text-center text-sm text-faint">No reminders yet.</p>

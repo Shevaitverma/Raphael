@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createGoal,
   createMeal,
@@ -75,62 +76,56 @@ export default function Fitness({
   onFail: (e: unknown) => void;
 }) {
   const [tab, setTab] = useState<Tab>("Overview");
-  const [stats, setStats] = useState<FitnessStats | null>(null);
-  const [workouts, setWorkouts] = useState<Workout[] | null>(null);
-  const [metrics, setMetrics] = useState<Metric[] | null>(null);
-  const [bmi, setBmi] = useState<Bmi | null>(null);
-  const [goals, setGoals] = useState<Goal[] | null>(null);
-  const [meals, setMeals] = useState<Meal[] | null>(null);
-  const [nutri, setNutri] = useState<NutritionStats | null>(null);
-  const [error, setError] = useState<unknown>(null);
-  const [busy, setBusy] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      setError(null);
-      const [s, w, m, b, g, ml, n] = await Promise.all([
-        getFitnessStats(token),
-        getWorkouts(token),
-        getMetrics(token),
-        getBmi(token),
-        getGoals(token),
-        getMeals(token),
-        getNutritionStats(token),
-      ]);
-      setStats(s);
-      setWorkouts(w);
-      setMetrics(m);
-      setBmi(b);
-      setGoals(g);
-      setMeals(ml);
-      setNutri(n);
-    } catch (e) {
-      setError(e);
-      onFail(e);
-    }
-  }, [token, onFail]);
+  // Each read is its own query, namespaced under "fitness" so one broad
+  // invalidate refreshes them all. Token is in the key → a refresh re-keys and
+  // refetches automatically.
+  const statsQ = useQuery({ queryKey: ["fitness", "stats", token], queryFn: () => getFitnessStats(token), enabled: !!token });
+  const workoutsQ = useQuery({ queryKey: ["fitness", "workouts", token], queryFn: () => getWorkouts(token), enabled: !!token });
+  const metricsQ = useQuery({ queryKey: ["fitness", "metrics", token], queryFn: () => getMetrics(token), enabled: !!token });
+  const bmiQ = useQuery({ queryKey: ["fitness", "bmi", token], queryFn: () => getBmi(token), enabled: !!token });
+  const goalsQ = useQuery({ queryKey: ["fitness", "goals", token], queryFn: () => getGoals(token), enabled: !!token });
+  const mealsQ = useQuery({ queryKey: ["fitness", "meals", token], queryFn: () => getMeals(token), enabled: !!token });
+  const nutriQ = useQuery({ queryKey: ["fitness", "nutrition", token], queryFn: () => getNutritionStats(token), enabled: !!token });
 
+  const stats = statsQ.data ?? null;
+  const workouts = workoutsQ.data;
+  const metrics = metricsQ.data;
+  const bmi = bmiQ.data ?? null;
+  const goals = goalsQ.data;
+  const meals = mealsQ.data;
+  const nutri = nutriQ.data ?? null;
+
+  // Surface any load failure to the shell (drives the single-flight token refresh).
+  const error =
+    statsQ.error ?? workoutsQ.error ?? metricsQ.error ?? bmiQ.error ?? goalsQ.error ?? mealsQ.error ?? nutriQ.error ?? null;
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (error) onFail(error);
+  }, [error, onFail]);
 
-  // One guarded mutation, then a reload for canonical state (Reminders pattern).
-  const mutate = useCallback(
-    async (id: string, fn: () => Promise<unknown>) => {
-      setBusy(id);
-      try {
-        await fn();
-        await load();
-      } catch (e) {
-        onFail(e);
-      } finally {
-        setBusy(null);
-      }
-    },
-    [load, onFail],
-  );
+  const refetchAll = () => {
+    void statsQ.refetch();
+    void workoutsQ.refetch();
+    void metricsQ.refetch();
+    void bmiQ.refetch();
+    void goalsQ.refetch();
+    void mealsQ.refetch();
+    void nutriQ.refetch();
+  };
 
-  const loading = workouts === null && !error;
+  // One mutation for every write. A workout/metric/meal recomputes goals + stats
+  // + BMI server-side, so onSuccess invalidates the WHOLE "fitness" namespace.
+  // Per-row "busy" comes from the mutation's variables (Reminders pattern).
+  const qc = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: ({ fn }: { id: string; fn: () => Promise<unknown> }) => fn(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["fitness"] }),
+    onError: onFail,
+  });
+  const busy = mutation.isPending ? mutation.variables?.id ?? null : null;
+  const mutate = (id: string, fn: () => Promise<unknown>) => mutation.mutate({ id, fn });
+
+  const loading = workoutsQ.isPending;
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
@@ -162,12 +157,12 @@ export default function Fitness({
           ))}
         </nav>
 
-        {error && workouts === null ? (
+        {error && !workouts ? (
           <div className="flex flex-col items-start gap-2 rounded-xl border border-edge bg-panel px-4 py-3">
             <p className="text-sm text-error">Couldn’t load your fitness data.</p>
             <button
               type="button"
-              onClick={() => void load()}
+              onClick={refetchAll}
               className="rounded-md border border-edge bg-raised px-3 py-1 text-xs text-on-surface transition-colors hover:bg-panel"
             >
               Retry

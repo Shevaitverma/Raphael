@@ -1,15 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   getCapabilities,
   getMemoryStats,
   getPortrait,
   getTasks,
   listProviders,
-  type Capabilities,
-  type Credential,
-  type MemoryStats,
   type Task,
 } from "@/lib/gateway";
 import { levelForXp, rankForLevel, totalXp } from "@/lib/quests";
@@ -29,40 +27,55 @@ export default function Dashboard({
   onNavigate: (v: "chat" | "graph" | "settings") => void;
   onFail: (e: unknown) => void;
 }) {
-  const [stats, setStats] = useState<MemoryStats | null>(null);
-  const [caps, setCaps] = useState<Capabilities | null>(null);
-  const [creds, setCreds] = useState<Credential[] | null>(null);
-  const [tasks, setTasks] = useState<Task[] | null>(null);
-  // undefined = not loaded yet; "" = loaded but no portrait; string = the portrait.
-  const [portrait, setPortrait] = useState<string | undefined>(undefined);
-  const [error, setError] = useState<string | null>(null);
+  // Each read is its own query, namespaced under ["dashboard", ...]. token is in
+  // every key so a refresh re-fetches automatically. One-shot — nothing here polls.
+  const statsQuery = useQuery({
+    queryKey: ["dashboard", "stats", token],
+    queryFn: () => getMemoryStats(token),
+    enabled: !!token,
+  });
+  const capsQuery = useQuery({
+    queryKey: ["dashboard", "capabilities", token],
+    queryFn: () => getCapabilities(token),
+    enabled: !!token,
+  });
+  const credsQuery = useQuery({
+    queryKey: ["dashboard", "providers", token],
+    queryFn: () => listProviders(token),
+    enabled: !!token,
+  });
+  const tasksQuery = useQuery({
+    queryKey: ["dashboard", "tasks", token],
+    queryFn: () => getTasks(token),
+    enabled: !!token,
+  });
+  const portraitQuery = useQuery({
+    queryKey: ["dashboard", "portrait", token],
+    queryFn: () => getPortrait(token),
+    enabled: !!token,
+  });
 
+  // Any load failure funnels to the shell (drives the single-flight token refresh
+  // in page.tsx on a 401) — never a silent console.error.
+  const anyErr =
+    statsQuery.error ??
+    capsQuery.error ??
+    credsQuery.error ??
+    tasksQuery.error ??
+    portraitQuery.error;
   useEffect(() => {
-    let live = true;
-    Promise.all([
-      getMemoryStats(token),
-      getCapabilities(token),
-      listProviders(token),
-      getTasks(token),
-      getPortrait(token),
-    ])
-      .then(([s, c, p, t, pt]) => {
-        if (!live) return;
-        setStats(s);
-        setCaps(c);
-        setCreds(p);
-        setTasks(t);
-        setPortrait(pt);
-      })
-      .catch((e) => {
-        if (!live) return;
-        setError(e instanceof Error ? e.message : String(e));
-        onFail(e); // funnel 401 -> logout; never a silent console.error
-      });
-    return () => {
-      live = false;
-    };
-  }, [token, onFail]);
+    if (anyErr) onFail(anyErr);
+  }, [anyErr, onFail]);
+
+  // Preserve the original null-vs-loading semantics: these UI branches key off
+  // `=== null` while loading, so map undefined → null. portrait/caps already used
+  // undefined as their "not loaded" sentinel, so pass through as-is.
+  const stats = statsQuery.data ?? null;
+  const caps = capsQuery.data;
+  const creds = credsQuery.data ?? null;
+  const tasks = tasksQuery.data ?? null;
+  const portrait = portraitQuery.data;
+  const error = anyErr ? (anyErr instanceof Error ? anyErr.message : String(anyErr)) : null;
 
   const lifeboat = creds?.find((c) => c.is_lifeboat);
   const empty =

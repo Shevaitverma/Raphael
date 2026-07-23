@@ -1,8 +1,13 @@
 // Thin client for the Raphael gateway. No secrets live here — the JWT is passed
 // in from component state (held in memory), never read from localStorage.
 
-const GATEWAY_URL =
-  process.env.NEXT_PUBLIC_GATEWAY_URL ?? "http://localhost:8080";
+// Default to "" = RELATIVE, same-origin URLs (e.g. "/api/…", "/auth/…"). Next
+// reverse-proxies those to the gateway (see next.config.mjs rewrites), so the
+// browser only ever talks to its own origin — which is what makes this work over
+// a tunnel. Set NEXT_PUBLIC_GATEWAY_URL to an absolute URL only to bypass the
+// proxy (not needed for local or tunnelled dev). Note: an empty .env value reads
+// as undefined here, so the "" default is what actually applies.
+const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL || "";
 
 export type User = {
   id: string;

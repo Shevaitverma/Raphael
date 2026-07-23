@@ -6,9 +6,9 @@
 // via requireAdmin on every mutation — this UI's disabling is convenience, not
 // the trust boundary, so a crafted client cannot escalate by re-enabling a button.
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ApiError,
   addAllowedEmail,
   addSystemProvider,
   activateSystemProvider,
@@ -109,44 +109,42 @@ function UsersSection({
   token: string;
   onFail: (e: unknown) => void;
 }) {
-  const [users, setUsers] = useState<User[] | null>(null);
+  const qc = useQueryClient();
   const [email, setEmail] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null); // row key currently mutating
 
-  const load = useCallback(async () => {
-    try {
-      setUsers(await listUsers(token));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      onFail(e);
-    }
-  }, [token, onFail]);
+  const { data: users, error, isPending } = useQuery({
+    queryKey: ["admin", "users", token],
+    queryFn: () => listUsers(token),
+    enabled: !!token,
+  });
 
+  // Load failures drive the shell's token refresh (a token change re-keys the
+  // query, so a successful refresh refetches automatically).
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (error) onFail(error);
+  }, [error, onFail]);
 
-  async function run(key: string, fn: () => Promise<unknown>) {
-    setBusy(key);
-    setError(null);
-    try {
-      await fn();
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
+  // One mutation for add/role/remove: run the op, then invalidate the whole
+  // ["admin"] namespace so both this list and the config refetch canonical state.
+  const mutation = useMutation({
+    mutationFn: ({ fn }: { key: string; fn: () => Promise<unknown> }) => fn(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin"] }),
+    onError: onFail,
+  });
+  const busy = mutation.isPending ? mutation.variables?.key ?? null : null;
+  const run = (key: string, fn: () => Promise<unknown>) => mutation.mutate({ key, fn });
+  const errMsg =
+    mutation.error instanceof Error
+      ? mutation.error.message
+      : mutation.error
+        ? String(mutation.error)
+        : null;
 
   function add() {
     const e = email.trim().toLowerCase();
     if (!e) return;
-    void run("__add__", async () => {
-      await addAllowedEmail(token, e);
-      setEmail("");
-    });
+    run("__add__", () => addAllowedEmail(token, e));
+    setEmail("");
   }
 
   return (
@@ -161,12 +159,12 @@ function UsersSection({
         </p>
       </div>
 
-      {error && (
+      {errMsg && (
         <div
           role="alert"
           className="border-l-2 border-error bg-error/10 px-3 py-2 text-sm text-error"
         >
-          {error}
+          {errMsg}
         </div>
       )}
 
@@ -189,7 +187,7 @@ function UsersSection({
       </div>
 
       <div className="flex flex-col gap-1.5">
-        {users === null && <p className="text-sm text-faint">Loading…</p>}
+        {isPending && <p className="text-sm text-faint">Loading…</p>}
         {users?.length === 0 && <p className="text-sm text-faint">No users yet.</p>}
         {users?.map((u) => {
           // Pending = an allowlisted email with no user row yet. Its row key is
@@ -294,35 +292,31 @@ function SystemProvidersSection({
   token: string;
   onFail: (e: unknown) => void;
 }) {
-  const [creds, setCreds] = useState<Credential[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const qc = useQueryClient();
 
-  const load = useCallback(async () => {
-    try {
-      setCreds(await listSystemProviders(token));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      onFail(e);
-    }
-  }, [token, onFail]);
+  const { data: creds, error, isPending } = useQuery({
+    queryKey: ["admin", "providers", token],
+    queryFn: () => listSystemProviders(token),
+    enabled: !!token,
+  });
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (error) onFail(error);
+  }, [error, onFail]);
 
-  async function run(id: string, fn: () => Promise<unknown>) {
-    setBusy(id);
-    setError(null);
-    try {
-      await fn();
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
+  const mutation = useMutation({
+    mutationFn: ({ fn }: { id: string; fn: () => Promise<unknown> }) => fn(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin"] }),
+    onError: onFail,
+  });
+  const busy = mutation.isPending ? mutation.variables?.id ?? null : null;
+  const run = (id: string, fn: () => Promise<unknown>) => mutation.mutate({ id, fn });
+  const errMsg =
+    mutation.error instanceof Error
+      ? mutation.error.message
+      : mutation.error
+        ? String(mutation.error)
+        : null;
 
   const lifeboat = creds?.find((c) => c.is_lifeboat);
 
@@ -338,12 +332,12 @@ function SystemProvidersSection({
         </p>
       </div>
 
-      {error && (
+      {errMsg && (
         <div
           role="alert"
           className="border-l-2 border-error bg-error/10 px-3 py-2 text-sm text-error"
         >
-          {error}
+          {errMsg}
         </div>
       )}
 
@@ -358,7 +352,7 @@ function SystemProvidersSection({
       )}
 
       <div className="flex flex-col gap-2">
-        {creds === null && <p className="text-sm text-faint">Loading…</p>}
+        {isPending && <p className="text-sm text-faint">Loading…</p>}
         {creds?.length === 0 && (
           <p className="text-sm text-faint">No providers yet. Add one below.</p>
         )}
@@ -426,14 +420,12 @@ function SystemProvidersSection({
 
       <AddProviderForm
         onAdd={async (cred) => {
-          setError(null);
-          try {
-            await addSystemProvider(token, cred);
-            await load();
-          } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
-            throw e;
-          }
+          // mutateAsync rejects on error so the form keeps its fields; success
+          // invalidates ["admin"] and refetches. The banner shows mutation.error.
+          await mutation.mutateAsync({
+            id: "__add__",
+            fn: () => addSystemProvider(token, cred),
+          });
         }}
       />
     </section>
