@@ -563,9 +563,17 @@ func TestDuplicateProviderRejected(t *testing.T) {
 // --- Google: status/delete never leak a token, uuid guarded ----------------
 
 // fakeIDToken builds a Google-shaped id_token JWT (header.payload.sig). Only the
-// payload is read (unverified) so the header/signature are placeholders.
+// payload is read (unverified) so the header/signature are placeholders. email is
+// marked verified — the login path now requires email_verified=true, and a normal
+// Google account is verified. Use fakeIDTokenClaims for the unverified case.
 func fakeIDToken(email, sub string) string {
-	payload, _ := json.Marshal(map[string]string{"email": email, "sub": sub})
+	return fakeIDTokenClaims(map[string]any{"email": email, "sub": sub, "email_verified": true})
+}
+
+// fakeIDTokenClaims builds an id_token with an arbitrary claim set, so a test can
+// omit or falsify email_verified.
+func fakeIDTokenClaims(claims map[string]any) string {
+	payload, _ := json.Marshal(claims)
 	return "e30." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }
 

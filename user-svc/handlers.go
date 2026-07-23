@@ -60,6 +60,18 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("PATCH /users/{uid}/tasks/{id}", s.patchTask)
 	mux.HandleFunc("DELETE /users/{uid}/tasks/{id}", s.deleteTask)
 
+	// Per-user reminders + in-app notifications — public, uid-scoped like tasks
+	// (no requireInternal); ownership is re-checked in the store by user_id. The
+	// scheduler goroutine fires reminders into notifications; the web polls these.
+	mux.HandleFunc("GET /users/{uid}/reminders", s.listReminders)
+	mux.HandleFunc("POST /users/{uid}/reminders", s.createReminder)
+	mux.HandleFunc("PATCH /users/{uid}/reminders/{id}", s.patchReminder)
+	mux.HandleFunc("DELETE /users/{uid}/reminders/{id}", s.deleteReminder)
+	mux.HandleFunc("GET /users/{uid}/notifications", s.listNotifications)
+	mux.HandleFunc("PATCH /users/{uid}/notifications/{id}/read", s.markNotificationRead)
+	// Timezone force-stamped onto reminders server-side; web auto-detects + Settings picker.
+	mux.HandleFunc("PUT /users/{uid}/timezone", s.putTimezone)
+
 	// Google account connection — public routes never return a token (status is
 	// booleans + display email + scope names only).
 	mux.HandleFunc("GET /users/{uid}/google/status", s.googleStatus)
@@ -73,6 +85,18 @@ func (s *server) routes() http.Handler {
 	// lives behind requireInternal alongside the credential internals.
 	mux.HandleFunc("POST /internal/users/{uid}/google/exchange", s.requireInternal(s.googleExchange))
 	mux.HandleFunc("GET /internal/users/{uid}/google/token", s.requireInternal(s.googleToken))
+
+	// Auth + RBAC — internal only (the gateway proxies these after minting/forcing
+	// the JWT). googleLogin resolves the account from an id_token (bootstrap admin /
+	// allowlist member / reject) and stores calendar creds; the admin routes manage
+	// the allowlist and users. Shared-secret gated, never on a public proxy.
+	mux.HandleFunc("POST /internal/google/login", s.requireInternal(s.googleLogin))
+	mux.HandleFunc("GET /internal/admin/allowlist", s.requireInternal(s.allowlistList))
+	mux.HandleFunc("POST /internal/admin/allowlist", s.requireInternal(s.allowlistAdd))
+	mux.HandleFunc("DELETE /internal/admin/allowlist/{email}", s.requireInternal(s.allowlistRemove))
+	mux.HandleFunc("GET /internal/admin/users", s.requireInternal(s.usersList))
+	mux.HandleFunc("PATCH /internal/admin/users/{uid}/role", s.requireInternal(s.userSetRole))
+	mux.HandleFunc("DELETE /internal/admin/users/{uid}", s.requireInternal(s.userRemove))
 	return mux
 }
 

@@ -84,7 +84,9 @@ class AnthropicAPIProvider:
             ]
         return params
 
-    def chat(self, messages, system=None, tools=None, max_tokens=1024) -> ChatResponse:
+    def chat(self, messages, system=None, tools=None, max_tokens=1024, reasoning=True) -> ChatResponse:
+        # reasoning is accepted for a uniform signature but ignored: Claude manages
+        # thinking itself via thinking={"type":"adaptive"} in _params.
         resp = self._client.messages.create(**self._params(messages, system, max_tokens, tools))
         # Check stop_reason before reading content; handle a refusal.
         if getattr(resp, "stop_reason", None) == "refusal":

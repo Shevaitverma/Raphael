@@ -4,7 +4,7 @@
 // signed in. Groups its items under muted section labels and pins Settings +
 // the account row to the bottom. Inline SVG icons — no icon dependency.
 
-export type View = "dashboard" | "chat" | "graph" | "settings" | "tasks";
+export type View = "dashboard" | "chat" | "graph" | "settings" | "tasks" | "reminders" | "admin";
 
 type Item = { view: View; label: string; icon: React.ReactNode };
 
@@ -53,10 +53,22 @@ const ICONS = {
       <path d="M13 17h8" />
     </Icon>
   ),
+  reminders: (
+    <Icon>
+      <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+    </Icon>
+  ),
   settings: (
     <Icon>
       <circle cx="12" cy="12" r="3" />
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </Icon>
+  ),
+  // Shield — the admin-only area (user management + system provider config).
+  admin: (
+    <Icon>
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
     </Icon>
   ),
 } as const;
@@ -75,6 +87,7 @@ const GROUPS: { label: string; items: Item[] }[] = [
     items: [
       { view: "dashboard", label: "Dashboard", icon: ICONS.dashboard },
       { view: "tasks", label: "Tasks", icon: ICONS.tasks },
+      { view: "reminders", label: "Reminders", icon: ICONS.reminders },
     ],
   },
 ];
@@ -108,11 +121,15 @@ export default function Sidebar({
   view,
   setView,
   email,
+  role,
   onLogout,
 }: {
   view: View;
   setView: (v: View) => void;
   email: string;
+  // Optional + undefined-is-not-admin so a missing/unknown role fails closed
+  // (nav hidden). The server still enforces via requireAdmin regardless.
+  role?: "admin" | "member";
   onLogout: () => void;
 }) {
   return (
@@ -149,8 +166,15 @@ export default function Sidebar({
         ))}
       </div>
 
-      {/* Pinned bottom: Settings + account */}
+      {/* Pinned bottom: Admin (admins only) + Settings + account */}
       <div className="flex flex-col gap-1 border-t border-edge px-2 py-2">
+        {role === "admin" && (
+          <NavButton
+            item={{ view: "admin", label: "Admin", icon: ICONS.admin }}
+            active={view === "admin"}
+            onClick={() => setView("admin")}
+          />
+        )}
         <NavButton
           item={{ view: "settings", label: "Settings", icon: ICONS.settings }}
           active={view === "settings"}

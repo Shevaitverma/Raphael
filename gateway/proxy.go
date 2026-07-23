@@ -185,6 +185,86 @@ func (s *Server) proxyTasks(c *fiber.Ctx) error {
 	return s.forward(c, c.Method(), target, body)
 }
 
+// --- reminders proxy → user-svc (PUBLIC routes only) -----------------------
+//
+// The target path is ALWAYS rooted at /users/<uid>/reminders, so the <uid>
+// comes from the JWT sub and a client-supplied uid is never trusted. The
+// optional :id (a reminder uuid) is appended for PATCH/DELETE. Identical
+// machinery and guards as proxyTasks — the tz + schedule are force-stamped
+// server-side in user-svc; the gateway only forces the uid.
+//
+// GET    /api/reminders     → GET    /users/<uid>/reminders
+// POST   /api/reminders     → POST   /users/<uid>/reminders
+// PATCH  /api/reminders/:id → PATCH  /users/<uid>/reminders/<id>
+// DELETE /api/reminders/:id → DELETE /users/<uid>/reminders/<id>
+func (s *Server) proxyReminders(c *fiber.Ctx) error {
+	uid := c.Locals(userIDKey).(string)
+
+	target := s.cfg.UserSvcURL + "/users/" + uid + "/reminders"
+	if id := c.Params("id"); id != "" {
+		if strings.Contains(id, "..") || strings.Contains(strings.ToLower(id), "internal") {
+			return fiber.NewError(fiber.StatusBadRequest, "invalid path")
+		}
+		target += "/" + url.PathEscape(id)
+	}
+
+	var body []byte
+	if len(c.Body()) > 0 {
+		body = c.Body()
+	}
+	return s.forward(c, c.Method(), target, body)
+}
+
+// --- notifications proxy → user-svc (PUBLIC routes only) -------------------
+//
+// The in-app delivery feed (poll-based v1). Rooted at /users/<uid>/notifications
+// so the uid always comes from the JWT. The only sub-resource is the fixed /read
+// mark-read action, appended after the path-escaped :id. Same guards as above.
+//
+// GET   /api/notifications          → GET   /users/<uid>/notifications
+// PATCH /api/notifications/:id/read → PATCH /users/<uid>/notifications/<id>/read
+func (s *Server) proxyNotifications(c *fiber.Ctx) error {
+	uid := c.Locals(userIDKey).(string)
+
+	target := s.cfg.UserSvcURL + "/users/" + uid + "/notifications"
+	if id := c.Params("id"); id != "" {
+		if strings.Contains(id, "..") || strings.Contains(strings.ToLower(id), "internal") {
+			return fiber.NewError(fiber.StatusBadRequest, "invalid path")
+		}
+		target += "/" + url.PathEscape(id) + "/read"
+	}
+
+	var body []byte
+	if len(c.Body()) > 0 {
+		body = c.Body()
+	}
+	return s.forward(c, c.Method(), target, body)
+}
+
+// --- timezone proxy → user-svc (PUBLIC routes only) ------------------------
+//
+// The web auto-detects the IANA tz and PUTs it here; a Settings picker also
+// writes it. Rooted at /users/<uid>/timezone so the uid comes from the JWT.
+// user-svc validates the tz string; the gateway only forces the uid. Clone of
+// proxyProfile.
+//
+// PUT /api/timezone → PUT /users/<uid>/timezone
+func (s *Server) proxyTimezone(c *fiber.Ctx) error {
+	uid := c.Locals(userIDKey).(string)
+
+	rest := strings.TrimPrefix(c.Path(), "/api/timezone")
+	if strings.Contains(rest, "..") || strings.Contains(strings.ToLower(rest), "internal") {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid path")
+	}
+	target := s.cfg.UserSvcURL + "/users/" + uid + "/timezone" + rest
+
+	var body []byte
+	if len(c.Body()) > 0 {
+		body = c.Body()
+	}
+	return s.forward(c, c.Method(), target, body)
+}
+
 // --- capabilities proxy → agent-svc ----------------------------------------
 //
 // GET /api/capabilities → agent-svc GET /capabilities?user_id=<jwt sub>. What

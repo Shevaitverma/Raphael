@@ -47,6 +47,11 @@ func main() {
 
 	srv := &server{store: &store{pool: pool, crypto: crypto}, internalToken: internalToken}
 
+	// LLM-free reminder scheduler: a background goroutine polls due reminders,
+	// claims them (FOR UPDATE SKIP LOCKED) and writes notifications. Started once
+	// after Ping so a dead DB fails at boot, not silently inside the ticker.
+	startScheduler(pool)
+
 	httpSrv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           srv.routes(),

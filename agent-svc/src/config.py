@@ -18,6 +18,14 @@ CONV_SVC_URL = os.environ.get("CONV_SVC_URL", "http://localhost:8082")
 # resolver cannot fetch credentials, which fails loudly rather than silently.
 INTERNAL_TOKEN = os.environ.get("INTERNAL_TOKEN", "")
 
+# The user row that owns the system-wide provider config; must match the
+# gateway/db seed (SYSTEM_CONFIG_UID). The resolver fetches provider credentials
+# under THIS uid for every caller (config is admin-owned & system-wide), while
+# per-user google_token stays keyed by each member's own uid.
+SYSTEM_CONFIG_UID = os.environ.get(
+    "SYSTEM_CONFIG_UID", "00000000-0000-0000-0000-000000000002"
+)
+
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 
 # The SERVED context window is min(what the model was trained for, num_ctx the

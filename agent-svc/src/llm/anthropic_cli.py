@@ -132,7 +132,9 @@ class AnthropicCLIProvider:
             yield item
         t.join(timeout=1)
 
-    def chat(self, messages, system=None, tools=None, max_tokens=1024) -> ChatResponse:
+    def chat(self, messages, system=None, tools=None, max_tokens=1024, reasoning=True) -> ChatResponse:
+        # reasoning accepted for a uniform signature but ignored (the CLI backend
+        # has no thinking toggle).
         # Reuse the thread bridge so we never call asyncio.run inside a running
         # event loop.
         text = "".join(

@@ -622,6 +622,293 @@ func (s *store) deleteTask(ctx context.Context, userID, taskID string) error {
 // errNotFound signals an absent row so handlers can pick 404 vs 204.
 var errNotFound = errors.New("not found")
 
+// --- auth + RBAC -------------------------------------------------------------
+// Google Sign-In is the login. resolveGoogleUser is the race-safe find-or-create
+// behind the callback; the admin surface manages the allowlist and users. Every
+// method here is uid/email-scoped SQL over the SAME users table — no new store,
+// no new crypto (Google tokens keep flowing through upsertGoogle/readGoogleTokens).
+
+// Two seeded sentinel users the migration creates and this service must protect:
+// DEV_UID is the human's real account (real data — never delete), and the
+// SYSTEM_CONFIG owner holds the admin-managed, system-wide provider config.
+const (
+	devUID          = "00000000-0000-0000-0000-000000000001"
+	systemConfigUID = "00000000-0000-0000-0000-000000000002"
+)
+
+var (
+	// errRejected: a brand-new email that is neither the bootstrap admin nor on
+	// the allowlist. Fail closed — no user row is created.
+	errRejected = errors.New("email is not allowed to sign in")
+	// errLastAdmin: demoting this user would leave the system with zero admins,
+	// locking everyone out of the admin surface.
+	errLastAdmin = errors.New("cannot demote the last admin")
+	// errProtectedUser: DEV_UID / SYSTEM_CONFIG owner may never be deleted.
+	errProtectedUser = errors.New("user is protected and cannot be deleted")
+)
+
+// resolveGoogleUser is the authenticate step of the Google callback: it maps a
+// verified (email, sub) to a uid+role, creating the account when warranted and
+// failing CLOSED otherwise. It returns errRejected when the email may not sign in
+// (caller then stores NOTHING).
+//
+// The whole decision runs in one tx holding a transaction-scoped advisory lock on
+// a constant key, so concurrent first-logins can't each decide "I'm the bootstrap
+// admin" — at most one admin is ever auto-created.
+// ponytail: global advisory lock, not per-key. Login is low-throughput; a single
+// serialized bootstrap decision is correct and simpler than sharded locks.
+//
+// Precedence: (1) known google_sub -> log in. (2) same email -> link the sub onto
+// the existing row and keep its EXISTING role (this is how DEV_UID logs into its
+// real data without a role rewrite). (3) new email -> admin iff no admin has ever
+// logged in (true bootstrap), else member iff allowlisted (consuming the invite),
+// else errRejected.
+func (s *store) resolveGoogleUser(ctx context.Context, email, sub, name string) (userID, role string, err error) {
+	email = strings.TrimSpace(email)
+	if email == "" || sub == "" {
+		return "", "", errRejected
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err = tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('raphael_bootstrap_admin'))`); err != nil {
+		return "", "", err
+	}
+
+	// (1) Returning account, matched by the stable Google subject id.
+	err = tx.QueryRow(ctx,
+		`SELECT id, role FROM users WHERE google_sub = $1`, sub).Scan(&userID, &role)
+	if err == nil {
+		return userID, role, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", "", err
+	}
+
+	// (2) Existing account by email (incl. DEV_UID): link the sub, keep the role.
+	err = tx.QueryRow(ctx,
+		`UPDATE users SET google_sub = $2 WHERE lower(email) = lower($1)
+		 RETURNING id, role`, email, sub).Scan(&userID, &role)
+	if err == nil {
+		return userID, role, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", "", err
+	}
+
+	// (3) Brand-new email: bootstrap admin, allowlisted member, or reject.
+	var priorAdmins int
+	if err = tx.QueryRow(ctx,
+		`SELECT count(*) FROM users WHERE role = 'admin' AND google_sub IS NOT NULL`).
+		Scan(&priorAdmins); err != nil {
+		return "", "", err
+	}
+	if priorAdmins == 0 {
+		role = "admin"
+	} else {
+		var ok bool
+		err = tx.QueryRow(ctx,
+			`SELECT true FROM allowed_emails WHERE lower(email) = lower($1)`, email).Scan(&ok)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", errRejected // fail closed: no row inserted
+		}
+		if err != nil {
+			return "", "", err
+		}
+		role = "member"
+	}
+
+	if strings.TrimSpace(name) == "" {
+		name = email
+	}
+	if err = tx.QueryRow(ctx,
+		`INSERT INTO users (email, name, role, google_sub) VALUES ($1, $2, $3, $4)
+		 RETURNING id`, email, name, role, sub).Scan(&userID); err != nil {
+		return "", "", err
+	}
+	if role == "member" {
+		if _, err = tx.Exec(ctx,
+			`DELETE FROM allowed_emails WHERE lower(email) = lower($1)`, email); err != nil {
+			return "", "", err
+		}
+	}
+	return userID, role, tx.Commit(ctx)
+}
+
+// allowlistEntry is the public shape of an allowlisted email (no secrets).
+type allowlistEntry struct {
+	Email     string    `json:"email"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// allowlistAdd inserts an email into the sign-in allowlist. Idempotent: adding a
+// present email is a no-op success. The caller normalizes the email first.
+func (s *store) allowlistAdd(ctx context.Context, email string) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO allowed_emails (email) VALUES ($1) ON CONFLICT (email) DO NOTHING`, email)
+	return err
+}
+
+// allowlistList returns every allowlisted email in insertion order.
+func (s *store) allowlistList(ctx context.Context) ([]allowlistEntry, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT email, created_at FROM allowed_emails ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []allowlistEntry{}
+	for rows.Next() {
+		var e allowlistEntry
+		if err := rows.Scan(&e.Email, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// allowlistRemove drops one email. errNotFound when it was not on the list. The
+// caller normalizes the email the same way it was stored so the match is exact.
+func (s *store) allowlistRemove(ctx context.Context, email string) error {
+	ct, err := s.pool.Exec(ctx, `DELETE FROM allowed_emails WHERE email = $1`, email)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return errNotFound
+	}
+	return nil
+}
+
+// adminUser is the User Management row: identity + role, no secrets. google_connected
+// reports whether this account has ever completed a Google sign-in (google_sub set).
+type adminUser struct {
+	ID              string    `json:"id"`
+	Email           string    `json:"email"`
+	Name            string    `json:"name"`
+	Role            string    `json:"role"`
+	GoogleConnected bool      `json:"google_connected"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+// usersList returns every user for the admin User Management view.
+func (s *store) usersList(ctx context.Context) ([]adminUser, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, email, name, role, google_sub IS NOT NULL, created_at
+		FROM users
+		ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []adminUser{}
+	for rows.Next() {
+		var u adminUser
+		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.GoogleConnected, &u.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// userSetRole promotes/demotes a user. The caller validates the role value. The
+// change is serialized against the row (FOR UPDATE) and refuses to demote the
+// last admin -> errLastAdmin (never lock the system out of its admin surface).
+// errNotFound when the user does not exist (or uid is not a uuid).
+func (s *store) userSetRole(ctx context.Context, userID, role string) error {
+	if !validUUID(userID) {
+		return errNotFound
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var cur string
+	err = tx.QueryRow(ctx, `SELECT role FROM users WHERE id = $1 FOR UPDATE`, userID).Scan(&cur)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errNotFound
+		}
+		return err
+	}
+	if cur == "admin" && role != "admin" {
+		// Count only LOGINABLE admins — the same population the bootstrap gate keys on
+		// (role='admin' AND google_sub IS NOT NULL). The two seeded sentinels (DEV_UID,
+		// SYSTEM_CONFIG) have google_sub NULL and can never sign in via Google, so they
+		// must not count: otherwise this guard never trips and demoting the sole real
+		// admin silently re-arms bootstrap (uninvited stranger becomes admin).
+		var admins int
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM users WHERE role = 'admin' AND google_sub IS NOT NULL`).Scan(&admins); err != nil {
+			return err
+		}
+		if admins <= 1 {
+			return errLastAdmin
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE users SET role = $2 WHERE id = $1`, userID, role); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// userRemove deletes a user, cascading their isolated data via existing FKs. The
+// two seeded sentinels are protected -> errProtectedUser. errNotFound when the
+// user does not exist (or uid is not a uuid).
+func (s *store) userRemove(ctx context.Context, userID string) error {
+	if !validUUID(userID) {
+		return errNotFound
+	}
+	if strings.EqualFold(userID, devUID) || strings.EqualFold(userID, systemConfigUID) {
+		return errProtectedUser
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock the target row and read its role/google_sub. If it's the last LOGINABLE
+	// admin, refuse — deleting it would drop the loginable-admin count to 0 and
+	// silently re-arm bootstrap (next uninvited Google sign-in becomes admin). Same
+	// population as the bootstrap gate and the demote guard: role='admin' AND
+	// google_sub IS NOT NULL (the two seeded sentinels don't count).
+	var role string
+	var googleLinked bool
+	err = tx.QueryRow(ctx,
+		`SELECT role, google_sub IS NOT NULL FROM users WHERE id = $1 FOR UPDATE`, userID).
+		Scan(&role, &googleLinked)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errNotFound
+		}
+		return err
+	}
+	if role == "admin" && googleLinked {
+		var admins int
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM users WHERE role = 'admin' AND google_sub IS NOT NULL`).Scan(&admins); err != nil {
+			return err
+		}
+		if admins <= 1 {
+			return errLastAdmin
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // pgErrorCode extracts the SQLSTATE from a pgx error, or "" if not a PgError.
 func pgErrorCode(err error) string {
 	var pgErr *pgconn.PgError

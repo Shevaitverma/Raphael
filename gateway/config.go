@@ -33,6 +33,15 @@ type Config struct {
 	GoogleClientSecret string
 	GoogleRedirectURI  string
 	WebOrigin          string
+	// SystemConfigUID is the seeded "system config owner" user whose
+	// provider_credentials rows ARE the system-wide model/provider config. Admin
+	// provider proxies (admin.go) root at this uid instead of the JWT uid, and the
+	// agent-svc resolver reads it for every user. Must match agent-svc's
+	// SYSTEM_CONFIG_UID or the two languages would target divergent rows.
+	SystemConfigUID string
+	// SessionCookieName names the auth cookie; kept here so the login/callback and
+	// logout paths agree on one value.
+	SessionCookieName string
 }
 
 func getenv(key, def string) string {
@@ -44,10 +53,10 @@ func getenv(key, def string) string {
 
 func LoadConfig() Config {
 	return Config{
-		Port:            getenv("GATEWAY_PORT", "8080"),
-		DatabaseURL:     getenv("DATABASE_URL", "postgresql://raphael:raphael@localhost:5433/raphael"),
-		RedisURL:        getenv("REDIS_URL", "redis://localhost:6379/0"),
-		JWTSecret:       getenv("JWT_SECRET", "dev-only-change-me"),
+		Port:        getenv("GATEWAY_PORT", "8080"),
+		DatabaseURL: getenv("DATABASE_URL", "postgresql://raphael:raphael@localhost:5433/raphael"),
+		RedisURL:    getenv("REDIS_URL", "redis://localhost:6379/0"),
+		JWTSecret:   getenv("JWT_SECRET", "dev-only-change-me"),
 		// Defaults CLOSED. dev-login mints a 24h JWT for any email with no
 		// password, so an unset var must never mean "enabled" — a deploy that
 		// forgets it would be an account-takeover bypass. Both dev paths set it
@@ -64,5 +73,10 @@ func LoadConfig() Config {
 		GoogleClientSecret: getenv("GOOGLE_CLIENT_SECRET", ""),
 		GoogleRedirectURI:  getenv("GOOGLE_REDIRECT_URI", "http://localhost:8080/auth/google/callback"),
 		WebOrigin:          getenv("WEB_ORIGIN", "http://localhost:3000"),
+
+		// Fixed sentinel uuid for the system-config owner (see 001 migration seed).
+		// Must equal agent-svc's SYSTEM_CONFIG_UID default.
+		SystemConfigUID:   getenv("SYSTEM_CONFIG_UID", "00000000-0000-0000-0000-000000000002"),
+		SessionCookieName: getenv("SESSION_COOKIE_NAME", "raphael_session"),
 	}
 }

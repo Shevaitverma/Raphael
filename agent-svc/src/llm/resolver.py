@@ -24,6 +24,7 @@ from config import (
     INTERNAL_TOKEN,
     OLLAMA_BASE_URL,
     OPENROUTER_BASE_URL,
+    SYSTEM_CONFIG_UID,
     USER_SVC_URL,
 )
 from llm.anthropic_api import AnthropicAPIProvider
@@ -56,12 +57,17 @@ def google_token(user_id: str) -> str | None:
     return (data or {}).get("access_token") or None
 
 
+# Provider/model config is ADMIN-OWNED and SYSTEM-WIDE: every user resolves the
+# system owner's credentials, not their own. The passed user_id is ignored here
+# (kept in the signature so callers stay untouched). Only calendar (google_token)
+# remains per-user. The credential table, one-active index, is_lifeboat flag, and
+# build_provider() mapping are unchanged — portability and lifeboat semantics hold.
 def _fetch_active(user_id: str):
-    return _get(f"/internal/users/{user_id}/credential/active")
+    return _get(f"/internal/users/{SYSTEM_CONFIG_UID}/credential/active")
 
 
 def _fetch_lifeboat(user_id: str):
-    return _get(f"/internal/users/{user_id}/credential/lifeboat")
+    return _get(f"/internal/users/{SYSTEM_CONFIG_UID}/credential/lifeboat")
 
 
 def build_provider(cred: dict):

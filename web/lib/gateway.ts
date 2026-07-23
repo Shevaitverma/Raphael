@@ -8,9 +8,20 @@ export type User = {
   id: string;
   email?: string;
   name?: string;
+  // Set by google-login and dev-login. Admins see the Admin area; the server
+  // re-checks role on every privileged mutation, so this claim is UI-only.
+  role?: "admin" | "member";
 };
 
 export type DevLoginResponse = {
+  token: string;
+  user: User;
+};
+
+// The result of the one-time cookie handoff after a Google callback: the gateway
+// stashed the JWT behind a short-lived cookie and /auth/session trades it for the
+// token + who you are. `role` may arrive top-level or inside `user`; fold it in.
+export type Session = {
   token: string;
   user: User;
 };
@@ -96,6 +107,33 @@ export async function devLogin(email: string): Promise<DevLoginResponse> {
     throw new Error(`dev-login failed: ${res.status} ${await safeText(res)}`);
   }
   return res.json();
+}
+
+// --- auth: Google sign-in + session handoff ----------------------------------
+
+// Google Sign-In is the login itself. Ask the gateway for the consent URL (no auth
+// header — you aren't logged in yet), then navigate the browser to it. Mirrors
+// connectGoogle, minus the token. On return the gateway sets a handoff cookie and
+// bounces back to the app, where fetchSession() trades it for a JWT.
+export async function googleLogin(): Promise<void> {
+  const res = await fetch(`${GATEWAY_URL}/auth/google/login`);
+  if (!res.ok) throw new ApiError(await errText(res, "google login"), res.status);
+  const { auth_url } = await res.json();
+  window.location.href = auth_url;
+}
+
+// Trades the one-time handoff cookie (credentials:'include') for the JWT and the
+// signed-in user. A 401 means no valid handoff cookie — not signed in.
+export async function fetchSession(): Promise<Session> {
+  const res = await fetch(`${GATEWAY_URL}/auth/session`, {
+    credentials: "include",
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "session"), res.status);
+  const d = await res.json();
+  const user: User = d.user ?? {};
+  // role may be top-level or already on the user object; top-level wins.
+  if (d.role !== undefined) user.role = d.role;
+  return { token: d.token, user };
 }
 
 export async function listConversations(token: string): Promise<Conversation[]> {
@@ -272,6 +310,117 @@ export async function deleteTask(token: string, id: string): Promise<void> {
   if (!res.ok) throw new ApiError(await errText(res, "delete task"), res.status);
 }
 
+// --- reminders + notifications ------------------------------------------------
+// Per-user reminders (like tasks). kind='once' fires at fire_at; kind='cron'
+// recurs on a 5-field cron string, optionally bounded by `until`. The server
+// force-stamps timezone from users.timezone and computes next_fire — the client
+// never sends either (see setTimezone). Same fetch/ApiError/authHeader shape as
+// the tasks calls above. Firing writes a notification row (the delivery sink).
+
+export type Reminder = {
+  id: string;
+  text: string; // what to be reminded about, e.g. "drink water"
+  kind: "once" | "cron";
+  cron: string | null; // 5-field cron when kind='cron'
+  fire_at: string | null; // RFC3339 when kind='once'
+  until: string | null; // RFC3339 bound; closes the "today only" case
+  next_fire: string | null; // server-computed poll key; null once deactivated
+  timezone: string; // IANA, force-stamped server-side
+  active: boolean;
+  created_at?: string;
+};
+
+export type Notification = {
+  id: string;
+  reminder_id: string | null;
+  content: string;
+  read: boolean;
+  created_at?: string;
+};
+
+export async function getReminders(token: string): Promise<Reminder[]> {
+  const res = await fetch(`${GATEWAY_URL}/api/reminders`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`list reminders failed: ${res.status}`, res.status);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.reminders ?? []);
+}
+
+export async function createReminder(
+  token: string,
+  reminder: {
+    text: string;
+    kind: "once" | "cron";
+    cron?: string | null;
+    fire_at?: string | null;
+    until?: string | null;
+  },
+): Promise<Reminder> {
+  const res = await fetch(`${GATEWAY_URL}/api/reminders`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify(reminder),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "create reminder"), res.status);
+  return res.json();
+}
+
+export async function setReminderActive(
+  token: string,
+  id: string,
+  active: boolean,
+): Promise<Reminder> {
+  const res = await fetch(`${GATEWAY_URL}/api/reminders/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify({ active }),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "update reminder"), res.status);
+  return res.json();
+}
+
+export async function deleteReminder(token: string, id: string): Promise<void> {
+  const res = await fetch(`${GATEWAY_URL}/api/reminders/${id}`, {
+    method: "DELETE",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "delete reminder"), res.status);
+}
+
+// The in-app delivery feed. The bell polls this (unread=1 for the badge) and
+// PATCHes mark-read; both hit REST directly — zero tokens.
+export async function getNotifications(
+  token: string,
+  opts?: { unread?: boolean },
+): Promise<Notification[]> {
+  const q = opts?.unread ? "?unread=1" : "";
+  const res = await fetch(`${GATEWAY_URL}/api/notifications${q}`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`list notifications failed: ${res.status}`, res.status);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.notifications ?? []);
+}
+
+export async function markNotificationRead(token: string, id: string): Promise<Notification> {
+  const res = await fetch(`${GATEWAY_URL}/api/notifications/${id}/read`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify({ read: true }),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "mark notification read"), res.status);
+  return res.json();
+}
+
+// Force-stamped onto reminders server-side (cron is evaluated in this tz). The web
+// auto-detects Intl.DateTimeFormat().resolvedOptions().timeZone and saves it, and a
+// Settings picker changes it. The model never sets tz.
+export async function setTimezone(token: string, timezone: string): Promise<void> {
+  const res = await fetch(`${GATEWAY_URL}/api/timezone`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify({ timezone }),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "save timezone"), res.status);
+}
+
 // --- profile (display-only assistant name) -----------------------------------
 
 export type Profile = { assistant_name: string; onboarded: boolean };
@@ -442,6 +591,118 @@ export async function disconnectGoogle(token: string): Promise<void> {
     headers: authHeader(token),
   });
   if (!res.ok) throw new ApiError(await errText(res, "disconnect Google"), res.status);
+}
+
+// --- admin: allowlist, users, system provider config -------------------------
+// Admin-only. The gateway forces role from the JWT and re-checks users.role in the
+// DB on every mutation, so a stale/crafted claim can't escalate. Same fetch/
+// ApiError/authHeader shape as the rest of the file. Members never call these.
+
+// An allowlisted email is what permits a person to sign in with Google (no invite
+// email is sent — adding the row is the invite). Uninvited emails are rejected.
+export type AllowedEmail = { email: string; created_at?: string };
+
+export async function listAllowedEmails(token: string): Promise<AllowedEmail[]> {
+  const res = await fetch(`${GATEWAY_URL}/api/admin/allowlist`, {
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(`list allowed emails failed: ${res.status}`, res.status);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.emails ?? []);
+}
+
+export async function addAllowedEmail(token: string, email: string): Promise<AllowedEmail> {
+  const res = await fetch(`${GATEWAY_URL}/api/admin/allowlist`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "add allowed email"), res.status);
+  return res.json();
+}
+
+export async function removeAllowedEmail(token: string, email: string): Promise<void> {
+  const res = await fetch(
+    `${GATEWAY_URL}/api/admin/allowlist/${encodeURIComponent(email)}`,
+    { method: "DELETE", headers: authHeader(token) },
+  );
+  if (!res.ok) throw new ApiError(await errText(res, "remove allowed email"), res.status);
+}
+
+export async function listUsers(token: string): Promise<User[]> {
+  const res = await fetch(`${GATEWAY_URL}/api/admin/users`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`list users failed: ${res.status}`, res.status);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.users ?? []);
+}
+
+export async function setUserRole(
+  token: string,
+  id: string,
+  role: "admin" | "member",
+): Promise<User> {
+  const res = await fetch(`${GATEWAY_URL}/api/admin/users/${id}/role`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify({ role }),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "set role"), res.status);
+  return res.json();
+}
+
+export async function removeUser(token: string, id: string): Promise<void> {
+  const res = await fetch(`${GATEWAY_URL}/api/admin/users/${id}`, {
+    method: "DELETE",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "remove user"), res.status);
+}
+
+// System provider config is admin-owned and system-wide: the gateway proxies these
+// to the SAME credential handlers the per-user /api/providers calls hit, but rooted
+// at the seeded system-config owner. Reuses Credential/NewCredential verbatim.
+export async function listSystemProviders(token: string): Promise<Credential[]> {
+  const res = await fetch(`${GATEWAY_URL}/api/admin/providers`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`list system providers failed: ${res.status}`, res.status);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data.credentials ?? []);
+}
+
+export async function addSystemProvider(token: string, cred: NewCredential): Promise<Credential> {
+  const res = await fetch(`${GATEWAY_URL}/api/admin/providers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeader(token) },
+    body: JSON.stringify(cred),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "add system provider"), res.status);
+  return res.json();
+}
+
+export async function activateSystemProvider(token: string, id: string): Promise<Credential> {
+  const res = await fetch(`${GATEWAY_URL}/api/admin/providers/${id}/activate`, {
+    method: "POST",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "activate system provider"), res.status);
+  return res.json();
+}
+
+export async function setSystemLifeboat(token: string, id: string): Promise<Credential> {
+  const res = await fetch(`${GATEWAY_URL}/api/admin/providers/${id}/lifeboat`, {
+    method: "POST",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "set system lifeboat"), res.status);
+  return res.json();
+}
+
+export async function clearSystemLifeboat(token: string, id: string): Promise<Credential> {
+  const res = await fetch(`${GATEWAY_URL}/api/admin/providers/${id}/lifeboat`, {
+    method: "DELETE",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "clear system lifeboat"), res.status);
+  return res.json();
 }
 
 // Pull a human-readable message out of the {"error": "..."} body.

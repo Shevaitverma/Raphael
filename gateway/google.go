@@ -19,6 +19,13 @@ import (
 // Anything more (write, Gmail, Drive) would trip Google's CASA security review.
 const googleScopes = "openid email profile https://www.googleapis.com/auth/calendar.readonly"
 
+// loginSentinel is the state marker that tells the (single) callback this is a
+// LOGIN, not a re-consent. It is signed into the state exactly like a uid, so
+// verifyState's HMAC+exp guarantees still hold (CSRF unchanged). A real uid is
+// always a uuid, so "login" can never collide with one, and forging this marker
+// needs the JWT secret — no new trust boundary.
+const loginSentinel = "login"
+
 // statePayload is what the signed state carries THROUGH Google. The callback has
 // no JWT, so `uid` is the authenticated assertion — trusted only after the HMAC
 // verifies. `exp` bounds replay; `nonce` makes each state unique.
@@ -68,11 +75,17 @@ func (s *Server) verifyState(state string) (uid string, ok bool) {
 	if !found {
 		return "", false
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(p)
+	// Strict() rejects non-canonical trailing bits. signState always emits
+	// canonical base64, so this only ever rejects a TAMPERED token: without it, the
+	// MAC's final base64 char carries unused padding bits, and Go's lenient decoder
+	// would map a flipped-padding char back to the SAME bytes — letting an attacker
+	// mutate the CSRF state into an equivalent form. Canonical-only closes that.
+	enc := base64.RawURLEncoding.Strict()
+	payload, err := enc.DecodeString(p)
 	if err != nil {
 		return "", false
 	}
-	gotMAC, err := base64.RawURLEncoding.DecodeString(sig)
+	gotMAC, err := enc.DecodeString(sig)
 	if err != nil {
 		return "", false
 	}
@@ -103,7 +116,14 @@ func (s *Server) handleGoogleConnect(c *fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "could not build auth url")
 	}
+	return c.JSON(fiber.Map{"auth_url": s.consentURL(state)})
+}
 
+// consentURL builds the Google consent URL for a signed state. Shared by connect
+// (re-consent, uid state) and login-start (loginSentinel state) so the frozen
+// scope set + offline/consent params live in ONE place — a scope drift here
+// would silently change both flows.
+func (s *Server) consentURL(state string) string {
 	q := url.Values{}
 	q.Set("client_id", s.cfg.GoogleClientID)
 	q.Set("redirect_uri", s.cfg.GoogleRedirectURI)
@@ -113,10 +133,23 @@ func (s *Server) handleGoogleConnect(c *fiber.Ctx) error {
 	q.Set("prompt", "consent")
 	q.Set("include_granted_scopes", "true")
 	q.Set("state", state)
+	return "https://accounts.google.com/o/oauth2/v2/auth?" + q.Encode()
+}
 
-	return c.JSON(fiber.Map{
-		"auth_url": "https://accounts.google.com/o/oauth2/v2/auth?" + q.Encode(),
-	})
+// handleGoogleLoginStart (GET /auth/google/login, PUBLIC, NO JWT) begins Google
+// Sign-In AS the login. It has no caller identity yet, so the state carries the
+// loginSentinel marker instead of a uid; the callback branches on it. Returns
+// the consent URL as JSON (never a 302) so the browser navigates itself and no
+// value ever rides a redirect. Fails closed with 503 when Google is unconfigured.
+func (s *Server) handleGoogleLoginStart(c *fiber.Ctx) error {
+	if s.cfg.GoogleClientID == "" {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "google not configured"})
+	}
+	state, err := s.signState(loginSentinel)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "could not build auth url")
+	}
+	return c.JSON(fiber.Map{"auth_url": s.consentURL(state)})
 }
 
 // handleGoogleCallback (GET /auth/google/callback, PUBLIC, NO JWT) is where
@@ -136,6 +169,15 @@ func (s *Server) handleGoogleCallback(c *fiber.Ctx) error {
 		return fail()
 	}
 
+	// LOGIN branch: the state carried the sentinel, so this is Google Sign-In as
+	// the login. Authenticate via user-svc (RBAC gate lives there) and hand the
+	// SPA a session — the JWT never rides the redirect URL.
+	if uid == loginSentinel {
+		return s.handleLoginExchange(c, code)
+	}
+
+	// Otherwise a real uid: legacy re-consent that attaches calendar to an
+	// already-logged-in user. Unchanged.
 	body, _ := json.Marshal(map[string]string{"code": code})
 	target := s.cfg.UserSvcURL + "/internal/users/" + uid + "/google/exchange"
 	req, err := http.NewRequestWithContext(c.Context(), http.MethodPost, target, strings.NewReader(string(body)))
@@ -154,6 +196,104 @@ func (s *Server) handleGoogleCallback(c *fiber.Ctx) error {
 		return fail()
 	}
 	return c.Redirect(s.cfg.WebOrigin+"/?google=connected", fiber.StatusFound)
+}
+
+// handleLoginExchange runs the LOGIN branch of the callback. It forwards the
+// code to user-svc's /internal/google/login (which owns the RBAC gate:
+// bootstrap-admin / allowlisted-member / reject) and, on success, mints a
+// role-bearing JWT and drops it into a short-lived httpOnly cookie. The browser
+// never sees the token in a URL — it exchanges the cookie for in-memory state
+// via /auth/session. Fail closed: an uninvited email (403) redirects to
+// ?login=denied and NOTHING is stored; any other upstream failure -> ?login=error.
+func (s *Server) handleLoginExchange(c *fiber.Ctx, code string) error {
+	body, _ := json.Marshal(map[string]string{"code": code})
+	target := s.cfg.UserSvcURL + "/internal/google/login"
+	req, err := http.NewRequestWithContext(c.Context(), http.MethodPost, target, strings.NewReader(string(body)))
+	if err != nil {
+		return c.Redirect(s.cfg.WebOrigin+"/?login=error", fiber.StatusFound)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", s.cfg.InternalToken)
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return c.Redirect(s.cfg.WebOrigin+"/?login=error", fiber.StatusFound)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusForbidden {
+		// Uninvited -> rejected at the callback (fail closed). No session issued.
+		return c.Redirect(s.cfg.WebOrigin+"/?login=denied", fiber.StatusFound)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return c.Redirect(s.cfg.WebOrigin+"/?login=error", fiber.StatusFound)
+	}
+
+	var out struct {
+		UID  string `json:"uid"`
+		Role string `json:"role"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.UID == "" {
+		return c.Redirect(s.cfg.WebOrigin+"/?login=error", fiber.StatusFound)
+	}
+
+	token, err := s.mintToken(out.UID, out.Role)
+	if err != nil {
+		return c.Redirect(s.cfg.WebOrigin+"/?login=error", fiber.StatusFound)
+	}
+
+	// One-time handoff cookie: httpOnly (JS can't read it), Secure, SameSite=Lax
+	// (survives the top-level redirect back from Google), short TTL. The SPA
+	// immediately trades it for in-memory state at /auth/session, so it never
+	// lands in localStorage or a URL.
+	c.Cookie(&fiber.Cookie{
+		Name:     s.cfg.SessionCookieName,
+		Value:    token,
+		Path:     "/",
+		HTTPOnly: true,
+		Secure:   true,
+		SameSite: "Lax",
+		MaxAge:   120,
+	})
+	return c.Redirect(s.cfg.WebOrigin+"/?login=ok", fiber.StatusFound)
+}
+
+// handleSession (GET /auth/session, PUBLIC, uses the credential cookie) is the
+// one-time handoff: it reads the httpOnly session cookie set by the login
+// callback, returns {token,user,role} as JSON for the SPA to hold in memory,
+// and immediately EXPIRES the cookie so the JWT never persists in the browser.
+// Missing/invalid cookie -> 401 (no session to hand off).
+func (s *Server) handleSession(c *fiber.Ctx) error {
+	raw := c.Cookies(s.cfg.SessionCookieName)
+	if raw == "" {
+		return fiber.NewError(fiber.StatusUnauthorized, "no session")
+	}
+	sub, role, err := s.parseToken(raw)
+	if err != nil {
+		// Stale/forged cookie: clear it and refuse.
+		s.expireSession(c)
+		return fiber.NewError(fiber.StatusUnauthorized, "invalid session")
+	}
+	s.expireSession(c) // one-time: consume the cookie on read
+	return c.JSON(fiber.Map{
+		"token": raw,
+		"role":  role,
+		"user":  fiber.Map{"id": sub},
+	})
+}
+
+// expireSession clears the session cookie (same attributes, past expiry).
+func (s *Server) expireSession(c *fiber.Ctx) {
+	c.Cookie(&fiber.Cookie{
+		Name:     s.cfg.SessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HTTPOnly: true,
+		Secure:   true,
+		SameSite: "Lax",
+		Expires:  time.Now().Add(-time.Hour),
+		MaxAge:   -1,
+	})
 }
 
 // proxyGoogle handles GET /api/google/status and DELETE /api/google. Same

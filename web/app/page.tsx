@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Admin from "./Admin";
 import Dashboard from "./Dashboard";
 import MemoryGraph from "./MemoryGraph";
+import Reminders from "./Reminders";
 import Sidebar, { type View } from "./Sidebar";
 import Tasks from "./Tasks";
 import {
@@ -15,14 +17,19 @@ import {
   deleteConversation,
   devLogin,
   disconnectGoogle,
+  fetchSession,
   getCapabilities,
+  getNotifications,
   getProfile,
+  googleLogin,
   googleStatus,
   isAuthError,
   listConversations,
   listMessages,
   listProviders,
+  markNotificationRead,
   setLifeboat,
+  setTimezone,
   storedDegraded,
   streamChat,
   updateProfile,
@@ -32,11 +39,32 @@ import {
   type GoogleStatus,
   type Message,
   type NewCredential,
+  type Notification,
   type User,
 } from "@/lib/gateway";
 
+// Persisted timezone reconciliation (client-side; the server has no tz getter).
+// TZ_SEEN = the browser tz we last auto-stamped, so app-load auto-detect fires
+// only when the browser's own tz actually changes (never clobbering a manual
+// Settings choice). TZ_VALUE = the last tz we sent, for the Settings picker.
+const TZ_SEEN = "raphael.tz.seen";
+const TZ_VALUE = "raphael.tz.value";
+
+function detectedTz(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
 const DEV_EMAIL = "dev@raphael.local";
 const SEARCH_KEY = "raphael.search";
+
+// Dev-login is a local/dev convenience only. It shows in the UI solely when this
+// build was compiled with NEXT_PUBLIC_DEV_AUTH=1; production builds omit the env
+// var, so the dev button never renders and Google is the only door.
+const DEV_AUTH = process.env.NEXT_PUBLIC_DEV_AUTH === "1";
 
 // UI message carries extra render state that never touches the database. It
 // overrides Message.degraded (a stored boolean) with the live Degraded object
@@ -106,6 +134,24 @@ export default function Page() {
 
   // --- auth ------------------------------------------------------------------
 
+  // Google Sign-In IS the login. googleLogin() navigates the browser to Google's
+  // consent screen on success, so we only clear `loggingIn` on failure — a
+  // success means we're already gone. The callback bounces back with ?login=ok
+  // (handled by the effect below) or ?login=denied (uninvited — fail closed).
+  async function handleGoogleLogin() {
+    setLoggingIn(true);
+    setAuthError(null);
+    try {
+      await googleLogin();
+    } catch (e) {
+      setAuthError(e instanceof Error ? e.message : String(e));
+      setLoggingIn(false);
+    }
+  }
+
+  // Dev-only backdoor, gated to builds with NEXT_PUBLIC_DEV_AUTH=1. The response
+  // carries the role the gateway assigned, so setUser is enough to drive the
+  // admin-gated UI below.
   async function handleLogin() {
     setLoggingIn(true);
     setAuthError(null);
@@ -156,6 +202,37 @@ export default function Page() {
   // effect rather than a useState initializer.
   useEffect(() => {
     setSearch(localStorage.getItem(SEARCH_KEY) === "1");
+  }, []);
+
+  // After a Google SIGN-IN the gateway redirects back with ?login=ok (the JWT is
+  // waiting behind a one-time handoff cookie) or ?login=denied (the email is not
+  // on the invite allowlist — fail closed). Trade the cookie for a session, or
+  // show the "ask an admin" notice. Strip the param so a reload can't re-fire it.
+  // Runs once on mount, before token exists, so it drives the initial LoginScreen.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const login = params.get("login");
+    if (login) {
+      if (login === "ok") {
+        fetchSession()
+          .then((s) => {
+            setToken(s.token);
+            setUser(s.user); // s.user.role drives the admin-gated UI
+          })
+          .catch((e) => setAuthError(e instanceof Error ? e.message : String(e)));
+      } else if (login === "denied") {
+        setAuthError(
+          "You're not on the invite list yet. Ask an admin to add your email, then sign in again.",
+        );
+      }
+      params.delete("login");
+      const qs = params.toString();
+      window.history.replaceState(
+        {},
+        "",
+        qs ? `${window.location.pathname}?${qs}` : window.location.pathname,
+      );
+    }
   }, []);
 
   // The gateway redirects the browser back here after Google consent. Read the
@@ -215,6 +292,23 @@ export default function Page() {
     return () => {
       live = false;
     };
+  }, [token, failed]);
+
+  // Auto-stamp the browser timezone so reminders fire in the right zone. Cron is
+  // evaluated in users.timezone server-side; the model never sets it. The guard
+  // sends the PUT only when this browser's tz differs from the one we last
+  // stamped — skipping redundant writes AND leaving a manual Settings choice
+  // untouched unless the browser's own tz actually changed (e.g. travel).
+  useEffect(() => {
+    if (!token) return;
+    const tz = detectedTz();
+    if (localStorage.getItem(TZ_SEEN) === tz) return;
+    setTimezone(token, tz)
+      .then(() => {
+        localStorage.setItem(TZ_SEEN, tz);
+        localStorage.setItem(TZ_VALUE, tz);
+      })
+      .catch(failed);
   }, [token, failed]);
 
   function toggleSearch(on: boolean) {
@@ -468,7 +562,15 @@ export default function Page() {
   // --- render ----------------------------------------------------------------
 
   if (!token) {
-    return <LoginScreen onLogin={handleLogin} loading={loggingIn} error={authError} />;
+    return (
+      <LoginScreen
+        onGoogleLogin={handleGoogleLogin}
+        onDevLogin={handleLogin}
+        devAuth={DEV_AUTH}
+        loading={loggingIn}
+        error={authError}
+      />
+    );
   }
 
   // Only once we KNOW onboarding is incomplete — never while it's still unknown.
@@ -490,18 +592,23 @@ export default function Page() {
         view={view}
         setView={setView}
         email={user?.email ?? user?.id ?? ""}
+        role={user?.role}
         onLogout={handleLogout}
       />
 
       {/* Content column — sits to the RIGHT of the nav rail. For chat it holds
           its own [conversation list][thread] pair; everything else is one pane. */}
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="relative flex min-w-0 flex-1 flex-col">
+      {/* In-app delivery feed — polls unread, marks read on open. REST, 0 tokens. */}
+      <NotificationsBell token={token} onFail={failed} />
       {view === "dashboard" ? (
         <Dashboard token={token} onNavigate={setView} onFail={failed} />
       ) : view === "graph" ? (
         <MemoryGraph token={token} onNavigate={setView} onFail={failed} />
       ) : view === "tasks" ? (
         <Tasks token={token} onFail={failed} />
+      ) : view === "reminders" ? (
+        <Reminders token={token} onFail={failed} />
       ) : view === "settings" ? (
         <SettingsView
           token={token}
@@ -511,6 +618,14 @@ export default function Page() {
           googleReload={googleReload}
           googleNotice={googleNotice}
         />
+      ) : view === "admin" ? (
+        // UI gate only — fail closed for non-admins. The gateway re-verifies role
+        // server-side on every admin mutation, so a crafted view state buys nothing.
+        user?.role === "admin" ? (
+          <Admin token={token} onFail={failed} />
+        ) : (
+          <Dashboard token={token} onNavigate={setView} onFail={failed} />
+        )
       ) : (
       <div className="flex min-h-0 flex-1">
         {/* Conversation list */}
@@ -761,11 +876,15 @@ export default function Page() {
 }
 
 function LoginScreen({
-  onLogin,
+  onGoogleLogin,
+  onDevLogin,
+  devAuth,
   loading,
   error,
 }: {
-  onLogin: () => void;
+  onGoogleLogin: () => void;
+  onDevLogin: () => void;
+  devAuth: boolean;
   loading: boolean;
   error: string | null;
 }) {
@@ -775,16 +894,41 @@ function LoginScreen({
         <h1 className="font-display text-3xl font-semibold tracking-wide text-accent">
           Raphael
         </h1>
-        <p className="text-[11px] uppercase tracking-widest text-faint">
-          Dev mode — sign in as {DEV_EMAIL}
-        </p>
+        <p className="text-sm text-muted">Sign in to continue.</p>
+
+        {/* Primary door: Google Sign-In is the login and the sign-up. An invited
+            email becomes a member; the very first sign-in ever bootstraps the admin;
+            an uninvited email is rejected at the callback (?login=denied). */}
         <button
-          onClick={onLogin}
+          onClick={onGoogleLogin}
           disabled={loading}
-          className="mt-2 w-full rounded-md bg-accent px-5 py-2.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
+          className="mt-2 flex w-full items-center justify-center gap-2 rounded-md border border-edge bg-raised px-5 py-2.5 text-sm font-medium text-on-surface transition-colors hover:bg-panel disabled:opacity-40"
         >
-          {loading ? "Signing in…" : "Dev login"}
+          <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
+            <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
+            <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" />
+            <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z" />
+            <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z" />
+          </svg>
+          {loading ? "Signing in…" : "Sign in with Google"}
         </button>
+
+        {/* Dev backdoor, compiled in only when NEXT_PUBLIC_DEV_AUTH=1. */}
+        {devAuth && (
+          <div className="w-full border-t border-edge pt-4">
+            <p className="mb-2 text-[11px] uppercase tracking-widest text-faint">
+              Dev mode — sign in as {DEV_EMAIL}
+            </p>
+            <button
+              onClick={onDevLogin}
+              disabled={loading}
+              className="w-full rounded-md bg-accent px-5 py-2.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
+            >
+              {loading ? "Signing in…" : "Dev login"}
+            </button>
+          </div>
+        )}
+
         {error && (
           <p className="max-w-md text-center text-sm text-error">{error}</p>
         )}
@@ -931,6 +1075,8 @@ function SettingsView({
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
       <div className="mx-auto flex max-w-2xl flex-col gap-6">
         <AssistantNameForm token={token} assistantName={assistantName} onSaved={onSaved} />
+
+        <TimezoneForm token={token} onFail={onFail} />
 
         <div>
           <h2 className="text-2xl font-semibold text-on-surface">
@@ -1276,6 +1422,222 @@ function AssistantNameForm({
           {saving ? "Saving…" : "Save"}
         </button>
         {saved && !dirty && (
+          <span role="status" className="text-xs text-muted">
+            Saved.
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// The notifications bell: polls the unread feed for a badge, and on open marks
+// that batch read (one PATCH per id) and shows it. Poll-based delivery, reusing
+// the REST proxy — no SSE, no tokens. Firing writes the notification row (the sink).
+function NotificationsBell({
+  token,
+  onFail,
+}: {
+  token: string;
+  onFail: (e: unknown) => void;
+}) {
+  const [unread, setUnread] = useState<Notification[]>([]);
+  const [viewing, setViewing] = useState<Notification[]>([]);
+  const [open, setOpen] = useState(false);
+
+  const poll = useCallback(async () => {
+    try {
+      setUnread(await getNotifications(token, { unread: true }));
+    } catch (e) {
+      onFail(e);
+    }
+  }, [token, onFail]);
+
+  // Poll on mount, then every ~45s. Cleared on unmount / token change.
+  useEffect(() => {
+    void poll();
+    const t = setInterval(() => void poll(), 45000);
+    return () => clearInterval(t);
+  }, [poll]);
+
+  // Opening snapshots the current unread batch, clears the badge optimistically,
+  // and marks each read server-side; the next poll confirms. Closing just hides.
+  function toggle() {
+    if (!open) {
+      setViewing(unread);
+      if (unread.length > 0) {
+        const ids = unread.map((n) => n.id);
+        setUnread([]);
+        ids.forEach((id) => void markNotificationRead(token, id).catch(onFail));
+      }
+    }
+    setOpen((o) => !o);
+  }
+
+  return (
+    <div className="absolute right-4 top-3 z-20">
+      <button
+        onClick={toggle}
+        aria-label={`Notifications${unread.length ? ` (${unread.length} unread)` : ""}`}
+        className="relative flex h-9 w-9 items-center justify-center rounded-full border border-edge bg-panel text-muted shadow-sm transition-colors hover:text-on-surface"
+      >
+        <svg
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.75"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+        </svg>
+        {unread.length > 0 && (
+          <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold text-on-accent">
+            {unread.length > 9 ? "9+" : unread.length}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <>
+          {/* Click-away backdrop — closes the panel without a modal library. */}
+          <button
+            aria-label="Close notifications"
+            onClick={() => setOpen(false)}
+            className="fixed inset-0 z-0 cursor-default"
+          />
+          <div className="absolute right-0 z-10 mt-2 w-80 overflow-hidden rounded-xl border border-edge bg-panel shadow-lg">
+            <div className="border-b border-edge px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-faint">
+              Notifications
+            </div>
+            <div className="max-h-80 overflow-y-auto">
+              {viewing.length === 0 ? (
+                <p className="px-3 py-6 text-center text-sm text-faint">
+                  No new notifications.
+                </p>
+              ) : (
+                viewing.map((n) => (
+                  <div
+                    key={n.id}
+                    className="border-b border-edge/60 px-3 py-2 last:border-0"
+                  >
+                    <p className="whitespace-pre-wrap text-sm text-on-surface">
+                      {n.content}
+                    </p>
+                    {n.created_at && (
+                      <p className="mt-0.5 text-xs text-muted">
+                        {new Date(n.created_at).toLocaleString([], {
+                          month: "short",
+                          day: "numeric",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </p>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Timezone picker: reminders fire in this IANA tz (evaluated server-side). The
+// browser tz is auto-stamped on app-load; this row lets the user view/override.
+// A native <select> from Intl.supportedValuesOf — no timezone dependency.
+function TimezoneForm({
+  token,
+  onFail,
+}: {
+  token: string;
+  onFail: (e: unknown) => void;
+}) {
+  const detected = detectedTz();
+  const [tz, setTz] = useState(detected);
+  const [saved, setSaved] = useState(detected);
+  const [busy, setBusy] = useState(false);
+  const [ok, setOk] = useState(false);
+
+  // localStorage is client-only; hydrate the last-sent value in an effect. This
+  // is the picker's source of truth since the server exposes no tz getter.
+  useEffect(() => {
+    const v = localStorage.getItem(TZ_VALUE) ?? detected;
+    setTz(v);
+    setSaved(v);
+  }, [detected]);
+
+  const zones = useMemo<string[]>(() => {
+    // Native IANA list (ladder: platform feature over a tz library). Not yet in
+    // every TS lib target, so probe it; fall back to just the current value.
+    const f = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] })
+      .supportedValuesOf;
+    const list = typeof f === "function" ? f("timeZone") : [];
+    return list.includes(tz) ? list : [tz, ...list];
+  }, [tz]);
+
+  async function save() {
+    if (busy || tz === saved) return;
+    setBusy(true);
+    setOk(false);
+    try {
+      await setTimezone(token, tz);
+      localStorage.setItem(TZ_VALUE, tz);
+      // Mark this browser reconciled so app-load auto-detect won't overwrite the
+      // manual choice on the next load.
+      localStorage.setItem(TZ_SEEN, detected);
+      setSaved(tz);
+      setOk(true);
+    } catch (e) {
+      onFail(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-edge bg-panel p-4">
+      <h3 className="mb-1 text-base font-semibold text-on-surface">Timezone</h3>
+      <p className="mb-4 text-sm text-muted">
+        Reminders fire in this timezone. Detected from your browser as{" "}
+        <span className="font-medium text-on-surface">{detected}</span>.
+      </p>
+
+      <label className="flex flex-col gap-1.5 text-sm">
+        <span className="text-[11px] uppercase tracking-widest text-faint">
+          IANA timezone
+        </span>
+        <select
+          value={tz}
+          onChange={(e) => {
+            setTz(e.target.value);
+            setOk(false);
+          }}
+          className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface outline-none transition-colors focus:border-accent"
+        >
+          {zones.map((z) => (
+            <option key={z} value={z}>
+              {z}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <div className="mt-4 flex items-center gap-3">
+        <button
+          onClick={() => void save()}
+          disabled={busy || tz === saved}
+          className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
+        >
+          {busy ? "Saving…" : "Save"}
+        </button>
+        {ok && tz === saved && (
           <span role="status" className="text-xs text-muted">
             Saved.
           </span>

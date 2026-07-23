@@ -88,10 +88,14 @@ func (s *Server) BuildApp() *fiber.App {
 	// CORS: the browser SPA is a different origin than the gateway, so without
 	// this every /auth and /api call is blocked by the preflight. Allows the
 	// configured web origin(s), the Authorization header, and the verbs we use.
+	// AllowCredentials is on so the cross-origin SPA can send/receive the session
+	// cookie the Google login sets — and credentials FORBID a wildcard origin, so
+	// AllowOrigins must stay the explicit web origin(s) (CORSOrigins is exactly that).
 	app.Use(cors.New(cors.Config{
-		AllowOrigins: s.cfg.CORSOrigins,
-		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
-		AllowHeaders: "Authorization,Content-Type,Accept",
+		AllowOrigins:     s.cfg.CORSOrigins,
+		AllowMethods:     "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+		AllowHeaders:     "Authorization,Content-Type,Accept",
+		AllowCredentials: true,
 	}))
 
 	app.Get("/healthz", s.handleHealth) // liveness
@@ -113,6 +117,16 @@ func (s *Server) BuildApp() *fiber.App {
 	// The signed `state` query param carries + authenticates the user_id; the
 	// handler verifies its HMAC before trusting it. No token ever rides the redirect.
 	app.Get("/auth/google/callback", s.handleGoogleCallback)
+
+	// Google Sign-In IS the login now. These two are PUBLIC (no JWT) and mounted
+	// at TOP LEVEL alongside the callback:
+	//   /auth/google/login → builds the consent URL and 302s the browser to Google
+	//                        (no logged-in uid yet; the callback authenticates).
+	//   /auth/session      → reads the session cookie and returns the current
+	//                        user + role (or 401). Its own guard is the cookie, so
+	//                        it must live outside the Bearer-JWT /api group.
+	app.Get("/auth/google/login", s.handleGoogleLoginStart)
+	app.Get("/auth/session", s.handleSession)
 
 	// Everything under /api requires a valid JWT and is rate limited.
 	api := app.Group("/api", s.authMiddleware, s.rateLimitMiddleware)
@@ -154,12 +168,53 @@ func (s *Server) BuildApp() *fiber.App {
 	api.Patch("/tasks/:id", s.proxyTasks)
 	api.Delete("/tasks/:id", s.proxyTasks)
 
+	// Reminders: same JWT-uid-forcing proxy as tasks. Two doors — this REST path
+	// (0 tokens) and the chat create_reminder tool (NL compiled once). The :id is
+	// traversal-guarded in proxyReminders.
+	api.Get("/reminders", s.proxyReminders)
+	api.Post("/reminders", s.proxyReminders)
+	api.Patch("/reminders/:id", s.proxyReminders)
+	api.Delete("/reminders/:id", s.proxyReminders)
+
+	// Notifications: the in-app delivery feed. GET list + PATCH :id/read.
+	api.Get("/notifications", s.proxyNotifications)
+	api.Patch("/notifications/:id/read", s.proxyNotifications)
+
+	// Timezone: web auto-detects + Settings picker PUTs the IANA tz.
+	api.Put("/timezone", s.proxyTimezone)
+
 	// Google: connect builds the consent URL (JWT-gated, returns JSON not a 302
 	// so the JWT stays out of the browser URL); status/disconnect proxy to
 	// user-svc rooted at the JWT uid. The callback is public and mounted above.
 	api.Get("/google/connect", s.handleGoogleConnect)
 	api.Get("/google/status", s.proxyGoogle)
 	api.Delete("/google", s.proxyGoogle)
+
+	// Admin surface: JWT (inherited from /api) PLUS a DB-verified admin role.
+	// requireAdmin re-reads users.role from Postgres on every hit, so a member
+	// cannot escalate with a stale/crafted JWT claim — fail closed. Every handler
+	// lives in admin.go and proxies to user-svc /internal, the gateway forcing the
+	// uid (never a client-supplied one). All admin config editing is pure REST → 0
+	// LLM tokens.
+	admin := api.Group("/admin", s.requireAdmin)
+
+	// Allowlist = invites. Adding an email is what permits that person's first
+	// Google sign-in; uninvited emails are rejected at the callback (fail closed).
+	admin.Post("/allowlist", s.proxyAllowlist)       // add an email
+	admin.Get("/allowlist", s.proxyAllowlist)        // list allowlisted emails
+	admin.Delete("/allowlist/:email", s.proxyAllowlist) // remove one (handler reads :email)
+
+	// User management: list, promote/demote (role), remove.
+	admin.Get("/users", s.proxyAdminUsers)            // list users + roles
+	admin.Patch("/users/:id/role", s.proxyAdminUsers) // change a user's role
+	admin.Delete("/users/:id", s.proxyAdminUsers)     // remove a user
+
+	// System provider/model config: admin-owned, system-wide. Proxies the EXISTING
+	// /users/<uid>/credentials handlers rooted at SYSTEM_CONFIG_UID (not the JWT
+	// uid) — same table, one-active index, lifeboat and portability semantics
+	// unchanged. Members never see or configure providers.
+	admin.All("/providers", s.proxySystemProviders)
+	admin.All("/providers/*", s.proxySystemProviders)
 
 	return app
 }

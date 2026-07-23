@@ -114,7 +114,7 @@ def test_mutating_task_tool_runs_at_most_once_and_ends_the_loop(monkeypatch):
         def capabilities(self):
             return _Caps()
 
-        def chat(self, convo, system=None, tools=None, max_tokens=512):
+        def chat(self, convo, system=None, tools=None, max_tokens=512, reasoning=True):
             return _Resp()
 
     block, tool_calls = workflow._preflight(

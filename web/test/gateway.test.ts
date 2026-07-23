@@ -1,20 +1,27 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  addAllowedEmail,
   ApiError,
   connectGoogle,
   createTask,
   deleteConversation,
   deleteTask,
   disconnectGoogle,
+  fetchSession,
   getCapabilities,
   getMemoryGraph,
   getMemoryStats,
   getProfile,
   getTasks,
+  googleLogin,
   googleStatus,
+  listAllowedEmails,
   listMessages,
   listProviders,
+  listUsers,
+  removeAllowedEmail,
+  setUserRole,
   storedDegraded,
   streamChat,
   updateProfile,
@@ -801,6 +808,140 @@ test("deleteConversation raises ApiError carrying the status on 500", async () =
       () => deleteConversation("t", "c1"),
     ),
     (e) => e instanceof ApiError && (e as ApiError).status === 500,
+  );
+});
+
+// --- auth: Google sign-in + session handoff ----------------------------------
+
+test("fetchSession folds a top-level role into the user", async () => {
+  let sentInit: RequestInit | undefined;
+  const s = await withFetch(
+    async (_url, init) => {
+      sentInit = init as RequestInit;
+      return new Response(
+        '{"token":"jwt","user":{"id":"u1","email":"a@b.com"},"role":"admin"}',
+        { status: 200 },
+      );
+    },
+    () => fetchSession(),
+  );
+  assert.equal(s.token, "jwt");
+  assert.equal(s.user.id, "u1");
+  assert.equal(s.user.role, "admin");
+  // The handoff cookie only rides along with credentials:'include'.
+  assert.equal(sentInit?.credentials, "include");
+});
+
+test("fetchSession keeps a role already on the user object", async () => {
+  const s = await withFetch(
+    async () =>
+      new Response('{"token":"jwt","user":{"id":"u1","role":"member"}}', { status: 200 }),
+    () => fetchSession(),
+  );
+  assert.equal(s.user.role, "member");
+});
+
+test("fetchSession raises a 401 ApiError when not signed in", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response('{"error":"no session"}', { status: 401 }),
+      () => fetchSession(),
+    ),
+    (e) => e instanceof ApiError && (e as ApiError).status === 401,
+  );
+});
+
+test("googleLogin navigates the browser to the consent URL", async () => {
+  const orig = globalThis.fetch;
+  // jsdom-less node has no window; stub the minimum googleLogin touches.
+  const g = globalThis as unknown as { window?: { location: { href: string } } };
+  const hadWindow = "window" in globalThis;
+  g.window = { location: { href: "" } };
+  globalThis.fetch = async () =>
+    new Response('{"auth_url":"https://accounts.google.com/o/oauth2/v2/auth?x=1"}', {
+      status: 200,
+    });
+  try {
+    await googleLogin();
+    assert.match(g.window!.location.href, /accounts\.google\.com/);
+  } finally {
+    globalThis.fetch = orig;
+    if (!hadWindow) delete g.window;
+  }
+});
+
+// --- admin: allowlist + users ------------------------------------------------
+
+test("listAllowedEmails accepts a bare array and the {emails:[]} shape", async () => {
+  const a = await withFetch(
+    async () => new Response('[{"email":"x@y.com"}]', { status: 200 }),
+    () => listAllowedEmails("t"),
+  );
+  assert.equal(a[0].email, "x@y.com");
+  const b = await withFetch(
+    async () => new Response('{"emails":[{"email":"z@y.com"}]}', { status: 200 }),
+    () => listAllowedEmails("t"),
+  );
+  assert.equal(b[0].email, "z@y.com");
+});
+
+test("addAllowedEmail POSTs the email", async () => {
+  let sentBody: unknown;
+  let sentMethod: string | undefined;
+  await withFetch(
+    async (_url, init) => {
+      sentMethod = (init as RequestInit).method;
+      sentBody = JSON.parse((init as RequestInit).body as string);
+      return new Response('{"email":"x@y.com"}', { status: 200 });
+    },
+    () => addAllowedEmail("t", "x@y.com"),
+  );
+  assert.equal(sentMethod, "POST");
+  assert.deepEqual(sentBody, { email: "x@y.com" });
+});
+
+test("removeAllowedEmail URL-encodes the email in the path", async () => {
+  let sentUrl: string | undefined;
+  await withFetch(
+    async (url) => {
+      sentUrl = String(url);
+      return new Response("{}", { status: 200 });
+    },
+    () => removeAllowedEmail("t", "a+b@y.com"),
+  );
+  assert.match(sentUrl!, /a%2Bb%40y\.com$/);
+});
+
+test("setUserRole PATCHes the role", async () => {
+  let sentBody: unknown;
+  let sentMethod: string | undefined;
+  await withFetch(
+    async (_url, init) => {
+      sentMethod = (init as RequestInit).method;
+      sentBody = JSON.parse((init as RequestInit).body as string);
+      return new Response('{"id":"u1","role":"admin"}', { status: 200 });
+    },
+    () => setUserRole("t", "u1", "admin"),
+  );
+  assert.equal(sentMethod, "PATCH");
+  assert.deepEqual(sentBody, { role: "admin" });
+});
+
+test("listUsers carries role through", async () => {
+  const u = await withFetch(
+    async () => new Response('[{"id":"u1","email":"a@b.com","role":"member"}]', { status: 200 }),
+    () => listUsers("t"),
+  );
+  assert.equal(u[0].role, "member");
+});
+
+test("admin calls raise ApiError carrying the status (fail closed on 403)", async () => {
+  await assert.rejects(
+    withFetch(
+      async () => new Response('{"error":"forbidden"}', { status: 403 }),
+      () => listUsers("t"),
+    ),
+    (e) => e instanceof ApiError && (e as ApiError).status === 403,
   );
 });
 

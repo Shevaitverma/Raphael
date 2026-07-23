@@ -14,6 +14,12 @@ GATEWAY="${GATEWAY_URL:-http://localhost:8080}"
 AGENT="${AGENT_SVC_URL:-http://localhost:8000}"
 OLLAMA="${OLLAMA_BASE_URL:-http://localhost:11434/v1}"
 DEV_UID="00000000-0000-0000-0000-000000000001"
+# Provider/model config is now ADMIN-OWNED and SYSTEM-WIDE: the agent-svc resolver
+# resolves SYS's active credential for EVERY user (not per-user). So the provider
+# sections below drive the SYSTEM config via an admin token + /api/admin/providers,
+# while conversations/memory/tasks stay isolated under the throwaway member TUID.
+SYS="00000000-0000-0000-0000-000000000002"
+ADMIN_EMAIL="auth-verify+e2eadmin@raphael.test"
 PY="${PY:-$(command -v python3 || command -v python)}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
@@ -25,10 +31,15 @@ pass() { echo "  PASS: $*"; }
 jget() { "$PY" -c "import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])" "$1" "$2"; }
 cleanup() {
   [ -n "$STUB_PID" ] && kill "$STUB_PID" >/dev/null 2>&1
-  # Delete the throwaway user; FK ON DELETE CASCADE drops its creds/facts/memories/
-  # tasks/conversations so the DB stays tidy and the next run re-mints it. Keyed on
-  # the constant email, so it is safe even before TUID is assigned.
-  psql -q -c "DELETE FROM users WHERE email='e2e@raphael.test';" >/dev/null 2>&1
+  # Delete the throwaway users; FK ON DELETE CASCADE drops their creds/facts/memories/
+  # tasks/conversations so the DB stays tidy and the next run re-mints them. Keyed on
+  # constant emails, safe even before ids are assigned. NEVER touches DEV_UID.
+  psql -q -c "DELETE FROM users WHERE email IN ('e2e@raphael.test','$ADMIN_EMAIL');" >/dev/null 2>&1
+  # Restore the SYSTEM provider config the resolver reads for everyone: drop any
+  # test-injected provider rows, leave the seeded local active and not the lifeboat.
+  # Scoped to SYS only — never DEV_UID.
+  psql -q -c "DELETE FROM provider_credentials WHERE user_id='$SYS' AND provider IN ('anthropic','openai_compat');" >/dev/null 2>&1
+  psql -q -c "UPDATE provider_credentials SET is_active=true, is_lifeboat=false WHERE user_id='$SYS' AND provider='local';" >/dev/null 2>&1
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -66,18 +77,33 @@ TUID=$("$PY" -c "import json,sys;print(json.load(open(sys.argv[1]))['user']['id'
 [ -n "$TUID" ] && [ "$TUID" != "$DEV_UID" ] || fail "dev-login did not mint a dedicated non-DEV_UID user (got '$TUID')"
 pass "JWT minted for throwaway test user $TUID"
 
-echo "== 1b. provision TUID's local credential (clone DEV_UID's seeded 'local' row) =="
-# The ONLY read of DEV_UID data: clone its seeded local credential onto TUID so
-# chat works, pointed at the model chosen in 0b, active and not the lifeboat.
-# delete-then-insert scoped to TUID makes it idempotent across re-runs (a crashed
-# prior run that skipped cleanup re-uses the same email/id).
-psql -q -c "DELETE FROM provider_credentials WHERE user_id='$TUID';" >/dev/null
-psql -q -c "INSERT INTO provider_credentials (id, user_id, provider, auth_type, api_key_enc, base_url, model_id, is_active, is_lifeboat)
-            SELECT gen_random_uuid(), '$TUID', provider, auth_type, api_key_enc, base_url, '$MODEL', true, false
-            FROM provider_credentials WHERE user_id='$DEV_UID' AND provider='local';" >/dev/null
-LOCALPROV=$(psql -Atc "SELECT provider||'='||is_active FROM provider_credentials WHERE user_id='$TUID';")
-[ "$LOCALPROV" = "local=true" ] || fail "TUID local credential not provisioned (got '$LOCALPROV')"
-pass "TUID active local credential -> $MODEL"
+echo "== 1a. mint an ADMIN token (throwaway; promoted in DB) to drive the SYSTEM config =="
+# Provider config is admin-owned now, so the fallback sections need an admin. Mint a
+# throwaway via dev-login, promote it in the DB (a throwaway row, never DEV_UID),
+# then re-login so the JWT carries role=admin. cleanup() deletes this user.
+curl -s --max-time 8 -X POST "$GATEWAY/auth/dev-login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$ADMIN_EMAIL\"}" > "$TMP/adm0.json"
+AUID=$("$PY" -c "import json,sys;print(json.load(open(sys.argv[1]))['user']['id'])" "$TMP/adm0.json")
+psql -q -c "UPDATE users SET role='admin' WHERE id='$AUID';" >/dev/null
+curl -s --max-time 8 -X POST "$GATEWAY/auth/dev-login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$ADMIN_EMAIL\"}" > "$TMP/adm.json"
+ATOKEN=$(jget "$TMP/adm.json" token)
+AROLE=$("$PY" -c "import json,sys;print(json.load(open(sys.argv[1]))['user']['role'])" "$TMP/adm.json")
+[ "$AROLE" = "admin" ] || fail "admin dev-login role = '$AROLE', want admin"
+pass "admin JWT minted (role=$AROLE)"
+
+echo "== 1b. point the SYSTEM provider config at the chosen model (resolver reads it for EVERY user) =="
+# The resolver resolves SYS's active credential for everyone, so chat works off the
+# system's seeded local row — point it at the model chosen in 0b, active, not the
+# lifeboat. Scoped to SYS; cleanup() restores it. TUID keeps NO provider of its own,
+# proving the resolver uses the SYSTEM config, not per-user creds.
+psql -q -c "DELETE FROM provider_credentials WHERE user_id='$SYS' AND provider IN ('anthropic','openai_compat');" >/dev/null
+psql -q -c "UPDATE provider_credentials SET model_id='$MODEL', is_active=true, is_lifeboat=false WHERE user_id='$SYS' AND provider='local';" >/dev/null
+SYSPROV=$(psql -Atc "SELECT provider||'='||is_active FROM provider_credentials WHERE user_id='$SYS' AND provider='local';")
+[ "$SYSPROV" = "local=true" ] || fail "SYSTEM local credential not active (got '$SYSPROV')"
+[ "$(psql -Atc "SELECT count(*) FROM provider_credentials WHERE user_id='$TUID';")" = "0" ] \
+  || fail "TUID must own NO provider credentials (config is system-wide)"
+pass "SYSTEM active local credential -> $MODEL (TUID owns none)"
 
 echo "== 2. create conversation =="
 curl -s --max-time 8 -X POST "$GATEWAY/api/conversations" -H "Authorization: Bearer $TOKEN" \
@@ -189,15 +215,20 @@ VIOL=$(psql -Atc "SELECT count(*) FROM messages WHERE content ~ '(\"type\":\s*\"
 [ "$VIOL" = "0" ] || fail "$VIOL messages contain provider wire-format"
 pass "no toolu_/call_/thinking/cache_control in messages"
 
-echo "== 6. LIFEBOAT: dead anthropic credential (401) must degrade to local =="
-curl -s --max-time 8 -X POST "$GATEWAY/api/providers" -H "Authorization: Bearer $TOKEN" \
+echo "== 6. LIFEBOAT: dead anthropic in the SYSTEM config (401) must degrade to local =="
+# Drive the admin-owned SYSTEM config via the admin API (which encrypts the key the
+# same way as the per-user route). The resolver reads SYS for every user, so the
+# member's chat below degrades on the system's dead anthropic to the system lifeboat.
+curl -s --max-time 8 -X POST "$GATEWAY/api/admin/providers" -H "Authorization: Bearer $ATOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"provider":"anthropic","auth_type":"api_key","api_key":"sk-ant-invalid","model_id":"claude-opus-4-8","activate":true}' >/dev/null
-# Activating anthropic deactivated local (one active per user). Now designate the
-# inactive local row as the lifeboat — the resolver falls back to is_lifeboat, not
-# to a hardcoded provider='local'.
-psql -q -c "UPDATE provider_credentials SET is_lifeboat=true WHERE user_id='$TUID' AND provider='local';" >/dev/null
-BEFORE=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$TUID';")
+# Activating anthropic deactivated local (one active per owner). Designate the now
+# inactive SYSTEM local row as the lifeboat via the admin API — the resolver falls
+# back to is_lifeboat, not to a hardcoded provider='local'.
+LID=$(curl -s --max-time 8 "$GATEWAY/api/admin/providers" -H "Authorization: Bearer $ATOKEN" | "$PY" -c "import json,sys;print(next((c['id'] for c in json.load(sys.stdin)['credentials'] if c['provider']=='local'),''))")
+[ -n "$LID" ] || fail "could not find SYSTEM local credential id"
+curl -s --max-time 8 -X POST "$GATEWAY/api/admin/providers/$LID/lifeboat" -H "Authorization: Bearer $ATOKEN" >/dev/null
+BEFORE=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$SYS';")
 "$PY" "$HERE/sse_client.py" "$GATEWAY" "$TOKEN" "$CID" \
   "In one short sentence, what is the capital of Japan?" > "$TMP/lifeboat.json"
 cat "$TMP/lifeboat.json"
@@ -211,7 +242,7 @@ assert d["n_done"]==1, "expected one done"
 assert d["degraded_payload"]["provider"]=="local", d["degraded_payload"]
 print("  PASS: degraded->%s, answered by %s"%(d["degraded_payload"]["model"],d["done_payload"]["model"]))
 PYEOF
-AFTER=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$TUID';")
+AFTER=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$SYS';")
 [ "$BEFORE" = "$AFTER" ] || fail "is_active changed by lifeboat: '$BEFORE' -> '$AFTER'"
 pass "is_active unchanged after lifeboat: $AFTER"
 
@@ -219,10 +250,10 @@ echo "== 7. TRANSIENT 429: must error, must NOT fire the lifeboat =="
 "$PY" "$HERE/stub_429.py" 9099 >/dev/null 2>&1 &
 STUB_PID=$!
 sleep 1
-curl -s --max-time 8 -X POST "$GATEWAY/api/providers" -H "Authorization: Bearer $TOKEN" \
+curl -s --max-time 8 -X POST "$GATEWAY/api/admin/providers" -H "Authorization: Bearer $ATOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"provider":"openai_compat","auth_type":"api_key","api_key":"sk-x","base_url":"http://127.0.0.1:9099/v1","model_id":"stub","activate":true}' >/dev/null
-B2=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$TUID';")
+B2=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$SYS';")
 "$PY" "$HERE/sse_client.py" "$GATEWAY" "$TOKEN" "$CID" "should error" > "$TMP/t429.json"
 cat "$TMP/t429.json"
 "$PY" - "$TMP/t429.json" <<'PYEOF' || fail "429 assertions failed"
@@ -234,18 +265,18 @@ assert d["n_token"]==0, "no tokens on transient error"
 assert "429" in json.dumps(d["error_payload"]), d["error_payload"]
 print("  PASS: error (no lifeboat) on 429")
 PYEOF
-A2=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$TUID';")
+A2=$(psql -Atc "SELECT string_agg(provider||'='||is_active,',' ORDER BY provider) FROM provider_credentials WHERE user_id='$SYS';")
 [ "$B2" = "$A2" ] || fail "is_active changed by 429 path"
 pass "is_active unchanged after 429: $A2"
 kill "$STUB_PID" >/dev/null 2>&1; STUB_PID=""
 
-echo "== 8. restore local as the active credential =="
-psql -q -c "DELETE FROM provider_credentials WHERE user_id='$TUID' AND provider IN ('anthropic','openai_compat');" >/dev/null
+echo "== 8. restore local as the active SYSTEM credential =="
+psql -q -c "DELETE FROM provider_credentials WHERE user_id='$SYS' AND provider IN ('anthropic','openai_compat');" >/dev/null
 # Clear the lifeboat flag as we reactivate local — a row cannot be both active
 # and the lifeboat (active_is_not_lifeboat CHECK).
-psql -q -c "UPDATE provider_credentials SET is_active=true, is_lifeboat=false WHERE user_id='$TUID' AND provider='local';" >/dev/null
-FINAL=$(psql -Atc "SELECT provider||'='||is_active FROM provider_credentials WHERE user_id='$TUID';")
-pass "restored: $FINAL"
+psql -q -c "UPDATE provider_credentials SET is_active=true, is_lifeboat=false WHERE user_id='$SYS' AND provider='local';" >/dev/null
+FINAL=$(psql -Atc "SELECT provider||'='||is_active FROM provider_credentials WHERE user_id='$SYS';")
+pass "restored SYSTEM config: $FINAL"
 
 echo "== 9. two doors + skip-gate (token minimization) =="
 # Runs on the restored local credential (section 8). Three proofs, ordered so an

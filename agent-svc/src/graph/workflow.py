@@ -29,6 +29,7 @@ from config import CONV_SVC_URL
 from llm import resolver
 from memory import budget, extract as extractor_mod, history, portrait as portrait_mod, retriever
 from tools import google as google_tool
+from tools import reminders as reminders_tool
 from tools import search as search_tool
 from tools import tasks as tasks_tool
 
@@ -319,6 +320,32 @@ def _dispatch_task(name: str, uid: str, args: dict) -> tuple[dict, str]:
     return {}, ""
 
 
+def _dispatch_reminder(name: str, uid: str, args: dict) -> tuple[dict, str]:
+    """Route one reminder tool call to its reminders.py handler (pure httpx, NEVER
+    an LLM call — a nested LLM deadlocks the queue drain). Returns (neutral
+    arguments, result string). Neutral args use reminder_id, never the literal "id"
+    the e2e wire-format regex bans, and drop empties. This is the ONE place tokens
+    are spent on a reminder: the turn's LLM compiled the NL into {kind, cron,
+    fire_at, until} — tz and next_fire are force-stamped server-side, never here."""
+    a = args or {}
+
+    def _s(k):  # trimmed string arg, or ""
+        return str(a.get(k) or "").strip()
+
+    if name == reminders_tool.LIST_REMINDERS["name"]:
+        return {}, reminders_tool.list_reminders(uid)
+    if name == reminders_tool.CREATE_REMINDER["name"]:
+        na = {k: _s(k) for k in ("text", "kind", "cron", "fire_at", "until", "window") if _s(k)}
+        return na, reminders_tool.create_reminder(
+            uid, na.get("text", ""), na.get("kind", ""), na.get("cron", ""),
+            na.get("fire_at", ""), na.get("until", ""), na.get("window", ""),
+        )
+    if name == reminders_tool.DELETE_REMINDER["name"]:
+        rid = _s("reminder_id")
+        return ({"reminder_id": rid} if rid else {}), reminders_tool.delete_reminder(uid, rid)
+    return {}, ""
+
+
 def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
     """Pre-flight chat() calls before streaming; returns (system-prompt block, tool_calls).
 
@@ -351,8 +378,9 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
     # looks task-related, so a non-task turn never adds them and never triggers
     # the pre-flight chat() below. A cheap keyword check, no LLM.
     tasks_on = tasks_tool.looks_task_related(state["message"])
+    reminders_on = reminders_tool.looks_reminder_related(state["message"])
 
-    if not search_on and not cal_on and not tasks_on:
+    if not search_on and not cal_on and not tasks_on and not reminders_on:
         return "", []  # nothing to offer: nothing leaves the box.
 
     provider = state["provider"]
@@ -362,8 +390,9 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
         native = False  # the conservative floor, same as everywhere else.
 
     if not native:
-        # Tier 2: only search has a keyword fallback; calendar and tasks refuse
-        # (no keyword can guess a task_id or a calendar window).
+        # Tier 2: only search has a keyword fallback; calendar, tasks and reminders
+        # refuse (no keyword can guess a task_id, a calendar window, or compile an
+        # NL schedule into cron).
         if not search_on:
             return "", []
         q = _tier2_query(state["message"])
@@ -376,16 +405,24 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
         tools.append(google_tool.CALENDAR_LIST_EVENTS)
     if tasks_on:
         tools.extend(tasks_tool.ALL_TOOLS)
+    if reminders_on:
+        tools.extend(reminders_tool.ALL_TOOLS)
 
     blocks: list[str] = []
     tool_calls: list = []
     cal_done = False
     task_mutated = False  # a create/update/delete already fired this turn
+    reminder_mutated = False  # a create/delete reminder already fired this turn
     empty_q = None  # a search that came back with zero hits and may still refine
     convo = list(messages)
     for _ in range(_MAX_PREFLIGHT_ROUNDS):
         try:
-            resp = provider.chat(convo, system=system, tools=tools, max_tokens=512)
+            # reasoning=False: the tool-DECISION turn is structured, not creative.
+            # A thinking model leaves content/tool_calls EMPTY until it stops
+            # deliberating and burns the whole 512 budget on reasoning (see
+            # openai_compat._optional) — so tools never fire on a local qwen3. Turn
+            # thinking OFF here; the streamed ANSWER turn below keeps it on.
+            resp = provider.chat(convo, system=system, tools=tools, max_tokens=512, reasoning=False)
         except Exception:
             break  # the model never asked; do not claim a tool failed.
         calls = resp.tool_calls or []
@@ -432,13 +469,38 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
                 ]
                 task_progressed = True
 
-        if task_mutated:
+        # --- reminder tools: mirror the task block. A read (list_reminders) may
+        # precede ONE write; a mutating tool fires AT MOST ONCE and any write ends
+        # the loop, so a confused model cannot double-submit a reminder.
+        reminder_progressed = False
+        for c in calls:
+            rname = c.get("name")
+            if rname != reminders_tool.LIST_REMINDERS["name"] and rname not in reminders_tool.MUTATING:
+                continue
+            if rname in reminders_tool.MUTATING:
+                if reminder_mutated:
+                    continue
+                reminder_mutated = True
+            neutral_args, result = _dispatch_reminder(rname, uid, c.get("arguments") or {})
+            tool_calls.append({"name": rname, "arguments": neutral_args})
+            blocks.append(result)
+            if rname == reminders_tool.LIST_REMINDERS["name"]:
+                # Hand the list (each line carries a reminder_id) back so a follow-up
+                # round can resolve "cancel my gym reminder" to the reminder_id
+                # delete_reminder needs. Plain role/content — every adapter reads it.
+                convo = convo + [
+                    {"role": "assistant", "content": "I looked up your reminders."},
+                    {"role": "user", "content": result},
+                ]
+                reminder_progressed = True
+
+        if task_mutated or reminder_mutated:
             break  # a write is terminal.
 
         srch = next((c for c in calls if c.get("name") == search_tool.WEB_SEARCH["name"]), None)
         if srch is None:
-            if task_progressed:
-                continue  # a read task asked for a follow-up round to write.
+            if task_progressed or reminder_progressed:
+                continue  # a read (task or reminder) asked for a follow-up round to write.
             break  # no (further) search asked — the tool working, not failing.
         q = str((srch.get("arguments") or {}).get("query") or "").strip()
         if not q:
