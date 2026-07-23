@@ -57,9 +57,10 @@ type Message struct {
 	// Provenance of an assistant turn, persisted so a reload shows what SSE showed:
 	// pointer + no omitempty so a user message serializes answered_model as null,
 	// not a missing key. degraded is false on every non-degraded/user row.
-	AnsweredModel *string   `json:"answered_model"`
-	Degraded      bool      `json:"degraded"`
-	CreatedAt     time.Time `json:"created_at"`
+	AnsweredModel    *string   `json:"answered_model"`
+	AnsweredProvider *string   `json:"answered_provider"`
+	Degraded         bool      `json:"degraded"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 // ---- helpers --------------------------------------------------------------

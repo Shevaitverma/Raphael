@@ -232,6 +232,10 @@ func (s *Server) proxyNotifications(c *fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusBadRequest, "invalid path")
 		}
 		target += "/" + url.PathEscape(id) + "/read"
+	} else if qs := c.Request().URI().QueryString(); len(qs) > 0 {
+		// List read: pass the incoming query (?unread=1) through verbatim. Safe —
+		// uid is fixed in the path above, so no client value overrides isolation.
+		target += "?" + string(qs)
 	}
 
 	var body []byte

@@ -12,6 +12,7 @@ import {
   getCapabilities,
   getMemoryGraph,
   getMemoryStats,
+  getNotifications,
   getProfile,
   getTasks,
   googleLogin,
@@ -436,14 +437,26 @@ test("listMessages parses answered_model, degraded and tool_calls", async () => 
 });
 
 test("storedDegraded rebuilds the live banner shape for a degraded reload", () => {
+  // A non-local lifeboat: the persisted provider must win, not a hardcoded 'local'.
+  const d = storedDegraded({
+    role: "assistant",
+    content: "hi",
+    answered_model: "claude-3-5-sonnet",
+    answered_provider: "anthropic",
+    degraded: true,
+  });
+  // Same shape the SSE `degraded` event yields, so MessageRow renders one banner.
+  assert.equal(d?.model, "claude-3-5-sonnet");
+  assert.equal(d?.provider, "anthropic");
+});
+
+test("storedDegraded falls back to local for a pre-016 row without answered_provider", () => {
   const d = storedDegraded({
     role: "assistant",
     content: "hi",
     answered_model: "qwen2.5:7b",
     degraded: true,
   });
-  // Same shape the SSE `degraded` event yields, so MessageRow renders one banner.
-  assert.equal(d?.model, "qwen2.5:7b");
   assert.equal(d?.provider, "local");
 });
 
@@ -966,4 +979,27 @@ test("aborting before the first byte reports no error", async () => {
     globalThis.fetch = orig;
   }
   assert.deepEqual(c.errors, []);
+});
+
+// --- notifications: server {text, read_at} -> client {content, read} ----------
+
+test("getNotifications maps server rows to the client shape", async () => {
+  const orig = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify([
+        { id: "n1", reminder_id: "r1", text: "drink water", read_at: null, created_at: "t0" },
+        { id: "n2", reminder_id: null, text: "seen one", read_at: "2026-01-01T00:00:00Z" },
+      ]),
+      { status: 200 },
+    );
+  try {
+    const ns = await getNotifications("t");
+    assert.equal(ns[0].content, "drink water");
+    assert.equal(ns[0].read, false); // read_at null -> unread
+    assert.equal(ns[0].reminder_id, "r1");
+    assert.equal(ns[1].read, true); // read_at present -> read
+  } finally {
+    globalThis.fetch = orig;
+  }
 });

@@ -132,6 +132,13 @@ export default function Page() {
   const abortRef = useRef<AbortController | null>(null);
   // A conversation we just created: the load effect must skip it exactly once.
   const skipLoadRef = useRef<string | null>(null);
+  // Mirror of activeId for refreshConversations' initial-select guard, so the
+  // callback can read the current selection without listing activeId as a dep
+  // (which would re-fire the list GET on every conversation switch).
+  const activeIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
 
   // --- auth ------------------------------------------------------------------
 
@@ -356,13 +363,13 @@ export default function Page() {
       const convs = await listConversations(token);
       setConversations(convs);
       setError(null);
-      if (convs.length > 0 && activeId === null) {
+      if (convs.length > 0 && activeIdRef.current === null) {
         setActiveId(convs[0].id);
       }
     } catch (e) {
       failed(e);
     }
-  }, [token, activeId, failed]);
+  }, [token, failed]);
 
   useEffect(() => {
     if (token) void refreshConversations();
@@ -390,17 +397,19 @@ export default function Page() {
 
   useEffect(() => {
     if (!token || !activeId) return;
+    // Registered on every viewed conversation — including a just-created one —
+    // so navigating AWAY aborts its in-flight stream. This does not abort the
+    // stream handleSend is about to start: cleanup only fires on the NEXT
+    // activeId change or unmount, never on this run.
+    const cleanup = () => abortRef.current?.abort();
     // A conversation we just created holds only the optimistic messages already
     // on screen. Loading it would replace them mid-stream and drop the reply.
     if (skipLoadRef.current === activeId) {
       skipLoadRef.current = null;
-      return;
+      return cleanup;
     }
     void loadMessages(activeId);
-    // Cleanup only registers once a conversation is actually being viewed, so
-    // the null -> new-conversation transition in handleSend cannot abort the
-    // stream it is about to start. Switching away from a live one does.
-    return () => abortRef.current?.abort();
+    return cleanup;
   }, [token, activeId, loadMessages]);
 
   // Two-step inline confirm: the trash icon arms this, a second click deletes.
@@ -842,7 +851,7 @@ export default function Page() {
               {messages
                 .filter((m) => m.role !== "tool")
                 .map((m, i) => (
-                  <MessageRow key={m.id ?? m.localId ?? i} message={m} assistantName={assistantName} />
+                  <MessageRow key={m.localId ?? m.id ?? i} message={m} assistantName={assistantName} />
                 ))}
             </div>
           </div>
@@ -1918,11 +1927,11 @@ function MessageRow({
             role="status"
             className="mt-2 border-l-2 border-warning bg-warning/10 px-3 py-2 text-xs text-warning"
           >
-            Answered by local{" "}
+            Answered by {message.degraded.provider}{" "}
             <span className="font-semibold">
               {message.degraded.model || message.degraded.provider}
             </span>{" "}
-            — your Claude credential was rejected
+            — the active provider&apos;s credential was rejected
             {message.degraded.reason ? ` (${message.degraded.reason})` : ""}.
           </div>
         )}

@@ -141,7 +141,9 @@ func (s *server) userSetRole(w http.ResponseWriter, r *http.Request) {
 
 // userRemove deletes a user (cascading their isolated data). The store refuses to
 // remove protected accounts (DEV_UID / the SYSTEM_CONFIG owner) -> errProtectedUser
-// -> 403, and returns errNotFound -> 404 when the user does not exist.
+// -> 403, returns errNotFound -> 404 when the user does not exist, and errLastAdmin
+// -> 409 when removing the target would leave zero loginable admins (mirrors the
+// demote guard in userSetRole; the store already refused via tx rollback).
 func (s *server) userRemove(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 
@@ -151,6 +153,8 @@ func (s *server) userRemove(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, "user not found")
 		case errors.Is(err, errProtectedUser):
 			writeErr(w, http.StatusForbidden, "this user is protected and cannot be removed")
+		case errors.Is(err, errLastAdmin):
+			writeErr(w, http.StatusConflict, "cannot remove the last admin")
 		default:
 			writeErr(w, http.StatusInternalServerError, "failed to remove user")
 		}

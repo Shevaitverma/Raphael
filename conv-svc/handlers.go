@@ -166,8 +166,8 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	// TestListMessagesLimitOrdering: id is a random uuid, so the order it settles
 	// on among tied rows is stable, NOT insertion order.
 	rows, err := s.db.Query(ctx,
-		`SELECT id, conversation_id, role, content, tool_calls, answered_model, degraded, created_at FROM (
-		   SELECT id, conversation_id, role, content, tool_calls, answered_model, degraded, created_at
+		`SELECT id, conversation_id, role, content, tool_calls, answered_model, answered_provider, degraded, created_at FROM (
+		   SELECT id, conversation_id, role, content, tool_calls, answered_model, answered_provider, degraded, created_at
 		   FROM messages
 		   WHERE conversation_id = $1
 		   ORDER BY created_at DESC, id DESC
@@ -186,7 +186,7 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var m Message
 		var tc []byte
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &tc, &m.AnsweredModel, &m.Degraded, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &tc, &m.AnsweredModel, &m.AnsweredProvider, &m.Degraded, &m.CreatedAt); err != nil {
 			writeErr(w, http.StatusInternalServerError, "could not read messages")
 			return
 		}
@@ -218,8 +218,9 @@ func (s *Server) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
 		// Pointers so "absent" is distinguishable from an explicit zero: an absent
 		// answered_model stores NULL, an absent degraded stores false. Declared so
 		// DisallowUnknownFields accepts them from agent-svc.
-		AnsweredModel *string `json:"answered_model"`
-		Degraded      *bool   `json:"degraded"`
+		AnsweredModel    *string `json:"answered_model"`
+		AnsweredProvider *string `json:"answered_provider"`
+		Degraded         *bool   `json:"degraded"`
 	}
 	if err := decodeBody(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -247,6 +248,10 @@ func (s *Server) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
 	if in.AnsweredModel != nil {
 		answeredModelArg = *in.AnsweredModel
 	}
+	var answeredProviderArg any // nil => SQL NULL
+	if in.AnsweredProvider != nil {
+		answeredProviderArg = *in.AnsweredProvider
+	}
 	degradedArg := false
 	if in.Degraded != nil {
 		degradedArg = *in.Degraded
@@ -262,12 +267,12 @@ func (s *Server) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
 	// insert writes nothing and Scan reports ErrNoRows => 404, exactly as for an
 	// id that does not exist. It also subsumes the old FK-violation branch.
 	err = s.db.QueryRow(ctx,
-		`INSERT INTO messages (conversation_id, role, content, tool_calls, answered_model, degraded)
-		 SELECT $1::uuid, $2::text, $3::text, $4::jsonb, $6::text, $7::boolean
+		`INSERT INTO messages (conversation_id, role, content, tool_calls, answered_model, answered_provider, degraded)
+		 SELECT $1::uuid, $2::text, $3::text, $4::jsonb, $6::text, $8::text, $7::boolean
 		 WHERE EXISTS (SELECT 1 FROM conversations WHERE id = $1 AND user_id = $5)
-		 RETURNING id, conversation_id, role, content, tool_calls, answered_model, degraded, created_at`,
-		convID, in.Role, in.Content, toolCallsArg, userID, answeredModelArg, degradedArg,
-	).Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &tc, &m.AnsweredModel, &m.Degraded, &m.CreatedAt)
+		 RETURNING id, conversation_id, role, content, tool_calls, answered_model, answered_provider, degraded, created_at`,
+		convID, in.Role, in.Content, toolCallsArg, userID, answeredModelArg, degradedArg, answeredProviderArg,
+	).Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &tc, &m.AnsweredModel, &m.AnsweredProvider, &m.Degraded, &m.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeErr(w, http.StatusNotFound, "conversation not found")

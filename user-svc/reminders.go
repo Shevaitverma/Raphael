@@ -169,16 +169,21 @@ func (s *store) deleteReminder(ctx context.Context, userID, id string) error {
 
 // ---------- store: notifications ----------
 
-func (s *store) listNotifications(ctx context.Context, userID string) ([]notification, error) {
+func (s *store) listNotifications(ctx context.Context, userID string, unread bool) ([]notification, error) {
 	if !validUUID(userID) {
 		return nil, errNotFound
 	}
 	// Newest first, capped at 100 — the bell derives recent list + unread count
-	// client-side. Unbounded history in the table; bounded read.
+	// client-side. Unbounded history in the table; bounded read. unread=true
+	// filters to unread rows so the badge count doesn't re-light on read ones.
+	unreadFilter := ""
+	if unread {
+		unreadFilter = " AND read_at IS NULL"
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT `+notifCols+`
 		FROM notifications
-		WHERE user_id = $1
+		WHERE user_id = $1`+unreadFilter+`
 		ORDER BY created_at DESC
 		LIMIT 100`, userID)
 	if err != nil {
@@ -447,7 +452,8 @@ func (s *server) deleteReminder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listNotifications(w http.ResponseWriter, r *http.Request) {
-	notifs, err := s.store.listNotifications(r.Context(), r.PathValue("uid"))
+	unread := r.URL.Query().Get("unread") == "1"
+	notifs, err := s.store.listNotifications(r.Context(), r.PathValue("uid"), unread)
 	if err != nil {
 		if errors.Is(err, errNotFound) {
 			writeErr(w, http.StatusNotFound, "user not found")

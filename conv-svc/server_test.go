@@ -281,18 +281,23 @@ func TestMessageProvenanceStoredAndListed(t *testing.T) {
 	postMsg(t, srv, convID, map[string]any{"role": "user", "content": "hi"})
 	postMsg(t, srv, convID, map[string]any{
 		"role": "assistant", "content": "hello",
-		"answered_model": "qwen2.5:7b", "degraded": true,
+		"answered_model": "claude-3-5-sonnet", "answered_provider": "anthropic", "degraded": true,
 	})
 
 	msgs := listMsgs(t, srv, msgsURL(convID, devUserID))
 	if len(msgs) != 2 {
 		t.Fatalf("got %d messages, want 2", len(msgs))
 	}
-	if msgs[0].AnsweredModel != nil || msgs[0].Degraded {
-		t.Fatalf("user provenance = %v / %v, want null / false", msgs[0].AnsweredModel, msgs[0].Degraded)
+	if msgs[0].AnsweredModel != nil || msgs[0].AnsweredProvider != nil || msgs[0].Degraded {
+		t.Fatalf("user provenance = %v / %v / %v, want null / null / false", msgs[0].AnsweredModel, msgs[0].AnsweredProvider, msgs[0].Degraded)
 	}
-	if msgs[1].AnsweredModel == nil || *msgs[1].AnsweredModel != "qwen2.5:7b" || !msgs[1].Degraded {
+	// A non-local lifeboat provider must survive the round-trip, else a reload
+	// mislabels an anthropic/openai_compat answer as "local".
+	if msgs[1].AnsweredModel == nil || *msgs[1].AnsweredModel != "claude-3-5-sonnet" || !msgs[1].Degraded {
 		t.Fatalf("assistant provenance not round-tripped: %+v", msgs[1])
+	}
+	if msgs[1].AnsweredProvider == nil || *msgs[1].AnsweredProvider != "anthropic" {
+		t.Fatalf("assistant provider not round-tripped: %+v", msgs[1].AnsweredProvider)
 	}
 }
 

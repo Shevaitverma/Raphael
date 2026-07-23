@@ -568,9 +568,9 @@ def generate_node(state: GState) -> dict:
 
 
 def _post_message(client, conversation_id, user_id, role, content, tool_calls=None,
-                  answered_model=None, degraded=False):
+                  answered_model=None, answered_provider=None, degraded=False):
     # user_id rides in the query, not the body: conv-svc's message body is
-    # {role, content, tool_calls?, answered_model?, degraded?} and rejects
+    # {role, content, tool_calls?, answered_model?, answered_provider?, degraded?} and rejects
     # anything else. It authorizes the write against the conversation's owner and
     # 404s if they do not match, so a conversation_id from the client cannot be
     # used to write into someone else's history. user_id originates from the
@@ -584,6 +584,8 @@ def _post_message(client, conversation_id, user_id, role, content, tool_calls=No
     # stores null/false. Absent = default, matching the DB defaults.
     if answered_model is not None:
         body["answered_model"] = answered_model
+    if answered_provider is not None:
+        body["answered_provider"] = answered_provider
     if degraded:
         body["degraded"] = degraded
     return client.post(
@@ -605,6 +607,7 @@ def persist_node(state: GState) -> dict:
                 client, state["conversation_id"], uid, "assistant", state.get("answer", ""),
                 state.get("tool_calls"),
                 answered_model=state.get("model"),
+                answered_provider=state.get("provider_name"),
                 degraded=bool(state.get("degraded")),
             )
             if r.status_code < 300:

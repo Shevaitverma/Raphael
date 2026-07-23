@@ -102,6 +102,7 @@ export default function Tasks({
   onFail: (e: unknown) => void;
 }) {
   const [tasks, setTasks] = useState<Task[] | null>(null);
+  const [error, setError] = useState<unknown>(null); // set when the initial load fails
   const [busy, setBusy] = useState<string | null>(null); // id currently mutating
   const [activeId, setActiveId] = useState<string | null>(null); // dragged card
 
@@ -114,9 +115,11 @@ export default function Tasks({
 
   const load = useCallback(async () => {
     try {
+      setError(null);
       setTasks(await getTasks(token));
     } catch (e) {
-      onFail(e);
+      setError(e); // so a failed first load can render Retry instead of a stuck spinner
+      onFail(e); // still surface for auth handling (e.g. token refresh / logout)
     }
   }, [token, onFail]);
 
@@ -252,7 +255,20 @@ export default function Tasks({
         {tasks !== null && <SystemBar tasks={tasks} />}
 
         {tasks === null ? (
-          <p className="text-sm text-faint">Loading…</p>
+          error ? (
+            <div className="flex flex-col items-start gap-2 rounded-xl border border-edge bg-panel px-4 py-3">
+              <p className="text-sm text-error">Couldn’t load your quests.</p>
+              <button
+                type="button"
+                onClick={() => void load()}
+                className="rounded-md border border-edge bg-raised px-3 py-1 text-xs text-on-surface transition-colors hover:bg-panel"
+              >
+                Retry
+              </button>
+            </div>
+          ) : (
+            <p className="text-sm text-faint">Loading…</p>
+          )
         ) : (
           <DndContext
             sensors={sensors}

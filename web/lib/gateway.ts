@@ -45,6 +45,7 @@ export type Message = {
   // Answer provenance, stored server-side so a reload renders the same banner
   // and model label the live SSE stream did (see Degraded/Done below).
   answered_model?: string | null;
+  answered_provider?: string | null;
   degraded?: boolean;
   tool_calls?: { name: string; arguments: Record<string, unknown> }[];
 };
@@ -67,13 +68,15 @@ export type Done = {
   completion_tokens?: number | null;
 };
 
-// A reloaded message stores provenance as `degraded` (boolean) + `answered_model`,
-// while the live SSE stream carries a full Degraded object. Rebuild that same shape
-// from stored state so a reload renders the identical warning banner — a lifeboat
-// answer must never look like a normal one just because the page was refreshed.
+// A reloaded message stores provenance as `degraded` (boolean) + `answered_model` +
+// `answered_provider`, while the live SSE stream carries a full Degraded object.
+// Rebuild that same shape from stored state so a reload renders the identical warning
+// banner — a lifeboat answer must never look like a normal one just because the page
+// was refreshed. answered_provider falls back to "local" only for pre-016 rows that
+// never persisted it; the lifeboat is admin-configurable and not local-only.
 export function storedDegraded(m: Message): Degraded | undefined {
   return m.degraded
-    ? { reason: "", provider: "local", model: m.answered_model ?? "" }
+    ? { reason: "", provider: m.answered_provider ?? "local", model: m.answered_model ?? "" }
     : undefined;
 }
 
@@ -417,7 +420,17 @@ export async function getNotifications(
   const res = await fetch(`${GATEWAY_URL}/api/notifications${q}`, { headers: authHeader(token) });
   if (!res.ok) throw new ApiError(`list notifications failed: ${res.status}`, res.status);
   const data = await res.json();
-  return Array.isArray(data) ? data : (data.notifications ?? []);
+  const rows = Array.isArray(data) ? data : (data.notifications ?? []);
+  // Server emits {text, read_at}; the client shape is {content, read}. Map here so
+  // bodies render and the bell gets a real read flag (client-side unread filtering
+  // works even before a server-side read_at filter lands).
+  return rows.map((r: { id: string; reminder_id: string | null; text: string; read_at: string | null; created_at?: string }) => ({
+    id: r.id,
+    reminder_id: r.reminder_id,
+    content: r.text,
+    read: r.read_at != null,
+    created_at: r.created_at,
+  }));
 }
 
 export async function markNotificationRead(token: string, id: string): Promise<Notification> {

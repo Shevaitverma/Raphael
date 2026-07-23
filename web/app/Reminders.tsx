@@ -134,12 +134,15 @@ export default function Reminders({
   onFail: (e: unknown) => void;
 }) {
   const [reminders, setReminders] = useState<Reminder[] | null>(null);
+  const [error, setError] = useState<unknown>(null); // load failure; enables inline retry
   const [busy, setBusy] = useState<string | null>(null); // id currently mutating
 
   const load = useCallback(async () => {
     try {
+      setError(null);
       setReminders(await getReminders(token));
     } catch (e) {
+      setError(e);
       onFail(e);
     }
   }, [token, onFail]);
@@ -182,7 +185,17 @@ export default function Reminders({
           onCreate={(payload) => mutate("__add__", () => createReminder(token, payload))}
         />
 
-        {reminders === null ? (
+        {reminders === null && error ? (
+          <p className="text-sm text-error">
+            Couldn’t load your reminders.{" "}
+            <button
+              onClick={() => void load()}
+              className="underline underline-offset-2 hover:text-on-surface"
+            >
+              Retry
+            </button>
+          </p>
+        ) : reminders === null ? (
           <p className="text-sm text-faint">Loading…</p>
         ) : items.length === 0 ? (
           <p className="text-center text-sm text-faint">No reminders yet.</p>
