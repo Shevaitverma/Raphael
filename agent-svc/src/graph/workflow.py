@@ -74,6 +74,21 @@ SYSTEM_BASE = _persona("Raphael")
 # agent loop), and an operator who can set it to 20 has an agent loop.
 _MAX_PREFLIGHT_ROUNDS = 2
 
+# Appended to the system prompt for the TOOL-DECISION call ONLY (not the answer
+# stream). The persona is warm and "default to SHORT", which biases a small local
+# model toward a friendly reply ("Got it, I'll remind you!") instead of actually
+# calling the tool — so the reminder/task is never created. This directive makes
+# the action real: if a tool fits the request, CALL it. It is dropped for the
+# streamed answer, so the reply stays in the persona's voice.
+_TOOL_DIRECTIVE = (
+    "\n\nTOOL USE (this turn only): You have tools available. If the user asks you "
+    "to DO something one of your tools performs — set/schedule a reminder, create or "
+    "change a task, check their calendar, search the web — you MUST call that tool "
+    "now, with the details from their message. Do NOT merely say you will do it: a "
+    "reminder or task ONLY exists once you call its tool. Compile any schedule (cron/"
+    "time) yourself into the tool's arguments. If no tool fits, just answer."
+)
+
 # Not "Relevant memories" — retrieval cannot back that claim. top-k always
 # fills, so rank 5 of 5 is "the closest thing I found", and asserting relevance
 # is how a 0.3-confidence guess gets believed like a directive. Say what the
@@ -426,7 +441,7 @@ def _preflight(state: GState, messages: list, system: str) -> tuple[str, list]:
             # deliberating and burns the whole 512 budget on reasoning (see
             # openai_compat._optional) — so tools never fire on a local qwen3. Turn
             # thinking OFF here; the streamed ANSWER turn below keeps it on.
-            resp = provider.chat(convo, system=system, tools=tools, max_tokens=512, reasoning=False)
+            resp = provider.chat(convo, system=system + _TOOL_DIRECTIVE, tools=tools, max_tokens=512, reasoning=False)
         except Exception:
             break  # the model never asked; do not claim a tool failed.
         calls = resp.tool_calls or []
