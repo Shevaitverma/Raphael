@@ -127,6 +127,9 @@ func (s *Server) BuildApp() *fiber.App {
 	//                        it must live outside the Bearer-JWT /api group.
 	app.Get("/auth/google/login", s.handleGoogleLoginStart)
 	app.Get("/auth/session", s.handleSession)
+	// Real logout: revokes the durable session in Redis and clears the cookie. POST
+	// (state-changing), public, gated by the caller's own session cookie.
+	app.Post("/auth/logout", s.handleLogout)
 
 	// Everything under /api requires a valid JWT and is rate limited.
 	api := app.Group("/api", s.authMiddleware, s.rateLimitMiddleware)

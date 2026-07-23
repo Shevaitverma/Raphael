@@ -1,6 +1,9 @@
 package main
 
-import "os"
+import (
+	"os"
+	"time"
+)
 
 // Config holds all runtime configuration, read once at boot from the
 // environment. We never read .env directly; the process environment is the
@@ -42,6 +45,26 @@ type Config struct {
 	// SessionCookieName names the auth cookie; kept here so the login/callback and
 	// logout paths agree on one value.
 	SessionCookieName string
+	// AccessTTL bounds the SHORT-LIVED access JWT the SPA holds in memory. Kept
+	// small so a leaked in-memory token dies fast; /auth/session re-issues a fresh
+	// one from the durable cookie on every call. Default 1h.
+	AccessTTL time.Duration
+	// SessionTTL is the lifetime of the DURABLE httpOnly session credential (Redis
+	// session id / signed session cookie) minted at login. This is what survives a
+	// page refresh. Default 7 days.
+	SessionTTL time.Duration
+}
+
+// getdur reads a Go duration string (e.g. "1h", "168h") from the environment,
+// falling back to def on empty OR unparseable input — a fat-fingered TTL must
+// never silently collapse to 0 and disable expiry.
+func getdur(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
 }
 
 func getenv(key, def string) string {
@@ -78,5 +101,7 @@ func LoadConfig() Config {
 		// Must equal agent-svc's SYSTEM_CONFIG_UID default.
 		SystemConfigUID:   getenv("SYSTEM_CONFIG_UID", "00000000-0000-0000-0000-000000000002"),
 		SessionCookieName: getenv("SESSION_COOKIE_NAME", "raphael_session"),
+		AccessTTL:         getdur("ACCESS_TTL", time.Hour),
+		SessionTTL:        getdur("SESSION_TTL", 7*24*time.Hour),
 	}
 }

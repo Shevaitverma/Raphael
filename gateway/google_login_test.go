@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -19,6 +18,7 @@ func loginApp(s *Server) *fiber.App {
 	app.Get("/auth/google/login", s.handleGoogleLoginStart)
 	app.Get("/auth/google/callback", s.handleGoogleCallback)
 	app.Get("/auth/session", s.handleSession)
+	app.Post("/auth/logout", s.handleLogout)
 	return app
 }
 
@@ -76,9 +76,11 @@ func TestGoogleLoginStart(t *testing.T) {
 
 // TestGoogleLoginCallback proves the LOGIN branch end to end: a valid sentinel
 // state forwards the code to user-svc /internal/google/login with the shared
-// secret; on 200 it mints a role JWT into an httpOnly session cookie (never in
-// the URL) and 302s to ?login=ok; /auth/session then hands the token+role to the
-// SPA and expires the cookie; and a 403 (uninvited) fails closed to ?login=denied.
+// secret; on 200 it mints a DURABLE opaque session id into an httpOnly cookie
+// (never a JWT, never in the URL) and 302s to ?login=ok; /auth/session RE-ISSUES
+// a fresh short-lived access JWT on every call WITHOUT consuming the cookie (so a
+// refresh persists); logout REVOKES the session server-side; and a 403 (uninvited)
+// fails closed to ?login=denied.
 func TestGoogleLoginCallback(t *testing.T) {
 	const wantUID = "77777777-7777-7777-7777-777777777777"
 	var status int32 = http.StatusOK
@@ -149,16 +151,25 @@ func TestGoogleLoginCallback(t *testing.T) {
 		if !sc.HttpOnly {
 			t.Fatal("session cookie must be httpOnly")
 		}
-		// The cookie must be a role-bearing JWT for the resolved uid.
-		sub, role, err := srv.parseToken(sc.Value)
-		if err != nil || sub != wantUID || role != "member" {
-			t.Fatalf("cookie token = (%q,%q,%v), want (%q,member,nil)", sub, role, err, wantUID)
+		if !sc.Secure || sc.SameSite != http.SameSiteLaxMode {
+			t.Fatalf("session cookie must be Secure + SameSite=Lax, got secure=%v samesite=%v", sc.Secure, sc.SameSite)
+		}
+		if sc.MaxAge < 6*24*3600 {
+			t.Fatalf("session cookie Max-Age = %ds, want ~7d (durable)", sc.MaxAge)
+		}
+		// The cookie is an OPAQUE session id, NOT a JWT — parseToken must reject it.
+		if _, _, err := srv.parseToken(sc.Value); err == nil {
+			t.Fatal("session cookie must be an opaque id, not a decodable JWT")
 		}
 		sessionCookie = sc.Value
 	}
 
-	// HANDOFF: /auth/session returns {token,user,role} and expires the cookie.
-	{
+	// RE-ISSUE: /auth/session mints a short-lived access JWT and does NOT consume
+	// the cookie. Called twice with the same cookie -> both 200 with a valid token
+	// and the cookie still intact. This is what makes a page refresh restore the
+	// session. (Tokens minted within the same second are byte-identical by design —
+	// iat/exp are second-resolution — so we assert validity, not distinctness.)
+	for i := 0; i < 2; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/auth/session", nil)
 		req.AddCookie(&http.Cookie{Name: cfg.SessionCookieName, Value: sessionCookie})
 		resp, err := app.Test(req, 5000)
@@ -166,7 +177,7 @@ func TestGoogleLoginCallback(t *testing.T) {
 			t.Fatal(err)
 		}
 		if resp.StatusCode != 200 {
-			t.Fatalf("session = %d, want 200", resp.StatusCode)
+			t.Fatalf("session call %d = %d, want 200 (cookie must NOT be consumed)", i, resp.StatusCode)
 		}
 		var out struct {
 			Token string `json:"token"`
@@ -176,19 +187,22 @@ func TestGoogleLoginCallback(t *testing.T) {
 			} `json:"user"`
 		}
 		json.NewDecoder(resp.Body).Decode(&out)
-		if out.Token != sessionCookie || out.Role != "member" || out.User.ID != wantUID {
-			t.Fatalf("session payload = %+v, want token+member+%s", out, wantUID)
+		// The returned token is a fresh access JWT, not the raw cookie.
+		sub, role, err := srv.parseToken(out.Token)
+		if err != nil || sub != wantUID || role != "member" {
+			t.Fatalf("session token = (%q,%q,%v), want (%q,member,nil)", sub, role, err, wantUID)
 		}
-		var cleared bool
+		if out.Role != "member" || out.User.ID != wantUID {
+			t.Fatalf("session payload = %+v, want member+%s", out, wantUID)
+		}
+		if out.Token == sessionCookie {
+			t.Fatal("session returned the raw cookie as the token; must be a minted JWT")
+		}
+		// The cookie must NOT be cleared on read (unlike the old one-time handoff).
 		for _, ck := range resp.Cookies() {
-			// Fiber clears by emitting a past `expires=` with an empty value.
-			if ck.Name == cfg.SessionCookieName && ck.Value == "" &&
-				!ck.Expires.IsZero() && ck.Expires.Before(time.Now()) {
-				cleared = true
+			if ck.Name == cfg.SessionCookieName && ck.Value == "" {
+				t.Fatal("/auth/session consumed/cleared the durable cookie; refresh would fail")
 			}
-		}
-		if !cleared {
-			t.Fatal("session did not expire the cookie on read")
 		}
 	}
 
@@ -197,6 +211,26 @@ func TestGoogleLoginCallback(t *testing.T) {
 		resp, _ := app.Test(httptest.NewRequest(http.MethodGet, "/auth/session", nil), 5000)
 		if resp.StatusCode != 401 {
 			t.Fatalf("no-cookie session = %d, want 401", resp.StatusCode)
+		}
+	}
+
+	// LOGOUT revokes server-side: POST /auth/logout -> 200; the same cookie then
+	// 401s at /auth/session (session gone from Redis).
+	{
+		req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+		req.AddCookie(&http.Cookie{Name: cfg.SessionCookieName, Value: sessionCookie})
+		resp, err := app.Test(req, 5000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("logout = %d, want 200", resp.StatusCode)
+		}
+		req2 := httptest.NewRequest(http.MethodGet, "/auth/session", nil)
+		req2.AddCookie(&http.Cookie{Name: cfg.SessionCookieName, Value: sessionCookie})
+		resp2, _ := app.Test(req2, 5000)
+		if resp2.StatusCode != 401 {
+			t.Fatalf("session after logout = %d, want 401 (revoked)", resp2.StatusCode)
 		}
 	}
 

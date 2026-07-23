@@ -237,49 +237,49 @@ func (s *Server) handleLoginExchange(c *fiber.Ctx, code string) error {
 		return c.Redirect(s.cfg.WebOrigin+"/?login=error", fiber.StatusFound)
 	}
 
-	token, err := s.mintToken(out.UID, out.Role)
+	// DURABLE session: mint a revocable, Redis-backed opaque session id and drop
+	// it in a long-lived httpOnly cookie. This is the credential that survives a
+	// page refresh. The access JWT is not minted here — the SPA gets a fresh
+	// short-lived one from /auth/session, and never sees a token in the URL.
+	id, err := s.createSession(c.Context(), out.UID, out.Role)
 	if err != nil {
 		return c.Redirect(s.cfg.WebOrigin+"/?login=error", fiber.StatusFound)
 	}
-
-	// One-time handoff cookie: httpOnly (JS can't read it), Secure, SameSite=Lax
-	// (survives the top-level redirect back from Google), short TTL. The SPA
-	// immediately trades it for in-memory state at /auth/session, so it never
-	// lands in localStorage or a URL.
-	c.Cookie(&fiber.Cookie{
-		Name:     s.cfg.SessionCookieName,
-		Value:    token,
-		Path:     "/",
-		HTTPOnly: true,
-		Secure:   true,
-		SameSite: "Lax",
-		MaxAge:   120,
-	})
+	s.setSessionCookie(c, id)
 	return c.Redirect(s.cfg.WebOrigin+"/?login=ok", fiber.StatusFound)
 }
 
-// handleSession (GET /auth/session, PUBLIC, uses the credential cookie) is the
-// one-time handoff: it reads the httpOnly session cookie set by the login
-// callback, returns {token,user,role} as JSON for the SPA to hold in memory,
-// and immediately EXPIRES the cookie so the JWT never persists in the browser.
-// Missing/invalid cookie -> 401 (no session to hand off).
+// handleSession (GET /auth/session, PUBLIC, gated by the durable session cookie)
+// RE-ISSUES on every call: it validates the opaque session cookie against Redis
+// and returns a FRESH SHORT-LIVED access JWT as {token,user,role}. It does NOT
+// consume or expire the cookie, so a page refresh (which lost the in-memory JWT)
+// restores a token from the still-valid cookie — this is what makes sessions
+// persist. Missing/invalid/revoked session -> 401, and the stale cookie is cleared.
 func (s *Server) handleSession(c *fiber.Ctx) error {
-	raw := c.Cookies(s.cfg.SessionCookieName)
-	if raw == "" {
+	d, ok := s.lookupSession(c.Context(), c.Cookies(s.cfg.SessionCookieName))
+	if !ok {
+		s.expireSession(c) // clear a stale/forged/revoked cookie; fail closed
 		return fiber.NewError(fiber.StatusUnauthorized, "no session")
 	}
-	sub, role, err := s.parseToken(raw)
+	token, err := s.mintToken(d.UID, d.Role)
 	if err != nil {
-		// Stale/forged cookie: clear it and refuse.
-		s.expireSession(c)
-		return fiber.NewError(fiber.StatusUnauthorized, "invalid session")
+		return fiber.NewError(fiber.StatusInternalServerError, "could not mint token")
 	}
-	s.expireSession(c) // one-time: consume the cookie on read
 	return c.JSON(fiber.Map{
-		"token": raw,
-		"role":  role,
-		"user":  fiber.Map{"id": sub},
+		"token": token,
+		"role":  d.Role,
+		"user":  fiber.Map{"id": d.UID},
 	})
+}
+
+// handleLogout (POST /auth/logout, PUBLIC, gated by the caller's own cookie) ends
+// the session for real: it REVOKES the durable session server-side (DEL the Redis
+// key) and clears the cookie. A refresh afterward has no valid session -> the
+// login screen. Idempotent — an absent/already-revoked cookie still returns 200.
+func (s *Server) handleLogout(c *fiber.Ctx) error {
+	s.deleteSession(c.Context(), c.Cookies(s.cfg.SessionCookieName))
+	s.expireSession(c)
+	return c.SendStatus(fiber.StatusOK)
 }
 
 // expireSession clears the session cookie (same attributes, past expiry).

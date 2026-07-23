@@ -120,12 +120,14 @@ function NavButton({
 export default function Sidebar({
   view,
   setView,
+  assistantName,
   email,
   role,
   onLogout,
 }: {
   view: View;
   setView: (v: View) => void;
+  assistantName: string;
   email: string;
   // Optional + undefined-is-not-admin so a missing/unknown role fails closed
   // (nav hidden). The server still enforces via requireAdmin regardless.
@@ -140,10 +142,10 @@ export default function Sidebar({
       {/* Brand */}
       <div className="flex items-center gap-2 px-4 py-4">
         <span className="flex h-7 w-7 items-center justify-center rounded-md bg-accent/15 text-sm font-semibold text-accent">
-          R
+          {(assistantName.trim()[0] || "R").toUpperCase()}
         </span>
         <span className="text-base font-semibold tracking-tight text-on-surface">
-          Raphael
+          {assistantName.trim() || "Raphael"}
         </span>
       </div>
 

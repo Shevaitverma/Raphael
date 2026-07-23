@@ -26,13 +26,15 @@ type User struct {
 	Role  string `json:"role"`
 }
 
-// mintToken produces an HS256 JWT with sub = user uuid, a role claim, and a 24h
-// expiry. role is 'admin' or 'member'; both dev-login and google-login set it.
+// mintToken produces an HS256 JWT with sub = user uuid, a role claim, and a
+// SHORT AccessTTL expiry (default 1h). This is the in-memory access token the SPA
+// holds; the durable credential is the httpOnly session cookie, which /auth/session
+// trades for a fresh access JWT on every call. A short exp bounds a leaked token.
 func (s *Server) mintToken(userID, role string) (string, error) {
 	claims := jwt.MapClaims{
 		"sub":  userID,
 		"role": role,
-		"exp":  time.Now().Add(24 * time.Hour).Unix(),
+		"exp":  time.Now().Add(s.cfg.AccessTTL).Unix(),
 		"iat":  time.Now().Unix(),
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -91,6 +93,14 @@ func (s *Server) handleDevLogin(c *fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "could not resolve user")
 	}
+
+	// Dev-login now also mints the DURABLE session so a dev's refresh persists
+	// exactly like a real Google login (same cookie, same /auth/session re-issue).
+	id, err := s.createSession(ctx, u.ID, u.Role)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "could not create session")
+	}
+	s.setSessionCookie(c, id)
 
 	token, err := s.mintToken(u.ID, u.Role)
 	if err != nil {

@@ -101,12 +101,29 @@ export async function devLogin(email: string): Promise<DevLoginResponse> {
   const res = await fetch(`${GATEWAY_URL}/auth/dev-login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    // credentials:'include' so the browser stores the durable session cookie the
+    // gateway sets — same persistence as a Google login.
+    credentials: "include",
     body: JSON.stringify({ email }),
   });
   if (!res.ok) {
     throw new Error(`dev-login failed: ${res.status} ${await safeText(res)}`);
   }
   return res.json();
+}
+
+// Real logout: revokes the durable session server-side and clears the cookie.
+// Best-effort — the SPA wipes its in-memory token regardless, so a network blip
+// never strands the user "logged in" client-side.
+export async function logout(): Promise<void> {
+  try {
+    await fetch(`${GATEWAY_URL}/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+    });
+  } catch {
+    /* ignore — in-memory state is wiped by the caller either way */
+  }
 }
 
 // --- auth: Google sign-in + session handoff ----------------------------------

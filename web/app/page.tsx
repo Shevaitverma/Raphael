@@ -27,6 +27,7 @@ import {
   listConversations,
   listMessages,
   listProviders,
+  logout,
   markNotificationRead,
   setLifeboat,
   setTimezone,
@@ -167,6 +168,7 @@ export default function Page() {
   }
 
   const handleLogout = useCallback(() => {
+    void logout(); // revoke the durable session server-side (best-effort)
     abortRef.current?.abort();
     abortRef.current = null;
     setToken(null);
@@ -181,14 +183,26 @@ export default function Page() {
     setOnboarded(null);
   }, []);
 
-  // Every /api call funnels its failure here: an expired token ends the session,
-  // anything else gets shown. Nothing is allowed to die in the console — a dead
-  // backend used to be indistinguishable from an empty account.
+  // Every /api call funnels its failure here. On a 401 the short-lived access JWT
+  // has expired — before dropping to the login screen, try ONCE to mint a fresh
+  // one from the durable session cookie (/auth/session). Success re-arms the
+  // in-memory token (effects keyed on `token` re-fire and the view self-heals);
+  // only when that ALSO fails is the durable session truly gone -> log out.
+  // ponytail: refreshes the token, not the exact failed call; the token-keyed
+  // effects re-run, so a read self-heals. Add per-call retry if a mutation must
+  // survive an expiry mid-flight.
   const failed = useCallback(
     (e: unknown) => {
       if (isAuthError(e)) {
-        handleLogout();
-        setAuthError("Your session expired. Sign in again.");
+        fetchSession()
+          .then((s) => {
+            setToken(s.token);
+            setUser(s.user);
+          })
+          .catch(() => {
+            handleLogout();
+            setAuthError("Your session expired. Sign in again.");
+          });
         return;
       }
       setError(e instanceof Error ? e.message : String(e));
@@ -204,27 +218,18 @@ export default function Page() {
     setSearch(localStorage.getItem(SEARCH_KEY) === "1");
   }, []);
 
-  // After a Google SIGN-IN the gateway redirects back with ?login=ok (the JWT is
-  // waiting behind a one-time handoff cookie) or ?login=denied (the email is not
-  // on the invite allowlist — fail closed). Trade the cookie for a session, or
-  // show the "ask an admin" notice. Strip the param so a reload can't re-fire it.
-  // Runs once on mount, before token exists, so it drives the initial LoginScreen.
+  // Session restore. Runs once on EVERY mount (fresh load, page refresh, or the
+  // return from a Google/dev login), before a token exists, so it drives the
+  // initial LoginScreen. The durable httpOnly session cookie is the credential:
+  // /auth/session trades it for a fresh in-memory access JWT. A 401 means no
+  // valid session -> stay on the login screen silently (this is the normal
+  // logged-out case, not an error). ?login=denied (uninvited — fail closed) is
+  // the one branch that shows a message instead of attempting a restore.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const login = params.get("login");
-    if (login) {
-      if (login === "ok") {
-        fetchSession()
-          .then((s) => {
-            setToken(s.token);
-            setUser(s.user); // s.user.role drives the admin-gated UI
-          })
-          .catch((e) => setAuthError(e instanceof Error ? e.message : String(e)));
-      } else if (login === "denied") {
-        setAuthError(
-          "You're not on the invite list yet. Ask an admin to add your email, then sign in again.",
-        );
-      }
+    const stripLogin = () => {
+      if (!login) return;
       params.delete("login");
       const qs = params.toString();
       window.history.replaceState(
@@ -232,7 +237,25 @@ export default function Page() {
         "",
         qs ? `${window.location.pathname}?${qs}` : window.location.pathname,
       );
+    };
+
+    if (login === "denied") {
+      setAuthError(
+        "You're not on the invite list yet. Ask an admin to add your email, then sign in again.",
+      );
+      stripLogin();
+      return;
     }
+
+    fetchSession()
+      .then((s) => {
+        setToken(s.token);
+        setUser(s.user); // s.user.role drives the admin-gated UI
+      })
+      .catch(() => {
+        /* no valid session cookie — remain on the login screen */
+      })
+      .finally(stripLogin);
   }, []);
 
   // The gateway redirects the browser back here after Google consent. Read the
@@ -591,6 +614,7 @@ export default function Page() {
       <Sidebar
         view={view}
         setView={setView}
+        assistantName={assistantName}
         email={user?.email ?? user?.id ?? ""}
         role={user?.role}
         onLogout={handleLogout}
