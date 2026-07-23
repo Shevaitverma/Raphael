@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -74,6 +75,15 @@ func getenv(key, def string) string {
 	return def
 }
 
+func getint(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
 func LoadConfig() Config {
 	return Config{
 		Port:        getenv("GATEWAY_PORT", "8080"),
@@ -89,7 +99,9 @@ func LoadConfig() Config {
 		ConvSvcURL:      getenv("CONV_SVC_URL", "http://localhost:8082"),
 		AgentSvcURL:     getenv("AGENT_SVC_URL", "http://localhost:8000"),
 		InternalToken:   getenv("INTERNAL_TOKEN", ""),
-		RateLimitPerMin: 60,
+		// A SPA dashboard fires ~10 calls per load plus polling; 60/min throttled
+		// normal use. 300/min/user gives headroom while still bounding abuse.
+		RateLimitPerMin: getint("RATE_LIMIT_PER_MIN", 300),
 		CORSOrigins:     getenv("CORS_ORIGINS", "http://localhost:3000"),
 
 		GoogleClientID:     getenv("GOOGLE_CLIENT_ID", ""),

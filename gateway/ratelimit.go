@@ -36,7 +36,7 @@ func (s *Server) rateLimitMiddleware(c *fiber.Ctx) error {
 	}
 	if count > int64(s.cfg.RateLimitPerMin) {
 		c.Set("Retry-After", "60")
-		return fiber.NewError(fiber.StatusTooManyRequests, "rate limit exceeded: 60 req/min")
+		return fiber.NewError(fiber.StatusTooManyRequests, fmt.Sprintf("rate limit exceeded: %d req/min", s.cfg.RateLimitPerMin))
 	}
 	return c.Next()
 }

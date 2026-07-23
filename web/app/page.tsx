@@ -191,18 +191,27 @@ export default function Page() {
   // ponytail: refreshes the token, not the exact failed call; the token-keyed
   // effects re-run, so a read self-heals. Add per-call retry if a mutation must
   // survive an expiry mid-flight.
+  // Single-flight the refresh: when the access JWT expires the whole dashboard
+  // 401s at once; without this each failed call fires its own /auth/session and
+  // the burst trips the rate limiter. Share one in-flight refresh instead.
+  const refreshing = useRef<Promise<void> | null>(null);
   const failed = useCallback(
     (e: unknown) => {
       if (isAuthError(e)) {
-        fetchSession()
-          .then((s) => {
-            setToken(s.token);
-            setUser(s.user);
-          })
-          .catch(() => {
-            handleLogout();
-            setAuthError("Your session expired. Sign in again.");
-          });
+        if (!refreshing.current) {
+          refreshing.current = fetchSession()
+            .then((s) => {
+              setToken(s.token);
+              setUser(s.user);
+            })
+            .catch(() => {
+              handleLogout();
+              setAuthError("Your session expired. Sign in again.");
+            })
+            .finally(() => {
+              refreshing.current = null;
+            });
+        }
         return;
       }
       setError(e instanceof Error ? e.message : String(e));

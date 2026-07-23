@@ -819,6 +819,7 @@ func TestRateLimit(t *testing.T) {
 	defer up.Close()
 
 	cfg := testConfig(up.URL, "http://127.0.0.1:1", "http://127.0.0.1:1")
+	cfg.RateLimitPerMin = 60 // pin the limit so the 65-request assertion is deterministic
 	app := newServerT(t, cfg).BuildApp()
 	// Unique user → isolated rate bucket.
 	token, _ := login(t, app, fmt.Sprintf("rl-%d@raphael.local", time.Now().UnixNano()))
