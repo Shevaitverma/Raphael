@@ -76,6 +76,10 @@ Rules:
   not anything true of everyone.
 - NEVER record the assistant's own name, identity, or persona. "What is your
   name?" and its answer contain NO fact about the user.
+- A name or nickname the user uses FOR YOU (the assistant) is NOT a fact about
+  the user. "hi Akku", "thanks Sage", "hey buddy" = they addressed you; it does
+  NOT mean the user is named or called that. Only record a name when the user
+  claims it for THEMSELVES ("I'm Sam", "call me Sam", "my name is Sam").
 - Never store the answer to a question the user asked, or anything the assistant
   said about itself — only what the USER asserted about themselves.
 - Prefer a triple; use a note only when it truly cannot be one.

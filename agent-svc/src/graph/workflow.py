@@ -121,8 +121,12 @@ def _sanitize_portrait(text: str) -> str:
 # only exists once notes are injected. Adapts tone WITHOUT touching _PRECEDENCE:
 # the live turn still wins.
 _BINDING = (
-    "When you can see who you're talking to below (their portrait and what we "
-    "believe about them), match your tone, warmth, and level of detail to them."
+    "These notes are background for accuracy, not material to perform. Use them "
+    "silently: do not recite them, list them back, or bring up a remembered detail "
+    "unless the user's current message is actually about it. Never invent, "
+    "embellish, or assume anything — an intensity, a frequency, a backstory, a "
+    "nickname, a mood — beyond exactly what a note says. Adapt your tone to the "
+    "user, but do not narrate their life back at them."
 )
 
 
