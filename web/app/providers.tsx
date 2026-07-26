@@ -2,6 +2,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState } from "react";
+import AuthProvider from "./auth/AuthProvider";
 
 // One QueryClient per browser session, created lazily in state so it survives
 // re-renders but is never shared across requests (Next App Router SSR-safety).
@@ -21,5 +22,11 @@ export default function Providers({ children }: { children: React.ReactNode }) {
         },
       }),
   );
-  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  // AuthProvider sits INSIDE QueryClientProvider: auth state feeds the queries,
+  // and views read both from the same tree.
+  return (
+    <QueryClientProvider client={client}>
+      <AuthProvider>{children}</AuthProvider>
+    </QueryClientProvider>
+  );
 }

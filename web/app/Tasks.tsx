@@ -30,6 +30,7 @@ import {
   updateTask,
   type Task,
 } from "@/lib/gateway";
+import { useAuthed } from "./auth/AuthProvider";
 import {
   levelForXp,
   questXp,
@@ -95,13 +96,8 @@ function dueLabel(iso: string): string {
   return `${mon} ${d}`;
 }
 
-export default function Tasks({
-  token,
-  onFail,
-}: {
-  token: string;
-  onFail: (e: unknown) => void;
-}) {
+export default function Tasks() {
+  const { token, failed: onFail } = useAuthed();
   const qc = useQueryClient();
   const { data, error, isPending, refetch } = useQuery({
     queryKey: ["tasks", token],

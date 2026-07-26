@@ -2,18 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { setTimezone } from "@/lib/gateway";
+import { useAuthed } from "../auth/AuthProvider";
 import { detectedTz, TZ_SEEN, TZ_VALUE } from "../shared";
 
 // Timezone picker: reminders fire in this IANA tz (evaluated server-side). The
 // browser tz is auto-stamped on app-load; this row lets the user view/override.
 // A native <select> from Intl.supportedValuesOf — no timezone dependency.
-export default function TimezoneForm({
-  token,
-  onFail,
-}: {
-  token: string;
-  onFail: (e: unknown) => void;
-}) {
+export default function TimezoneForm() {
+  const { token, failed: onFail } = useAuthed();
   const detected = detectedTz();
   const [tz, setTz] = useState(detected);
   const [saved, setSaved] = useState(detected);

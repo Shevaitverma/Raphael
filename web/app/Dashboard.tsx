@@ -11,6 +11,7 @@ import {
   type Task,
 } from "@/lib/gateway";
 import { levelForXp, rankForLevel, totalXp } from "@/lib/quests";
+import { useAuthed } from "./auth/AuthProvider";
 
 const fmt = (n: number) => n.toLocaleString();
 
@@ -19,14 +20,11 @@ const fmt = (n: number) => n.toLocaleString();
 // (getMemoryStats / getCapabilities / listProviders) — only the presentation
 // is redesigned. Every number on screen is real; nothing is fabricated.
 export default function Dashboard({
-  token,
   onNavigate,
-  onFail,
 }: {
-  token: string;
   onNavigate: (v: "chat" | "graph" | "settings") => void;
-  onFail: (e: unknown) => void;
 }) {
+  const { token, failed: onFail } = useAuthed();
   // Each read is its own query, namespaced under ["dashboard", ...]. token is in
   // every key so a refresh re-fetches automatically. One-shot — nothing here polls.
   const statsQuery = useQuery({

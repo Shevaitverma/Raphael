@@ -26,6 +26,7 @@ import {
   type NutritionStats,
   type Workout,
 } from "@/lib/gateway";
+import { useAuthed } from "./auth/AuthProvider";
 
 // Categories offered in the log form; distance only makes sense for the moving ones.
 const CATEGORIES = ["strength", "cardio", "run", "cycling", "swim", "yoga", "other"] as const;
@@ -68,13 +69,8 @@ const num = (s: string) => (s.trim() === "" ? undefined : Number(s));
 const field =
   "rounded-lg border border-edge bg-raised px-3 py-2 text-sm text-on-surface placeholder:text-faint outline-none focus:border-accent";
 
-export default function Fitness({
-  token,
-  onFail,
-}: {
-  token: string;
-  onFail: (e: unknown) => void;
-}) {
+export default function Fitness() {
+  const { token, failed: onFail } = useAuthed();
   const [tab, setTab] = useState<Tab>("Overview");
 
   // Each read is its own query, namespaced under "fitness" so one broad

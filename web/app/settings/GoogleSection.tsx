@@ -8,20 +8,18 @@ import {
   googleStatus,
   type GoogleStatus,
 } from "@/lib/gateway";
+import { useAuthed } from "../auth/AuthProvider";
 
 // Read-only Google connector: link/unlink the user's Calendar + profile. The
 // gateway owns the OAuth dance; this only kicks it off and reflects status.
 export default function GoogleSection({
-  token,
-  onFail,
   reload,
   notice,
 }: {
-  token: string;
-  onFail: (e: unknown) => void;
   reload: number;
   notice: { ok: boolean; msg: string } | null;
 }) {
+  const { token, failed: onFail } = useAuthed();
   const [status, setStatus] = useState<GoogleStatus | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

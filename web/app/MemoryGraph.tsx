@@ -7,6 +7,7 @@ import {
   type GraphEdge,
   type GraphNode,
 } from "@/lib/gateway";
+import { useAuthed } from "./auth/AuthProvider";
 
 const fmt = (n: number) => n.toLocaleString();
 const pct = (c: number) => `${Math.round(c * 100)}%`;
@@ -170,15 +171,8 @@ function stepSim(sim: Sim[], edges: GraphEdge[], alpha: number): number {
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-export default function MemoryGraph({
-  token,
-  onNavigate,
-  onFail,
-}: {
-  token: string;
-  onNavigate: (v: "chat") => void;
-  onFail: (e: unknown) => void;
-}) {
+export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") => void }) {
+  const { token, failed: onFail } = useAuthed();
   const [graph, setGraph] = useState<GraphData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<"graph" | "list">("graph");

@@ -7,17 +7,13 @@ import {
   markNotificationRead,
   type Notification,
 } from "@/lib/gateway";
+import { useAuthed } from "./auth/AuthProvider";
 
 // The notifications bell: polls the unread feed for a badge, and on open marks
 // that batch read (one PATCH per id) and shows it. Poll-based delivery, reusing
 // the REST proxy — no SSE, no tokens. Firing writes the notification row (the sink).
-export default function NotificationsBell({
-  token,
-  onFail,
-}: {
-  token: string;
-  onFail: (e: unknown) => void;
-}) {
+export default function NotificationsBell() {
+  const { token, failed: onFail } = useAuthed();
   const qc = useQueryClient();
   const [viewing, setViewing] = useState<Notification[]>([]);
   const [open, setOpen] = useState(false);

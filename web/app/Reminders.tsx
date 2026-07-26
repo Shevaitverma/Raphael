@@ -9,6 +9,7 @@ import {
   setReminderActive,
   type Reminder,
 } from "@/lib/gateway";
+import { useAuthed } from "./auth/AuthProvider";
 
 // --- humanizer ----------------------------------------------------------------
 // The UI NEVER shows a raw cron string; every schedule renders as plain English.
@@ -127,13 +128,8 @@ const PRESETS: Preset[] = [
   { value: "weekly", label: "Weekly on…", cron: "0 {H} * * {D}", needsDay: true },
 ];
 
-export default function Reminders({
-  token,
-  onFail,
-}: {
-  token: string;
-  onFail: (e: unknown) => void;
-}) {
+export default function Reminders() {
+  const { token, failed: onFail } = useAuthed();
   const qc = useQueryClient();
   const {
     data: reminders,

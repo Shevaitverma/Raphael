@@ -23,6 +23,7 @@ import {
   type NewCredential,
   type User,
 } from "@/lib/gateway";
+import { useAuthed } from "./auth/AuthProvider";
 
 // Seeded sentinel accounts that must never be demoted or deleted from the UI:
 // the human's real data-holding account (…001) and the system-config owner whose
@@ -54,13 +55,7 @@ export function userGuards(
   return { canToggleRole: true, canRemove: true };
 }
 
-export default function Admin({
-  token,
-  onFail,
-}: {
-  token: string;
-  onFail: (e: unknown) => void;
-}) {
+export default function Admin() {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
       <div className="mx-auto flex max-w-2xl flex-col gap-10">
@@ -71,8 +66,8 @@ export default function Admin({
             provider everyone inherits. Members configure none of this.
           </p>
         </div>
-        <UsersSection token={token} onFail={onFail} />
-        <SystemProvidersSection token={token} onFail={onFail} />
+        <UsersSection />
+        <SystemProvidersSection />
       </div>
     </div>
   );
@@ -102,13 +97,8 @@ export function lastActiveLabel(iso?: string | null, now: number = Date.now()): 
   return `active ${Math.floor(h / 24)}d ago`;
 }
 
-function UsersSection({
-  token,
-  onFail,
-}: {
-  token: string;
-  onFail: (e: unknown) => void;
-}) {
+function UsersSection() {
+  const { token, failed: onFail } = useAuthed();
   const qc = useQueryClient();
   const [email, setEmail] = useState("");
 
@@ -285,13 +275,8 @@ function UsersSection({
 // routes, which the gateway roots at the system-config owner. Portability
 // (local / OpenRouter / Claude) and the lifeboat fallback are unchanged.
 
-function SystemProvidersSection({
-  token,
-  onFail,
-}: {
-  token: string;
-  onFail: (e: unknown) => void;
-}) {
+function SystemProvidersSection() {
+  const { token, failed: onFail } = useAuthed();
   const qc = useQueryClient();
 
   const { data: creds, error, isPending } = useQuery({

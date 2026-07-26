@@ -9,6 +9,7 @@ import {
   setLifeboat,
   type Credential,
 } from "@/lib/gateway";
+import { useAuthed } from "../auth/AuthProvider";
 import AddProviderForm from "./AddProviderForm";
 import AssistantNameForm from "./AssistantNameForm";
 import GoogleSection from "./GoogleSection";
@@ -23,20 +24,17 @@ const PROVIDER_LABEL: Record<Credential["provider"], string> = {
 };
 
 export default function SettingsView({
-  token,
   assistantName,
   onSaved,
-  onFail,
   googleReload,
   googleNotice,
 }: {
-  token: string;
   assistantName: string;
   onSaved: (name: string) => void;
-  onFail: (e: unknown) => void;
   googleReload: number;
   googleNotice: { ok: boolean; msg: string } | null;
 }) {
+  const { token } = useAuthed();
   const [creds, setCreds] = useState<Credential[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // id currently mutating
@@ -71,9 +69,9 @@ export default function SettingsView({
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
       <div className="mx-auto flex max-w-2xl flex-col gap-6">
-        <AssistantNameForm token={token} assistantName={assistantName} onSaved={onSaved} />
+        <AssistantNameForm assistantName={assistantName} onSaved={onSaved} />
 
-        <TimezoneForm token={token} onFail={onFail} />
+        <TimezoneForm />
 
         <div>
           <h2 className="text-2xl font-semibold text-on-surface">
@@ -184,12 +182,7 @@ export default function SettingsView({
           }}
         />
 
-        <GoogleSection
-          token={token}
-          onFail={onFail}
-          reload={googleReload}
-          notice={googleNotice}
-        />
+        <GoogleSection reload={googleReload} notice={googleNotice} />
       </div>
     </div>
   );

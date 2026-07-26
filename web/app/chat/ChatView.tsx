@@ -12,31 +12,31 @@ import {
   streamChat,
   type Conversation,
 } from "@/lib/gateway";
+import { useAuthed } from "../auth/AuthProvider";
 
 // The whole chat concern: conversation list, thread, composer, and the SSE
 // stream. The shell owns auth, the nav and the error banner state — chat reads
 // `error` to decide its empty states and pushes failures back through onFail.
 export default function ChatView({
-  token,
   assistantName,
   searchOn,
   searchAvailable,
   onToggleSearch,
   error,
   onClearError,
-  onFail,
 }: {
-  token: string;
   assistantName: string;
   searchOn: boolean;
   searchAvailable: boolean;
   onToggleSearch: (on: boolean) => void;
   error: string | null;
-  // Must be referentially stable (useCallback in the shell): both live in the
+  // Must be referentially stable (useCallback in the shell): it lives in the
   // dep list of the callbacks that drive the list/load effects below.
   onClearError: () => void;
-  onFail: (e: unknown) => void;
 }) {
+  // `failed` is a useCallback in AuthProvider — stable identity, same as when it
+  // arrived as the onFail prop, so the dep lists below still don't re-fire.
+  const { token, failed: onFail } = useAuthed();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<UiMessage[]>([]);

@@ -2,16 +2,16 @@
 
 import { useEffect, useState } from "react";
 import { updateProfile } from "@/lib/gateway";
+import { useAuthed } from "../auth/AuthProvider";
 
 export default function AssistantNameForm({
-  token,
   assistantName,
   onSaved,
 }: {
-  token: string;
   assistantName: string;
   onSaved: (name: string) => void;
 }) {
+  const { token } = useAuthed();
   const [name, setName] = useState(assistantName);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
