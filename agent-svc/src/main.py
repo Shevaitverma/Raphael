@@ -8,9 +8,10 @@ import os
 import queue
 import threading
 import time
+import uuid
 
 import psycopg
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -19,7 +20,7 @@ import logsetup
 from config import DATABASE_URL
 from graph import workflow
 from llm import embeddings, resolver
-from memory import portrait, read, retriever
+from memory import govern, portrait, read, retriever
 from tools import google as google_tool
 from tools import search as search_tool
 
@@ -182,6 +183,38 @@ def memory_portrait(user_id: str):
     # The read-door for the portrait synthesize() writes daily and workflow injects
     # into every system prompt. Pure 0-token read; portrait.get never raises.
     return {"portrait": portrait.get(user_id)}
+
+
+# --- forget door: delete one fact / one note -------------------------------
+#
+# The write half of the transparency pair — seeing what the assistant believes
+# is only half a control if you cannot strike a wrong belief out. Still 0-token
+# REST: no model is ever consulted about a delete.
+#
+# Both ids are typed uuid.UUID so garbage becomes a clean 422 before any SQL
+# runs. user_id likewise: it is a real uuid at every legitimate call site (the
+# gateway builds it from the JWT sub), and typing it keeps a malformed value
+# from reaching psycopg as an "invalid input syntax" 500.
+#
+# 404 covers both "no such row" and "not yours" — govern.delete matches on
+# (id, user_id), so another user's fact is simply not found. Deliberately NOT
+# 403: that would confirm the id exists.
+#
+# No PATCH: facts.embedding is derived from the fact text, so editing a triple
+# without re-embedding leaves a stale vector matching the OLD meaning while the
+# UI shows the new one. Delete-and-reteach is the honest loop.
+@app.delete("/memory/facts/{fact_id}")
+def memory_delete_fact(fact_id: uuid.UUID, user_id: uuid.UUID):
+    if not govern.delete("facts", str(fact_id), str(user_id)):
+        return JSONResponse(status_code=404, content={"error": "fact not found"})
+    return Response(status_code=204)
+
+
+@app.delete("/memory/notes/{note_id}")
+def memory_delete_note(note_id: uuid.UUID, user_id: uuid.UUID):
+    if not govern.delete("memories", str(note_id), str(user_id)):
+        return JSONResponse(status_code=404, content={"error": "note not found"})
+    return Response(status_code=204)
 
 
 class ChatBody(BaseModel):

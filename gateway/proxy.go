@@ -351,6 +351,35 @@ func (s *Server) proxyMemoryPortrait(c *fiber.Ctx) error {
 	return s.forward(c, http.MethodGet, target, nil)
 }
 
+// --- memory delete proxies → agent-svc -------------------------------------
+//
+// DELETE /api/memory/facts/:id → agent-svc DELETE /memory/facts/<id>?user_id=<jwt sub>
+// DELETE /api/memory/notes/:id → agent-svc DELETE /memory/notes/<id>?user_id=<jwt sub>
+//
+// Same uid rule as the reads — the query is rebuilt from the JWT sub, so the id
+// is the ONLY thing the client controls, and agent-svc deletes on (id, user_id):
+// another user's id matches nothing and comes back 404. The :id guard and
+// PathEscape are proxyTasks'. Method is hardcoded rather than c.Method() so a
+// second verb mounted on this handler later cannot silently widen it.
+func (s *Server) proxyDeleteFact(c *fiber.Ctx) error {
+	return s.proxyMemoryDelete(c, "/memory/facts/")
+}
+
+func (s *Server) proxyDeleteNote(c *fiber.Ctx) error {
+	return s.proxyMemoryDelete(c, "/memory/notes/")
+}
+
+func (s *Server) proxyMemoryDelete(c *fiber.Ctx, prefix string) error {
+	uid := c.Locals(userIDKey).(string)
+
+	id := c.Params("id")
+	if strings.Contains(id, "..") || strings.Contains(strings.ToLower(id), "internal") {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid path")
+	}
+	target := s.cfg.AgentSvcURL + prefix + url.PathEscape(id) + "?user_id=" + url.QueryEscape(uid)
+	return s.forward(c, http.MethodDelete, target, nil)
+}
+
 // --- chat proxy → agent-svc (SSE passthrough) ------------------------------
 //
 // POST /api/chat {conversation_id, message, search} → agent-svc POST /chat

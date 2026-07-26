@@ -186,6 +186,10 @@ func (s *Server) BuildApp() *fiber.App {
 	api.Get("/memory/graph", s.proxyMemoryGraph)
 	api.Get("/memory/stats", s.proxyMemoryStats)
 	api.Get("/memory/portrait", s.proxyMemoryPortrait)
+	// Memory forget door: same uid forcing, one row at a time. Deleting is
+	// scoped to the owner in agent-svc's SQL, so another user's id is a 404.
+	api.Delete("/memory/facts/:id", s.proxyDeleteFact)
+	api.Delete("/memory/notes/:id", s.proxyDeleteNote)
 
 	// Conversations: exactly the three routes in the contract. Message *writes*
 	// are agent-svc's job (it posts to conv-svc directly), so there is no

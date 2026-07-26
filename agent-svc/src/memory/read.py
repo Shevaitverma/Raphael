@@ -37,8 +37,9 @@ def graph(user_id: str) -> dict:
         with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
-                    """SELECT subject, subject_n, predicate, object, object_n,
-                              confidence, times_seen, first_seen, last_seen
+                    """SELECT id, subject, subject_n, predicate, object, object_n,
+                              confidence, times_seen, access_count,
+                              first_seen, last_seen
                          FROM facts
                         WHERE user_id = %s
                         ORDER BY times_seen DESC
@@ -73,11 +74,19 @@ def graph(user_id: str) -> dict:
         degree[o] = degree.get(o, 0) + 1
         edges.append(
             {
+                # The facts row id: the only stable per-edge handle, and the only
+                # correct unit of deletion. A node id is normalized TEXT shared by
+                # every fact that mentions it (subject_n is "user" on most rows),
+                # so nothing addressed by node could ever be deleted safely.
+                "id": str(r["id"]),
                 "source": s,
                 "target": o,
                 "label": r["predicate"],
                 "confidence": r["confidence"],
                 "times_seen": r["times_seen"],
+                # How often this fact was recalled INTO a prompt (retriever.touch),
+                # a different axis from times_seen (the world re-asserting it).
+                "access_count": r["access_count"],
                 "first_seen": _iso(r["first_seen"]),
                 "last_seen": _iso(r["last_seen"]),
             }
