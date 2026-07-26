@@ -270,7 +270,63 @@ class GState(TypedDict, total=False):
     persisted_message_id: str | None
 
 
+# Greeting vocabulary for _is_small_talk. Deliberately small: these are words that
+# carry no topic. "today"/"tonight" are here because they only ever qualify a
+# greeting in this set ("good morning today" is still a greeting); any real subject
+# word keeps the message out.
+_GREETING_WORDS = frozenset(
+    """hi hii hiii hey heyy heyyy hello helo hullo yo hola howdy namaste greetings
+    sup wassup whatsup hru gm gn
+    good morning afternoon evening night day today tonight
+    how how's hows are is it going you u ya doing there here again back
+    what what's whats up nice to meet
+    """.split()
+)
+# A bare greeting has no topic, so there is nothing retrieval can be relevant TO.
+# Injecting the profile and portrait anyway is exactly what made the assistant open
+# with a recital of the user's life — "ready to cook North Indian classics for
+# Ankita, deep dive into a DevOps challenge, crack the gym routine?" — in reply to
+# "hi". Instructing the model not to do that FAILED on a 7B: it reads the notes and
+# performs them, because notes in the prompt read as material to use.
+#
+# So this is deterministic rather than persuasive: on small talk we skip retrieval
+# entirely and the prompt simply contains nothing to recite. Costs no tokens and
+# saves an embed + three queries + the portrait read.
+#
+# Whole-message whitelist, never substring: EVERY token must be a greeting word, so
+# "hi, remind me to drink water" (remind/drink/water) and "what is my name"
+# (is/my/name) are ordinary turns that keep their memory. The token cap stops a long
+# sentence built only from filler from sneaking through.
+_MAX_SMALL_TALK_TOKENS = 6
+
+
+def _is_small_talk(message: str) -> bool:
+    flat = "".join(c if c.isalnum() or c == "'" else " " for c in (message or "").lower())
+    toks = flat.split()
+    if not toks or len(toks) > _MAX_SMALL_TALK_TOKENS:
+        return False
+    return all(t in _GREETING_WORDS for t in toks)
+
+
 def context_node(state: GState) -> dict:
+    # No topic -> no retrieval. See _is_small_talk. History is still fetched: saying
+    # "hi" mid-conversation must not drop the thread being discussed.
+    if _is_small_talk(state["message"]):
+        caps = state["provider"].capabilities()
+        _, _, hist_budget = budget.budgets(caps.max_context_tokens)
+        kept, dropped = history.fetch(state["conversation_id"], hist_budget, state["user_id"])
+        _log.info("small talk: skipping memory retrieval for this turn")
+        return {
+            "history": kept,
+            "summary": dropped,
+            "memories": [],
+            "profile": [],
+            "portrait": None,
+            # Empty so persist's touch() reinforces nothing — a greeting must not
+            # count as "this memory was useful".
+            "injected_ids": [],
+        }
+
     caps = state["provider"].capabilities()
     prof_budget, mem_budget, hist_budget = budget.budgets(caps.max_context_tokens)
 
