@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end acceptance test for the Raphael walking skeleton.
 #
-# Drives: dev-login -> create conversation -> chat (SSE) -> Postgres assertions
+# Drives: mint a test JWT -> create conversation -> chat (SSE) -> Postgres assertions
 # -> lifeboat (dead credential 401) -> transient fault (429, no lifeboat) and
 # asserts on the real output at every step. Exits non-zero on the first failure.
 #
@@ -25,10 +25,35 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
 STUB_PID=""
 
+JWT_SECRET="${JWT_SECRET:-dev-only-change-me}"
+
 psql() { docker exec -i raphael_db psql -U raphael -d raphael "$@"; }
 fail() { echo "FAIL: $*"; cleanup; exit 1; }
 pass() { echo "  PASS: $*"; }
 jget() { "$PY" -c "import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])" "$1" "$2"; }
+
+# mint <email> -> prints "<uid> <role> <token>".
+# Google Sign-In is the ONLY login endpoint — there is no email/password route to
+# POST to, by design. So a test identity is made the same way the gateway makes
+# one: upsert the users row, then sign an HS256 JWT with JWT_SECRET (the exact
+# claims gateway/auth.go mintToken emits). Python stdlib only.
+mint() {
+  local row uid role
+  row=$(psql -qtAX -c "INSERT INTO users (email, name) VALUES ('$1', split_part('$1','@',1))
+        ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id || ' ' || role;" | tr -d '\r')
+  uid="${row%% *}"; role="${row##* }"
+  [ -n "$uid" ] || fail "could not upsert test user $1"
+  echo "$uid $role $(JWT_SECRET="$JWT_SECRET" "$PY" - "$uid" "$role" <<'PYJWT'
+import base64, hashlib, hmac, json, os, sys, time
+b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=")
+now = int(time.time())
+msg = b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode()) + b"." + \
+      b64(json.dumps({"sub": sys.argv[1], "role": sys.argv[2], "exp": now + 3600, "iat": now},
+                     separators=(",", ":")).encode())
+print((msg + b"." + b64(hmac.new(os.environ["JWT_SECRET"].encode(), msg, hashlib.sha256).digest())).decode())
+PYJWT
+)"
+}
 cleanup() {
   [ -n "$STUB_PID" ] && kill "$STUB_PID" >/dev/null 2>&1
   # Delete the throwaway users; FK ON DELETE CASCADE drops their creds/facts/memories/
@@ -64,32 +89,24 @@ fi
 [ -z "$MODEL" ] && fail "no Ollama model available"
 pass "selected local model -> $MODEL"
 
-echo "== 1. dev-login (DEDICATED throwaway test user, never DEV_UID) =="
-# dev-login upserts ANY email (gateway/auth.go), so a fixed throwaway address
-# gives us an isolated user. All data below is exercised under TUID, so a bug can
-# never touch the human's real DEV_UID knowledge graph. TUID (not UID — that is a
-# zsh readonly special var) holds the id; cleanup() deletes the user at the end.
-curl -s --max-time 8 -X POST "$GATEWAY/auth/dev-login" -H 'Content-Type: application/json' \
-  -d '{"email":"e2e@raphael.test"}' > "$TMP/login.json"
-TOKEN=$(jget "$TMP/login.json" token)
-TUID=$("$PY" -c "import json,sys;print(json.load(open(sys.argv[1]))['user']['id'])" "$TMP/login.json")
+echo "== 1. mint a token for a DEDICATED throwaway test user (never DEV_UID) =="
+# A fixed throwaway address gives us an isolated user. All data below is exercised
+# under TUID, so a bug can never touch the human's real DEV_UID knowledge graph.
+# TUID (not UID — that is a zsh readonly special var) holds the id; cleanup()
+# deletes the user at the end.
+read -r TUID _TROLE TOKEN <<<"$(mint 'e2e@raphael.test')"
 [ -n "$TOKEN" ] || fail "no token minted"
-[ -n "$TUID" ] && [ "$TUID" != "$DEV_UID" ] || fail "dev-login did not mint a dedicated non-DEV_UID user (got '$TUID')"
+[ -n "$TUID" ] && [ "$TUID" != "$DEV_UID" ] || fail "minted a non-dedicated user (got '$TUID')"
 pass "JWT minted for throwaway test user $TUID"
 
 echo "== 1a. mint an ADMIN token (throwaway; promoted in DB) to drive the SYSTEM config =="
 # Provider config is admin-owned now, so the fallback sections need an admin. Mint a
-# throwaway via dev-login, promote it in the DB (a throwaway row, never DEV_UID),
-# then re-login so the JWT carries role=admin. cleanup() deletes this user.
-curl -s --max-time 8 -X POST "$GATEWAY/auth/dev-login" -H 'Content-Type: application/json' \
-  -d "{\"email\":\"$ADMIN_EMAIL\"}" > "$TMP/adm0.json"
-AUID=$("$PY" -c "import json,sys;print(json.load(open(sys.argv[1]))['user']['id'])" "$TMP/adm0.json")
+# throwaway, promote it in the DB (a throwaway row, never DEV_UID), then re-mint so
+# the JWT carries role=admin. cleanup() deletes this user.
+read -r AUID _ _ <<<"$(mint "$ADMIN_EMAIL")"
 psql -q -c "UPDATE users SET role='admin' WHERE id='$AUID';" >/dev/null
-curl -s --max-time 8 -X POST "$GATEWAY/auth/dev-login" -H 'Content-Type: application/json' \
-  -d "{\"email\":\"$ADMIN_EMAIL\"}" > "$TMP/adm.json"
-ATOKEN=$(jget "$TMP/adm.json" token)
-AROLE=$("$PY" -c "import json,sys;print(json.load(open(sys.argv[1]))['user']['role'])" "$TMP/adm.json")
-[ "$AROLE" = "admin" ] || fail "admin dev-login role = '$AROLE', want admin"
+read -r _ AROLE ATOKEN <<<"$(mint "$ADMIN_EMAIL")"
+[ "$AROLE" = "admin" ] || fail "admin token role = '$AROLE', want admin"
 pass "admin JWT minted (role=$AROLE)"
 
 echo "== 1b. point the SYSTEM provider config at the chosen model (resolver reads it for EVERY user) =="

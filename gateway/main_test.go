@@ -28,7 +28,6 @@ func testConfig(userSvc, convSvc, agentSvc string) Config {
 	c.UserSvcURL = userSvc
 	c.ConvSvcURL = convSvc
 	c.AgentSvcURL = agentSvc
-	c.DevAuthEnabled = true
 	c.InternalToken = "test-internal-secret" // so /internal/chat's valid-token case works
 	return c
 }
@@ -43,35 +42,33 @@ func newServerT(t *testing.T, cfg Config) *Server {
 }
 
 // login mints a token for a fresh, unique dev user so rate-limit buckets and
-// user ids do not collide across tests.
-func login(t *testing.T, app interface {
-	Test(*http.Request, ...int) (*http.Response, error)
-}, email string) (token, userID string) {
+// user ids do not collide across tests. There is deliberately NO email/password
+// endpoint to log in through — Google Sign-In is the only real auth path — so
+// tests upsert the row on the server's own pool and mint the JWT directly.
+func login(t *testing.T, s *Server, email string) (token, userID string) {
 	t.Helper()
-	body, _ := json.Marshal(map[string]string{"email": email})
-	req := httptest.NewRequest(http.MethodPost, "/auth/dev-login", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := app.Test(req, 5000)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var u User
+	// Same upsert the handlers use: name defaults to the local-part, role falls to
+	// the column default ('member') on insert and keeps its value on conflict.
+	if err := s.db.QueryRow(ctx, `
+		INSERT INTO users (email, name)
+		VALUES ($1, split_part($1, '@', 1))
+		ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
+		RETURNING id, email, name, role`, email).Scan(&u.ID, &u.Email, &u.Name, &u.Role); err != nil {
+		t.Fatalf("upsert test user %s: %v (is Postgres up?)", email, err)
+	}
+	token, err := s.mintToken(u.ID, u.Role)
 	if err != nil {
-		t.Fatalf("dev-login: %v", err)
+		t.Fatalf("mintToken: %v", err)
 	}
-	if resp.StatusCode != 200 {
-		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("dev-login status %d: %s", resp.StatusCode, b)
-	}
-	var out struct {
-		Token string `json:"token"`
-		User  User   `json:"user"`
-	}
-	json.NewDecoder(resp.Body).Decode(&out)
-	if out.Token == "" || out.User.ID == "" {
-		t.Fatalf("dev-login returned empty token/user: %+v", out)
-	}
-	t.Cleanup(func() { dropTestUser(t, email, out.User.ID) })
-	return out.Token, out.User.ID
+	t.Cleanup(func() { dropTestUser(t, email, u.ID) })
+	return token, u.ID
 }
 
-// protectedEmails must never be deleted by a test. dev-login UPSERTS by email, so
+// protectedEmails must never be deleted by a test. login UPSERTS by email, so
 // without this guard a test that logged in as a real address would have its
 // cleanup delete that real account (and CASCADE its facts, memories and chats).
 var protectedEmails = map[string]bool{
@@ -193,8 +190,9 @@ func TestConversationsInjectsUserID(t *testing.T) {
 	defer conv.Close()
 
 	cfg := testConfig("http://127.0.0.1:1", conv.URL, "http://127.0.0.1:1")
-	app := newServerT(t, cfg).BuildApp()
-	token, uid := login(t, app, fmt.Sprintf("conv-%d@raphael.local", time.Now().UnixNano()))
+	s := newServerT(t, cfg)
+	app := s.BuildApp()
+	token, uid := login(t, s, fmt.Sprintf("conv-%d@raphael.local", time.Now().UnixNano()))
 
 	// POST with a SPOOFED user_id in BOTH the body and the query — the gateway
 	// must overwrite each. The query half is the regression guard for the bug
@@ -247,8 +245,9 @@ func TestDeleteConversationForcesJWTUID(t *testing.T) {
 	defer conv.Close()
 
 	cfg := testConfig("http://127.0.0.1:1", conv.URL, "http://127.0.0.1:1")
-	app := newServerT(t, cfg).BuildApp()
-	token, uid := login(t, app, fmt.Sprintf("del-%d@raphael.local", time.Now().UnixNano()))
+	s := newServerT(t, cfg)
+	app := s.BuildApp()
+	token, uid := login(t, s, fmt.Sprintf("del-%d@raphael.local", time.Now().UnixNano()))
 
 	convID := "88888888-8888-8888-8888-888888888888"
 	spoof := "11111111-1111-1111-1111-111111111111"
@@ -294,8 +293,9 @@ func TestProfileForcesJWTUID(t *testing.T) {
 	defer user.Close()
 
 	cfg := testConfig(user.URL, "http://127.0.0.1:1", "http://127.0.0.1:1")
-	app := newServerT(t, cfg).BuildApp()
-	token, uid := login(t, app, fmt.Sprintf("prof-%d@raphael.local", time.Now().UnixNano()))
+	s := newServerT(t, cfg)
+	app := s.BuildApp()
+	token, uid := login(t, s, fmt.Sprintf("prof-%d@raphael.local", time.Now().UnixNano()))
 
 	// GET must land on /users/<jwt-uid>/profile.
 	{
@@ -362,8 +362,9 @@ func TestTasksForcesJWTUID(t *testing.T) {
 	defer user.Close()
 
 	cfg := testConfig(user.URL, "http://127.0.0.1:1", "http://127.0.0.1:1")
-	app := newServerT(t, cfg).BuildApp()
-	token, uid := login(t, app, fmt.Sprintf("task-%d@raphael.local", time.Now().UnixNano()))
+	s := newServerT(t, cfg)
+	app := s.BuildApp()
+	token, uid := login(t, s, fmt.Sprintf("task-%d@raphael.local", time.Now().UnixNano()))
 
 	// GET must land on /users/<jwt-uid>/tasks.
 	{
@@ -444,8 +445,9 @@ func TestMemoryGraphForcesJWTUID(t *testing.T) {
 	defer agent.Close()
 
 	cfg := testConfig("http://127.0.0.1:1", "http://127.0.0.1:1", agent.URL)
-	app := newServerT(t, cfg).BuildApp()
-	token, uid := login(t, app, fmt.Sprintf("mem-%d@raphael.local", time.Now().UnixNano()))
+	s := newServerT(t, cfg)
+	app := s.BuildApp()
+	token, uid := login(t, s, fmt.Sprintf("mem-%d@raphael.local", time.Now().UnixNano()))
 
 	// Spoof a user_id in the query — it must be ignored, the JWT uid forwarded.
 	spoof := "11111111-1111-1111-1111-111111111111"
@@ -489,10 +491,11 @@ func TestChatInjectsAssistantName(t *testing.T) {
 	defer agent.Close()
 
 	cfg := testConfig("http://127.0.0.1:1", "http://127.0.0.1:1", agent.URL)
-	app := newServerT(t, cfg).BuildApp()
+	s := newServerT(t, cfg)
+	app := s.BuildApp()
 	// A fresh dev user; db/004 defaults assistant_name to 'Raphael', so the
 	// JWT-keyed lookup returns that default.
-	token, _ := login(t, app, fmt.Sprintf("chatname-%d@raphael.local", time.Now().UnixNano()))
+	token, _ := login(t, s, fmt.Sprintf("chatname-%d@raphael.local", time.Now().UnixNano()))
 
 	// Client tries to spoof a name in the body; it must be dropped and replaced by
 	// the DB value.
@@ -538,8 +541,9 @@ func TestInternalUnreachable(t *testing.T) {
 	defer user.Close()
 
 	cfg := testConfig(user.URL, "http://127.0.0.1:1", "http://127.0.0.1:1")
-	app := newServerT(t, cfg).BuildApp()
-	token, _ := login(t, app, fmt.Sprintf("intl-%d@raphael.local", time.Now().UnixNano()))
+	s := newServerT(t, cfg)
+	app := s.BuildApp()
+	token, _ := login(t, s, fmt.Sprintf("intl-%d@raphael.local", time.Now().UnixNano()))
 
 	// A legit providers call SHOULD reach /credentials (sanity that upstream works).
 	{
@@ -723,8 +727,9 @@ func TestGoogleConnect(t *testing.T) {
 	{
 		cfg := testConfig("http://127.0.0.1:1", "http://127.0.0.1:1", "http://127.0.0.1:1")
 		cfg.GoogleClientID = ""
-		app := newServerT(t, cfg).BuildApp()
-		token, _ := login(t, app, fmt.Sprintf("gc0-%d@raphael.local", time.Now().UnixNano()))
+		s := newServerT(t, cfg)
+		app := s.BuildApp()
+		token, _ := login(t, s, fmt.Sprintf("gc0-%d@raphael.local", time.Now().UnixNano()))
 
 		req := httptest.NewRequest(http.MethodGet, "/api/google/connect", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -741,8 +746,9 @@ func TestGoogleConnect(t *testing.T) {
 	{
 		cfg := testConfig("http://127.0.0.1:1", "http://127.0.0.1:1", "http://127.0.0.1:1")
 		cfg.GoogleClientID = "test-client-id.apps.googleusercontent.com"
-		app := newServerT(t, cfg).BuildApp()
-		token, _ := login(t, app, fmt.Sprintf("gc1-%d@raphael.local", time.Now().UnixNano()))
+		s := newServerT(t, cfg)
+		app := s.BuildApp()
+		token, _ := login(t, s, fmt.Sprintf("gc1-%d@raphael.local", time.Now().UnixNano()))
 
 		req := httptest.NewRequest(http.MethodGet, "/api/google/connect", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -864,9 +870,10 @@ func TestRateLimit(t *testing.T) {
 
 	cfg := testConfig(up.URL, "http://127.0.0.1:1", "http://127.0.0.1:1")
 	cfg.RateLimitPerMin = 60 // pin the limit so the 65-request assertion is deterministic
-	app := newServerT(t, cfg).BuildApp()
+	s := newServerT(t, cfg)
+	app := s.BuildApp()
 	// Unique user → isolated rate bucket.
-	token, _ := login(t, app, fmt.Sprintf("rl-%d@raphael.local", time.Now().UnixNano()))
+	token, _ := login(t, s, fmt.Sprintf("rl-%d@raphael.local", time.Now().UnixNano()))
 
 	var got429 bool
 	for i := 0; i < 65; i++ {
@@ -931,7 +938,7 @@ func TestChatSSEStreamsIncrementally(t *testing.T) {
 	base := "http://" + ln.Addr().String()
 
 	// Log in via the real listener.
-	token, _ := login(t, app, fmt.Sprintf("sse-%d@raphael.local", time.Now().UnixNano()))
+	token, _ := login(t, srv, fmt.Sprintf("sse-%d@raphael.local", time.Now().UnixNano()))
 
 	body, _ := json.Marshal(map[string]string{"conversation_id": "c1", "message": "hi"})
 	req, _ := http.NewRequest(http.MethodPost, base+"/api/chat", bytes.NewReader(body))

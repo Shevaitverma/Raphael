@@ -10,14 +10,13 @@ import (
 // environment. We never read .env directly; the process environment is the
 // single source of truth (docker-compose / shell exports it).
 type Config struct {
-	Port           string
-	DatabaseURL    string
-	RedisURL       string
-	JWTSecret      string
-	DevAuthEnabled bool
-	UserSvcURL     string
-	ConvSvcURL     string
-	AgentSvcURL    string
+	Port        string
+	DatabaseURL string
+	RedisURL    string
+	JWTSecret   string
+	UserSvcURL  string
+	ConvSvcURL  string
+	AgentSvcURL string
 	// InternalToken gates the trusted internal chat-ingress route (the WhatsApp
 	// bridge), which takes user_id from the body instead of a JWT. Empty means
 	// the route FAILS CLOSED — an unconfigured gateway never exposes open ingress.
@@ -86,19 +85,14 @@ func getint(key string, def int) int {
 
 func LoadConfig() Config {
 	return Config{
-		Port:        getenv("GATEWAY_PORT", "8080"),
-		DatabaseURL: getenv("DATABASE_URL", "postgresql://raphael:raphael@localhost:5433/raphael"),
-		RedisURL:    getenv("REDIS_URL", "redis://localhost:6379/0"),
-		JWTSecret:   getenv("JWT_SECRET", "dev-only-change-me"),
-		// Defaults CLOSED. dev-login mints a 24h JWT for any email with no
-		// password, so an unset var must never mean "enabled" — a deploy that
-		// forgets it would be an account-takeover bypass. Both dev paths set it
-		// explicitly (docker-compose.yml, scripts/dev.sh).
-		DevAuthEnabled:  getenv("DEV_AUTH_ENABLED", "false") == "true",
-		UserSvcURL:      getenv("USER_SVC_URL", "http://localhost:8081"),
-		ConvSvcURL:      getenv("CONV_SVC_URL", "http://localhost:8082"),
-		AgentSvcURL:     getenv("AGENT_SVC_URL", "http://localhost:8000"),
-		InternalToken:   getenv("INTERNAL_TOKEN", ""),
+		Port:          getenv("GATEWAY_PORT", "8080"),
+		DatabaseURL:   getenv("DATABASE_URL", "postgresql://raphael:raphael@localhost:5433/raphael"),
+		RedisURL:      getenv("REDIS_URL", "redis://localhost:6379/0"),
+		JWTSecret:     getenv("JWT_SECRET", "dev-only-change-me"),
+		UserSvcURL:    getenv("USER_SVC_URL", "http://localhost:8081"),
+		ConvSvcURL:    getenv("CONV_SVC_URL", "http://localhost:8082"),
+		AgentSvcURL:   getenv("AGENT_SVC_URL", "http://localhost:8000"),
+		InternalToken: getenv("INTERNAL_TOKEN", ""),
 		// A SPA dashboard fires ~10 calls per load plus polling; 60/min throttled
 		// normal use. 300/min/user gives headroom while still bounding abuse.
 		RateLimitPerMin: getint("RATE_LIMIT_PER_MIN", 300),

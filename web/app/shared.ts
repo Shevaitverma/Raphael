@@ -19,8 +19,6 @@ export function detectedTz(): string {
   }
 }
 
-export const DEV_EMAIL = "dev@raphael.local";
-
 // UI message carries extra render state that never touches the database. It
 // overrides Message.degraded (a stored boolean) with the live Degraded object
 // the banner renders — loadMessages rebuilds that object from stored state so

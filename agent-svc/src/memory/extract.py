@@ -82,6 +82,15 @@ Rules:
   claims it for THEMSELVES ("I'm Sam", "call me Sam", "my name is Sam").
 - Never store the answer to a question the user asked, or anything the assistant
   said about itself — only what the USER asserted about themselves.
+- NEVER record a request for you to DO something as a fact. "Remind me to drink
+  water today", "add a task", "log my workout", "put it in my calendar" are
+  ACTIONS: a tool performs them and the resulting row has its own lifetime (a
+  reminder stops when its schedule ends). Storing "user wants reminders about
+  drinking water" as a durable belief outlives the reminder, so you keep acting on
+  a request the user made once, for one day, forever. Record nothing for these.
+  A standing PREFERENCE the user states about themselves is different and IS
+  durable: "I drink a lot of water" or "I prefer short answers" are facts; "remind
+  me to drink water at 5pm" is not.
 - Prefer a triple; use a note only when it truly cannot be one.
 - Add "confidence": "inferred" ONLY when you GUESSED something the user did not
   say outright. Omit the field for anything the user stated directly.

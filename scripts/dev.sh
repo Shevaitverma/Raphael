@@ -23,13 +23,12 @@ PNPM="pnpm"; command -v pnpm >/dev/null || PNPM="npx -y pnpm"
 : "${DATABASE_URL:=postgresql://raphael:raphael@localhost:5433/raphael}"
 : "${REDIS_URL:=redis://localhost:6379/0}"
 : "${JWT_SECRET:=dev-only-change-me}"
-: "${DEV_AUTH_ENABLED:=true}"
 : "${GATEWAY_PORT:=8080}"; : "${USER_SVC_PORT:=8081}"; : "${CONV_SVC_PORT:=8082}"; : "${AGENT_SVC_PORT:=8000}"
 : "${USER_SVC_URL:=http://localhost:8081}"
 : "${CONV_SVC_URL:=http://localhost:8082}"
 : "${AGENT_SVC_URL:=http://localhost:8000}"
 : "${OLLAMA_BASE_URL:=http://localhost:11434/v1}"
-export DATABASE_URL REDIS_URL JWT_SECRET DEV_AUTH_ENABLED
+export DATABASE_URL REDIS_URL JWT_SECRET
 export GATEWAY_PORT USER_SVC_PORT CONV_SVC_PORT AGENT_SVC_PORT
 export USER_SVC_URL CONV_SVC_URL AGENT_SVC_URL OLLAMA_BASE_URL
 

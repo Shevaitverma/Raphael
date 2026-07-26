@@ -13,18 +13,13 @@ export type User = {
   id: string;
   email?: string;
   name?: string;
-  // Set by google-login and dev-login. Admins see the Admin area; the server
+  // Set at Google sign-in. Admins see the Admin area; the server
   // re-checks role on every privileged mutation, so this claim is UI-only.
   role?: "admin" | "member";
   // Only present in the admin listUsers() unified list: "active" = a real users
   // row (with last_active), "pending" = an allowed_emails invite not signed up yet.
   status?: "active" | "pending";
   last_active?: string | null;
-};
-
-export type DevLoginResponse = {
-  token: string;
-  user: User;
 };
 
 // The result of the one-time cookie handoff after a Google callback: the gateway
@@ -108,21 +103,6 @@ export function isAuthError(e: unknown): boolean {
 }
 
 // --- REST calls --------------------------------------------------------------
-
-export async function devLogin(email: string): Promise<DevLoginResponse> {
-  const res = await fetch(`${GATEWAY_URL}/auth/dev-login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    // credentials:'include' so the browser stores the durable session cookie the
-    // gateway sets — same persistence as a Google login.
-    credentials: "include",
-    body: JSON.stringify({ email }),
-  });
-  if (!res.ok) {
-    throw new Error(`dev-login failed: ${res.status} ${await safeText(res)}`);
-  }
-  return res.json();
-}
 
 // Real logout: revokes the durable session server-side and clears the cookie.
 // Best-effort — the SPA wipes its in-memory token regardless, so a network blip

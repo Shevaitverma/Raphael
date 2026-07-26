@@ -68,7 +68,6 @@ func logConfig(cfg Config) {
 		"rate_limit_per_min", cfg.RateLimitPerMin,
 		"access_ttl", cfg.AccessTTL.String(),
 		"session_ttl", cfg.SessionTTL.String(),
-		"dev_auth_enabled", cfg.DevAuthEnabled,
 		"database_url", secretState(cfg.DatabaseURL),
 		"redis_url", secretState(cfg.RedisURL),
 		"jwt_secret", secretState(cfg.JWTSecret),
@@ -76,15 +75,12 @@ func logConfig(cfg Config) {
 		"google_client_id", secretState(cfg.GoogleClientID),
 		"google_client_secret", secretState(cfg.GoogleClientSecret),
 	)
-	if cfg.DevAuthEnabled {
-		slog.Warn("DEV_AUTH_ENABLED is on: /auth/dev-login mints a JWT for any email with no password — disable it anywhere reachable beyond localhost")
-	}
 }
 
 // NewServer connects to Postgres and Redis and assembles the Server. The
-// Postgres connection is required (dev-login needs it); Redis is created lazily
-// and only reached at request time, so a momentarily-down cache never blocks
-// boot.
+// Postgres connection is required (auth and every DB-backed route need it);
+// Redis is created lazily and only reached at request time, so a
+// momentarily-down cache never blocks boot.
 func NewServer(cfg Config) (*Server, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -145,10 +141,6 @@ func (s *Server) BuildApp() *fiber.App {
 	app.Get("/health", s.handleServiceHealth) // uniform cross-service health
 	app.Get("/healthz", s.handleHealth)       // liveness
 	app.Get("/readyz", s.handleReady)         // readiness
-
-	if s.cfg.DevAuthEnabled {
-		app.Post("/auth/dev-login", s.handleDevLogin)
-	}
 
 	// Trusted internal chat-ingress (Phase 1 of the WhatsApp bridge). An inbound
 	// WhatsApp message has no JWT, so this route takes user_id from the body and is
@@ -275,8 +267,8 @@ func (s *Server) BuildApp() *fiber.App {
 
 	// Allowlist = invites. Adding an email is what permits that person's first
 	// Google sign-in; uninvited emails are rejected at the callback (fail closed).
-	admin.Post("/allowlist", s.proxyAllowlist)       // add an email
-	admin.Get("/allowlist", s.proxyAllowlist)        // list allowlisted emails
+	admin.Post("/allowlist", s.proxyAllowlist)          // add an email
+	admin.Get("/allowlist", s.proxyAllowlist)           // list allowlisted emails
 	admin.Delete("/allowlist/:email", s.proxyAllowlist) // remove one (handler reads :email)
 
 	// User management: list, promote/demote (role), remove.

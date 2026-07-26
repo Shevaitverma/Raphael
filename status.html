@@ -174,10 +174,10 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
 </header>
 
 <div class="banner"><div class="inner">
-  <b>Two switches must be off whenever this is reachable beyond localhost.</b>
-  <code>DEV_AUTH_ENABLED</code> and <code>NEXT_PUBLIC_DEV_AUTH</code> together expose a passwordless
-  login that mints a valid JWT for any email — and the seeded address returns role <code>admin</code>.
-  Both default closed; a tunnel or a LAN IP is "exposed".
+  <b>Google Sign-In is the only way in.</b>
+  The passwordless dev-login endpoint has been <b>deleted from the code</b> — handler, route and
+  config flag — so no env var can re-open it. An uninvited email is rejected at the callback; the
+  very first sign-in ever bootstraps the admin.
 </div></div>
 
 <!-- ═══════════ WORKING ═══════════ -->
@@ -345,7 +345,7 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
           <td>Same shape on all four. user-svc and conv-svc ping Postgres and return <b>503</b> when the pool is down; the gateway keeps <code>/readyz</code> as the dependency-aware probe.</td>
           <td><span class="pill done">Done</span></td></tr>
         <tr><td>Startup config banner</td>
-          <td>One <code>msg:"config"</code> line per service: resolved ports, downstream URLs, redirect URI, CORS/web origin, TTLs, <code>dev_auth_enabled</code> (with a <code>WARN</code> when that backdoor is on). Secrets as <code>SET</code>/<code>UNSET</code>, never values. A missing <code>JWT_SECRET</code> / <code>DATABASE_URL</code> / <code>INTERNAL_TOKEN</code> logs an error and exits non-zero.</td>
+          <td>One <code>msg:"config"</code> line per service: resolved ports, downstream URLs, redirect URI, CORS/web origin and TTLs. Secrets as <code>SET</code>/<code>UNSET</code>, never values. A missing <code>JWT_SECRET</code> / <code>DATABASE_URL</code> / <code>INTERNAL_TOKEN</code> logs an error and exits non-zero.</td>
           <td><span class="pill done">Done</span></td></tr>
         <tr><td>Central logging</td>
           <td>Loki 3.5.7 + Grafana 12.0.2 + Alloy v1.11.0 behind the <code>observability</code> compose profile — <code>docker compose --profile observability up -d</code>. Grafana on <code>:3001</code>, Loki datasource pre-provisioned with a <code>request_id</code> derived field for click-through tracing. Alloy bind-mounts <code>./logs</code> read-only, because in dev the services are host processes.</td>
@@ -452,16 +452,11 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
       parked behind this</b> — <code>token</code> and <code>onFail</code> are still threaded as props to
       every tab, and changing how auth state propagates while the auth path itself is unverified would
       make a failure impossible to attribute.</span></li>
-    <li><b>The dev-login backdoor</b> <span class="pill hazard">security</span>
-      <span class="why">Passwordless, mints a real JWT, and the seeded address comes back as
-      <code>admin</code>. Defaults are closed (<code>DEV_AUTH_ENABLED=false</code>), which is correct —
-      the risk is a dev leaving it on while tunnelling. Turn off both it and
-      <code>NEXT_PUBLIC_DEV_AUTH</code> before exposing anything.</span></li>
     <li><b><code>.env.example</code> has drifted from the code</b> <span class="pill partial">docs</span>
       <span class="why">It still sets <code>NEXT_PUBLIC_GATEWAY_URL</code> to an absolute URL (the
       current intent is empty, i.e. use the same-origin proxy) and does not mention
       <code>GATEWAY_INTERNAL_URL</code>, <code>ALLOWED_DEV_ORIGINS</code>,
-      <code>NEXT_PUBLIC_DEV_AUTH</code>, <code>CORS_ORIGINS</code>/<code>WEB_ORIGIN</code>,
+      <code>CORS_ORIGINS</code>/<code>WEB_ORIGIN</code>,
       <code>ACCESS_TTL</code>/<code>SESSION_TTL</code>, <code>RATE_LIMIT_PER_MIN</code>,
       <code>SYSTEM_CONFIG_UID</code> or <code>GRAFANA_USER</code>/<code>GRAFANA_PASSWORD</code> at all.
       <code>LOG_LEVEL</code> did get added. Worse than an omission: the root <code>.env</code> carries a
@@ -531,7 +526,7 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
   <p class="sub">What actually gets checked, and how.</p>
   <div class="cards">
     <div class="card"><div class="big">278</div><div class="note">unit tests — gateway 26 · user-svc 54 · conv-svc 27 · agent-svc 171 (the request-id sanitizer and the access-log level rule are covered in <code>gateway/logging_test.go</code> and <code>user-svc/logging_test.go</code>). Run with <code>make test</code>.</div></div>
-    <div class="card"><div class="big">10</div><div class="note">e2e stages in <code>scripts/e2e.sh</code>: health, model select, dev-login, system provider config, conversation, SSE, persistence + 768-d memory, neutral tool shape, no wire format in the DB, lifeboat on a real 401, 429 must <em>not</em> degrade, restore, two-doors + skip-gate.</div></div>
+    <div class="card"><div class="big">10</div><div class="note">e2e stages in <code>scripts/e2e.sh</code>: health, model select, token mint, system provider config, conversation, SSE, persistence + 768-d memory, neutral tool shape, no wire format in the DB, lifeboat on a real 401, 429 must <em>not</em> degrade, restore, two-doors + skip-gate.</div></div>
     <div class="card"><div class="big">0</div><div class="note">e2e stages that touch the real account. Stage 1 mints a <b>dedicated throwaway user</b>; DEV_UID's facts and memories are never written or deleted by a test.</div></div>
     <div class="card"><div class="big">—</div><div class="note">No CI. Everything above is run by hand, so "green" means "green when someone last ran it".</div></div>
   </div>

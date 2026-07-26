@@ -42,11 +42,17 @@ Read `.env.example`. Never read `.env`. Never print a secret value.
 Postgres is on **5433** (5432 is taken by an unrelated container).
 Python is **3.13** (not 3.12 — adjust any pin). `uv` is not installed; use `pip` + `venv`.
 
-## Auth (dev mode)
+## Auth
 
-`POST /auth/dev-login {"email": "dev@raphael.local"}` → `{"token": "...", "user": {...}}`
-JWT HS256, secret `JWT_SECRET`, claims `{"sub": "<user uuid>", "exp": ...}`.
+Google Sign-In is the **only** login path: `GET /auth/google/login` → consent →
+`GET /auth/google/callback` → durable httpOnly session cookie → `GET /auth/session`
+trades that cookie for a short-lived access JWT. There is deliberately **no**
+passwordless/email-only endpoint — the old `/auth/dev-login` was deleted, not
+just disabled. Do not add one back.
+JWT HS256, secret `JWT_SECRET`, claims `{"sub": "<user uuid>", "role": ..., "exp": ...}`.
 Every `/api/*` route requires `Authorization: Bearer <token>`.
+Tests and `scripts/e2e.sh` upsert a throwaway user and sign the JWT locally with
+`JWT_SECRET`; that is a local capability, never a network route.
 The seeded dev user is `00000000-0000-0000-0000-000000000001`.
 
 ## The neutral message shape — NEVER store a provider's wire format
@@ -87,7 +93,6 @@ per request, never at boot.
 | method | path | notes |
 |---|---|---|
 | GET | `/healthz` | `{"status":"ok","deps":{"redis":"ok","user_svc":"ok","conv_svc":"ok","agent_svc":"ok"}}` |
-| POST | `/auth/dev-login` | only when `DEV_AUTH_ENABLED=true` |
 | GET | `/api/conversations` | proxy → conv-svc, `user_id` from JWT |
 | POST | `/api/conversations` | proxy → conv-svc |
 | GET | `/api/conversations/:id/messages` | proxy → conv-svc |
@@ -217,7 +222,7 @@ to embed — Claude has no embeddings endpoint.
 
 ## web/  (Next.js, :3000)
 
-App Router + TypeScript + Tailwind. One page: dev-login, conversation list, message
+App Router + TypeScript + Tailwind. One page: Google sign-in, conversation list, message
 thread, composer. Consume `/api/chat` SSE with `EventSource`-style parsing (`fetch` +
 `ReadableStream`, since we send an `Authorization` header). Render the `degraded` event
 as a visible banner on the message — that is a product requirement, not decoration.

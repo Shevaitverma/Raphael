@@ -31,7 +31,7 @@ func TestChatProxyForwardsSearchFlag(t *testing.T) {
 
 			srv := newServerT(t, testConfig("http://127.0.0.1:1", "http://127.0.0.1:1", agent.URL))
 			app := srv.BuildApp()
-			token, uid := login(t, app, fmt.Sprintf("search-%d@raphael.local", time.Now().UnixNano()))
+			token, uid := login(t, srv, fmt.Sprintf("search-%d@raphael.local", time.Now().UnixNano()))
 
 			body, _ := json.Marshal(map[string]any{
 				"conversation_id": "c1",

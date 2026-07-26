@@ -1,17 +1,11 @@
 "use client";
 
-import { DEV_EMAIL } from "./shared";
-
 export default function LoginScreen({
   onGoogleLogin,
-  onDevLogin,
-  devAuth,
   loading,
   error,
 }: {
   onGoogleLogin: () => void;
-  onDevLogin: () => void;
-  devAuth: boolean;
   loading: boolean;
   error: string | null;
 }) {
@@ -23,9 +17,10 @@ export default function LoginScreen({
         </h1>
         <p className="text-sm text-muted">Sign in to continue.</p>
 
-        {/* Primary door: Google Sign-In is the login and the sign-up. An invited
+        {/* The ONLY door: Google Sign-In is the login and the sign-up. An invited
             email becomes a member; the very first sign-in ever bootstraps the admin;
-            an uninvited email is rejected at the callback (?login=denied). */}
+            an uninvited email is rejected at the callback (?login=denied). There is
+            deliberately no password path and no dev bypass — do not add one. */}
         <button
           onClick={onGoogleLogin}
           disabled={loading}
@@ -39,22 +34,6 @@ export default function LoginScreen({
           </svg>
           {loading ? "Signing in…" : "Sign in with Google"}
         </button>
-
-        {/* Dev backdoor, compiled in only when NEXT_PUBLIC_DEV_AUTH=1. */}
-        {devAuth && (
-          <div className="w-full border-t border-edge pt-4">
-            <p className="mb-2 text-[11px] uppercase tracking-widest text-faint">
-              Dev mode — sign in as {DEV_EMAIL}
-            </p>
-            <button
-              onClick={onDevLogin}
-              disabled={loading}
-              className="min-h-11 w-full rounded-md bg-accent px-4 py-3 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
-            >
-              {loading ? "Signing in…" : "Dev login"}
-            </button>
-          </div>
-        )}
 
         {error && (
           <p className="w-full break-words text-center text-sm text-error">{error}</p>

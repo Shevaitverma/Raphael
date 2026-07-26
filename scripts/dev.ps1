@@ -28,7 +28,6 @@ function Def($n, $v) { if (-not [Environment]::GetEnvironmentVariable($n)) { [En
 Def DATABASE_URL "postgresql://raphael:raphael@localhost:5433/raphael"
 Def REDIS_URL    "redis://localhost:6379/0"
 Def JWT_SECRET   "dev-only-change-me"
-Def DEV_AUTH_ENABLED "true"
 Def GATEWAY_PORT "8080"; Def USER_SVC_PORT "8081"; Def CONV_SVC_PORT "8082"; Def AGENT_SVC_PORT "8000"
 Def USER_SVC_URL  "http://localhost:8081"
 Def CONV_SVC_URL  "http://localhost:8082"

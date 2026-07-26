@@ -111,7 +111,6 @@ services:
       CONV_SVC_URL: http://conv-svc:8082
       AGENT_SVC_URL: http://agent-svc:8000
       JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
-      DEV_AUTH_ENABLED: "true"
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       # The whatsapp-bridge (and any internal ingress) authenticates to the
       # gateway's /internal/* with this shared secret.

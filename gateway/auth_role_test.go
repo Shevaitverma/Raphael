@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,17 +11,15 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-// TestDevLoginCarriesRole proves dev-login threads users.role into the JWT: a
-// fresh throwaway user defaults to 'member' (fail-closed) and the minted token's
-// role claim round-trips through parseToken.
-func TestDevLoginCarriesRole(t *testing.T) {
+// TestMintedTokenCarriesRole proves users.role threads into the JWT: a fresh
+// user defaults to 'member' (fail-closed) and the minted token's role claim
+// round-trips through parseToken.
+func TestMintedTokenCarriesRole(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:1", "http://127.0.0.1:1", "http://127.0.0.1:1")
 	s := newServerT(t, cfg)
-	app := s.BuildApp()
 
 	email := fmt.Sprintf("auth-verify+role-%d@raphael.test", time.Now().UnixNano())
-	token, uid := loginRole(t, app, email)
-	defer deleteThrowaway(t, s, uid)
+	token, uid := login(t, s, email)
 
 	sub, role, err := s.parseToken(token)
 	if err != nil {
@@ -52,8 +48,7 @@ func TestRequireAdminReReadsDB(t *testing.T) {
 	})
 
 	email := fmt.Sprintf("auth-verify+admin-%d@raphael.test", time.Now().UnixNano())
-	_, uid := loginRole(t, s.BuildApp(), email) // user starts as 'member'
-	defer deleteThrowaway(t, s, uid)
+	_, uid := login(t, s, email) // user starts as 'member'
 
 	// (1) CRAFTED admin claim on a member DB row -> 403 (DB says member).
 	forged, _ := s.mintToken(uid, "admin")
@@ -85,35 +80,4 @@ func hitAdmin(t *testing.T, app *fiber.App, token string) int {
 		t.Fatalf("admintest request: %v", err)
 	}
 	return resp.StatusCode
-}
-
-func loginRole(t *testing.T, app *fiber.App, email string) (token, uid string) {
-	t.Helper()
-	body, _ := json.Marshal(map[string]string{"email": email})
-	req := httptest.NewRequest(http.MethodPost, "/auth/dev-login", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := app.Test(req, 5000)
-	if err != nil || resp.StatusCode != 200 {
-		t.Fatalf("dev-login: err=%v status=%d", err, resp.StatusCode)
-	}
-	var out struct {
-		Token string `json:"token"`
-		User  User   `json:"user"`
-	}
-	json.NewDecoder(resp.Body).Decode(&out)
-	if out.Token == "" || out.User.ID == "" {
-		t.Fatalf("dev-login empty: %+v", out)
-	}
-	return out.Token, out.User.ID
-}
-
-// deleteThrowaway removes ONLY the auth-verify+* test user (invariant: never
-// touch DEV_UID or real rows).
-func deleteThrowaway(t *testing.T, s *Server, uid string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := s.db.Exec(ctx, `DELETE FROM users WHERE id=$1 AND email LIKE 'auth-verify+%@raphael.test'`, uid); err != nil {
-		t.Logf("cleanup throwaway %s: %v", uid, err)
-	}
 }

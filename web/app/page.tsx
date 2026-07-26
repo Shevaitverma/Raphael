@@ -30,12 +30,10 @@ export default function Page() {
     user,
     authError,
     loggingIn,
-    devAuth,
     error,
     clearError,
     failed,
     handleGoogleLogin,
-    handleLogin,
     handleLogout,
   } = useAuth();
 
@@ -186,8 +184,6 @@ export default function Page() {
     return (
       <LoginScreen
         onGoogleLogin={handleGoogleLogin}
-        onDevLogin={handleLogin}
-        devAuth={devAuth}
         loading={loggingIn}
         error={authError}
       />

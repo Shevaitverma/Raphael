@@ -65,50 +65,6 @@ func (s *Server) parseToken(raw string) (sub, role string, err error) {
 	return sub, role, nil
 }
 
-// handleDevLogin implements POST /auth/dev-login. Only mounted when
-// DEV_AUTH_ENABLED=true. Looks the user up in Postgres directly (an upsert so
-// any dev email works) and mints a JWT for them.
-func (s *Server) handleDevLogin(c *fiber.Ctx) error {
-	var body struct {
-		Email string `json:"email"`
-	}
-	if err := c.BodyParser(&body); err != nil || strings.TrimSpace(body.Email) == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "email is required")
-	}
-	email := strings.TrimSpace(body.Email)
-
-	ctx, cancel := context.WithTimeout(c.Context(), 5*time.Second)
-	defer cancel()
-
-	var u User
-	// Upsert by email so dev-login works for the seeded user and any new dev
-	// address. The name defaults to the local-part of the email on insert; role
-	// falls to the column default ('member') on insert, and returns the existing
-	// role on conflict — so DEV_UID dev-login returns 'admin', throwaways 'member'.
-	err := s.db.QueryRow(ctx, `
-		INSERT INTO users (email, name)
-		VALUES ($1, split_part($1, '@', 1))
-		ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
-		RETURNING id, email, name, role`, email).Scan(&u.ID, &u.Email, &u.Name, &u.Role)
-	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not resolve user")
-	}
-
-	// Dev-login now also mints the DURABLE session so a dev's refresh persists
-	// exactly like a real Google login (same cookie, same /auth/session re-issue).
-	id, err := s.createSession(ctx, u.ID, u.Role)
-	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not create session")
-	}
-	s.setSessionCookie(c, id)
-
-	token, err := s.mintToken(u.ID, u.Role)
-	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not mint token")
-	}
-	return c.JSON(fiber.Map{"token": token, "user": u})
-}
-
 // authMiddleware guards /api/*. It requires a Bearer token, validates it, and
 // stashes the user uuid in Locals for downstream handlers.
 func (s *Server) authMiddleware(c *fiber.Ctx) error {

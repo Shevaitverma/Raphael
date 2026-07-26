@@ -96,7 +96,7 @@ bash scripts/e2e.sh            # full acceptance test, asserts on real output
 ```
 
 `scripts/e2e.sh` drives the whole path and fails loudly on any deviation:
-dev-login → create conversation → chat (asserts tokens stream **incrementally**,
+mint a test JWT → create conversation → chat (asserts tokens stream **incrementally**,
 ≥1 `token`, exactly one `done`) → checks Postgres (user + assistant messages, a
 768-dim `memories` row with `embedding_model`, and **no** provider wire-format)
 → a **search turn** asserting the tool call persists in our neutral shape
@@ -109,8 +109,11 @@ restores the local credential as active.
 ## Manual walkthrough
 
 ```bash
-TOKEN=$(curl -s -X POST localhost:8080/auth/dev-login -H 'content-type: application/json' \
-  -d '{"email":"dev@raphael.local"}' | python -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+# Google Sign-In is the only login endpoint, so there is nothing to curl for a token.
+# Grab the access JWT the SPA is holding instead: sign in at localhost:3000, open the
+# devtools console and copy it from a request's Authorization header. For scripted runs,
+# scripts/e2e.sh mints one locally from JWT_SECRET (see its `mint` helper).
+TOKEN=<paste the access JWT>
 
 CID=$(curl -s -X POST localhost:8080/api/conversations -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' -d '{"title":"hello"}' \

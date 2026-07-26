@@ -1,20 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
-import { DEV_EMAIL } from "../shared";
-import {
-  devLogin,
-  fetchSession,
-  googleLogin,
-  isAuthError,
-  logout,
-  type User,
-} from "@/lib/gateway";
-
-// Dev-login is a local/dev convenience only. It shows in the UI solely when this
-// build was compiled with NEXT_PUBLIC_DEV_AUTH=1; production builds omit the env
-// var, so the dev button never renders and Google is the only door.
-const DEV_AUTH = process.env.NEXT_PUBLIC_DEV_AUTH === "1";
+import { fetchSession, googleLogin, isAuthError, logout, type User } from "@/lib/gateway";
 
 type Auth = {
   token: string | null;
@@ -22,14 +9,12 @@ type Auth = {
   authError: string | null;
   setAuthError: (msg: string | null) => void;
   loggingIn: boolean;
-  devAuth: boolean;
   // Shared failure banner: every view funnels its errors here through `failed`.
   // ChatView reads it (that is where the banner renders) and clears it.
   error: string | null;
   clearError: () => void;
   failed: (e: unknown) => void;
   handleGoogleLogin: () => Promise<void>;
-  handleLogin: () => Promise<void>;
   handleLogout: () => void;
 };
 
@@ -67,23 +52,6 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
       await googleLogin();
     } catch (e) {
       setAuthError(e instanceof Error ? e.message : String(e));
-      setLoggingIn(false);
-    }
-  }
-
-  // Dev-only backdoor, gated to builds with NEXT_PUBLIC_DEV_AUTH=1. The response
-  // carries the role the gateway assigned, so setUser is enough to drive the
-  // admin-gated UI.
-  async function handleLogin() {
-    setLoggingIn(true);
-    setAuthError(null);
-    try {
-      const res = await devLogin(DEV_EMAIL);
-      setToken(res.token);
-      setUser(res.user);
-    } catch (e) {
-      setAuthError(e instanceof Error ? e.message : String(e));
-    } finally {
       setLoggingIn(false);
     }
   }
@@ -140,7 +108,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
   const clearError = useCallback(() => setError(null), []);
 
   // Session restore. Runs once on EVERY mount (fresh load, page refresh, or the
-  // return from a Google/dev login), before a token exists, so it drives the
+  // return from a Google login), before a token exists, so it drives the
   // initial LoginScreen. The durable httpOnly session cookie is the credential:
   // /auth/session trades it for a fresh in-memory access JWT. A 401 means no
   // valid session -> stay on the login screen silently (this is the normal
@@ -187,12 +155,10 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
         authError,
         setAuthError,
         loggingIn,
-        devAuth: DEV_AUTH,
         error,
         clearError,
         failed,
         handleGoogleLogin,
-        handleLogin,
         handleLogout,
       }}
     >

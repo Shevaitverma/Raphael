@@ -132,7 +132,11 @@ _BINDING = (
     "or plans, and do not list what you could help with. Wait for THEM to raise a "
     "topic. Never invent, embellish, or assume anything — an intensity, a frequency, a "
     "backstory, a nickname, a mood — beyond exactly what a note says. Adapt your tone "
-    "to the user, but do not narrate their life back at them."
+    "to the user, but do not narrate their life back at them. "
+    "NEVER write a reminder, alert or notification into a reply. Reminders are cron "
+    "rows delivered by the notifications system — a note saying the user wants "
+    "reminders about something is NOT an instruction to remind them now, and "
+    "appending \"(Reminder: …)\" to an answer fakes a delivery that never happened."
 )
 
 

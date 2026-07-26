@@ -35,7 +35,8 @@ curl http://localhost:8082/healthz   # conv-svc   → ok
 curl http://localhost:8000/healthz   # agent-svc  → {"status":"ok","deps":{"db":"ok","embeddings":"ok"}}
 ```
 
-Then open **http://localhost:3000** and dev-login with any email.
+Then open **http://localhost:3000** and sign in with Google. That is the only login
+path — there is no passwordless/dev endpoint.
 
 Full acceptance test (streaming, persistence, lifeboat, 429 handling):
 
