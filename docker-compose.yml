@@ -166,7 +166,72 @@ services:
       conv-svc:
         condition: service_started
 
+  # ---- central log aggregation (opt-in) -------------------------------------
+  # Behind the `observability` profile, so a plain `docker compose up` is
+  # unchanged. Start it with:
+  #   docker compose --profile observability up -d
+  # Grafana: http://localhost:3001  (admin / ${GRAFANA_PASSWORD:-raphael})
+  # See ops/README.md.
+
+  loki:
+    image: grafana/loki:3.5.7
+    container_name: raphael_loki
+    profiles: ["observability"]
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    ports: ["3100:3100"]
+    volumes:
+      - ./ops/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki_data:/loki
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:3100/ready | grep -q ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # Alloy, not Promtail: Promtail is EOL. Tails the SAME ./logs/*.log files that
+  # ./dev.sh writes (host processes, not containers), so no docker log driver
+  # wiring is needed. Read-only mount — a shipper must never be able to write.
+  alloy:
+    image: grafana/alloy:v1.11.0
+    container_name: raphael_alloy
+    profiles: ["observability"]
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    ports: ["12345:12345"]   # Alloy's own UI/debug page
+    volumes:
+      - ./ops/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - ./logs:/var/log/raphael:ro
+      - alloy_data:/var/lib/alloy/data
+    depends_on:
+      loki:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:12.0.2
+    container_name: raphael_grafana
+    profiles: ["observability"]
+    # 3001, not 3000: web owns 3000 on the host.
+    ports: ["3001:3000"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-raphael}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      loki:
+        condition: service_healthy
+
 volumes:
   pgdata:
   ollama:
   wa_auth:
+  loki_data:
+  grafana_data:
+  alloy_data:

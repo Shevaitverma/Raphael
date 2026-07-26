@@ -1,0 +1,22 @@
+# Pre-provisioned so Grafana works on first boot with zero clicks.
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: true
+    editable: false
+    jsonData:
+      maxLines: 2000
+      # Turn a request_id in a log line into a click-through to every other
+      # service's line for the same request.
+      derivedFields:
+        - name: request_id
+          matcherType: label
+          matcherRegex: request_id
+          datasourceUid: loki
+          url: '{request_id="${__value.raw}"}'
+          urlDisplayLabel: 'Trace this request'

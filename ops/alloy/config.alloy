@@ -1,0 +1,103 @@
+// Grafana Alloy — tails the host log files that ./dev.sh writes to ./logs/
+// (bind-mounted here at /var/log/raphael) and ships them to Loki.
+//
+// Alloy, not Promtail: Promtail is EOL (feature-frozen Feb 2025, support ended
+// March 2026) and Grafana's own migration path is Alloy.
+//
+// LABEL POLICY — the thing that decides whether Loki stays fast:
+//   labels  (indexed, one stream per combination): service, level, job
+//   NOT labels: request_id, user_id  — unbounded, one stream per request/user
+//               would melt the index. They ride as STRUCTURED METADATA, which
+//               is queryable (`| request_id="abc"`) without creating streams.
+//   everything else (method, path, status, duration_ms, err) stays in the JSON
+//   line body and is filtered with `| json | status >= 500` at query time.
+
+logging {
+  level  = "warn"
+  format = "logfmt"
+}
+
+local.file_match "raphael" {
+  path_targets = [{
+    __path__ = "/var/log/raphael/*.log",
+    job      = "raphael",
+  }]
+  sync_period = "10s"
+}
+
+discovery.relabel "raphael" {
+  targets = local.file_match.raphael.targets
+
+  // logs/gateway.log -> service="gateway". This is the FALLBACK: it covers the
+  // lines that are not JSON (next dev banner, Go panics, tracebacks). The JSON
+  // `service` field overrides it below whenever the line has one.
+  rule {
+    source_labels = ["__path__"]
+    regex         = ".*/([^/]+)\\.log"
+    target_label  = "service"
+  }
+}
+
+loki.source.file "raphael" {
+  targets       = discovery.relabel.raphael.output
+  forward_to    = [loki.process.raphael.receiver]
+  tail_from_end = false
+}
+
+loki.process "raphael" {
+  forward_to = [loki.write.default.receiver]
+
+  // Shared schema across gateway / user-svc / conv-svc / agent-svc:
+  // time, level, msg, service, request_id, user_id, method, path, status,
+  // duration_ms, err. Non-JSON lines fall through every stage untouched.
+  stage.json {
+    expressions = {
+      ts         = "time",
+      level      = "level",
+      service    = "service",
+      request_id = "request_id",
+      user_id    = "user_id",
+    }
+  }
+
+  // Use the service's own timestamp, not ingest time, so a restart replaying a
+  // file does not stack every line onto "now".
+  stage.timestamp {
+    source            = "ts"
+    format            = "RFC3339"
+    fallback_formats  = ["RFC3339Nano", "Unix", "UnixMs"]
+    action_on_failure = "fudge"
+  }
+
+  // Go slog emits INFO/ERROR, Python logging emits info/error. Same label either
+  // way, or `{level="error"}` silently misses half the stack.
+  stage.template {
+    source   = "level"
+    template = "{{ ToLower .Value }}"
+  }
+
+  stage.labels {
+    values = {
+      service = "",
+      level   = "",
+    }
+  }
+
+  stage.structured_metadata {
+    values = {
+      request_id = "",
+      user_id    = "",
+    }
+  }
+
+  // Redundant with `service` and one label per file path.
+  stage.label_drop {
+    values = ["filename"]
+  }
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

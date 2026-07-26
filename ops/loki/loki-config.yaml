@@ -1,0 +1,54 @@
+# Loki 3.x, single binary, filesystem storage. Dev-scale only: one process,
+# no ring, no object store. Good for a laptop, not for production.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # 7 days is plenty for local debugging and keeps the volume small.
+  retention_period: 168h
+  # Alloy ships request_id / user_id as structured metadata, NOT labels —
+  # queryable without exploding index cardinality.
+  allow_structured_metadata: true
+  volume_enabled: true
+  # A dev box replaying an old log file must not be rejected for being "too old".
+  reject_old_samples: false
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+
+analytics:
+  reporting_enabled: false
