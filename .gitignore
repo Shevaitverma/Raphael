@@ -54,3 +54,6 @@ logs/
 
 # Playwright responsive screenshots (scripts/shots.mjs writes here)
 web/shots/
+
+# Local DB safety dumps taken before destructive memory edits
+backups/
