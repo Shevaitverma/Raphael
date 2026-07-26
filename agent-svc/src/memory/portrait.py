@@ -200,3 +200,23 @@ def synthesize(user_id: str) -> None:
         _log.info("portrait synthesized for %s (%d facts, %d notes)", user_id, len(facts), len(notes))
     except Exception:
         return  # DB missing / down / no user_portraits table: silent no-op.
+
+
+def invalidate(user_id: str) -> None:
+    """Drop the cached portrait so the next synthesis rebuilds it from current facts.
+
+    Called after extraction writes and after a fact/note delete. The portrait is a
+    frozen prose summary injected into every prompt, so a stale one keeps asserting
+    a belief the user just changed or removed. Deleting is the honest state: get()
+    returns None, build_system no-ops, and the daily reaper regenerates.
+
+    Never raises — a failed invalidation must not lose the extraction that
+    triggered it. Worst case the portrait stays stale until the next regen, which
+    is exactly the old behaviour.
+    """
+    try:
+        with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM user_portraits WHERE user_id = %s", (user_id,))
+    except Exception:
+        pass

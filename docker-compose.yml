@@ -59,6 +59,10 @@ services:
   user-svc:
     build: ./user-svc
     environment:
+      # Containers need every interface for bridge networking. The binary defaults
+      # to 127.0.0.1 because its /users/{uid}/... routes have NO auth — exposure is
+      # opt-in, and inside the compose network only the gateway can reach it.
+      BIND_HOST: 0.0.0.0
       DATABASE_URL: postgresql://raphael:raphael@postgres:5432/raphael
       CREDENTIAL_ENC_KEY: ${CREDENTIAL_ENC_KEY:?set CREDENTIAL_ENC_KEY in .env}
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN in .env}
@@ -75,6 +79,8 @@ services:
   conv-svc:
     build: ./conv-svc
     environment:
+      # See user-svc: loopback-by-default binary, 0.0.0.0 inside the bridge network.
+      BIND_HOST: 0.0.0.0
       DATABASE_URL: postgresql://raphael:raphael@postgres:5432/raphael
     depends_on:
       postgres:

@@ -286,6 +286,19 @@ _GREETING_WORDS = frozenset(
     what what's whats up nice to meet
     """.split()
 )
+# Bare acknowledgements are topicless in exactly the same way a greeting is, and
+# they are NOT harmless: the turn "yes" -> "I'm all good here as *sage*" is what
+# stored the belief "calls the assistant Sage". A reply to an acknowledgement has
+# no user assertion in it, so retrieving memory for it only creates something to
+# recite and something to mis-extract.
+_ACK_WORDS = frozenset(
+    """ok okay okey k kk yes yeah yep yup ya sure no nope nah
+    thank thanks thanx thx ty cheers cool nice great awesome perfect lovely
+    done right fine got understood exactly true agreed
+    lol haha hehe hmm hm oh ah wow bye goodbye cya later np
+    a an lot much very really quite indeed
+    """.split()
+)
 # A bare greeting has no topic, so there is nothing retrieval can be relevant TO.
 # Injecting the profile and portrait anyway is exactly what made the assistant open
 # with a recital of the user's life — "ready to cook North Indian classics for
@@ -305,11 +318,17 @@ _MAX_SMALL_TALK_TOKENS = 6
 
 
 def _is_small_talk(message: str) -> bool:
+    """True when the whole message is greeting and/or acknowledgement filler.
+
+    Both classes are topicless, so retrieval has nothing to be relevant to. Union
+    rather than two gates: real messages mix them ("ok thanks", "yeah cool",
+    "hi again"), and either alone would miss those.
+    """
     flat = "".join(c if c.isalnum() or c == "'" else " " for c in (message or "").lower())
     toks = flat.split()
     if not toks or len(toks) > _MAX_SMALL_TALK_TOKENS:
         return False
-    return all(t in _GREETING_WORDS for t in toks)
+    return all(t in _GREETING_WORDS or t in _ACK_WORDS for t in toks)
 
 
 def context_node(state: GState) -> dict:
@@ -913,6 +932,15 @@ def extract(state: GState) -> None:
         mid = state.get("persisted_message_id")
         retriever.write_facts(state["user_id"], [i for i in items if i["kind"] == "triple"], mid)
         retriever.write_notes(state["user_id"], [i for i in items if i["kind"] == "note"], mid)
+        # The portrait is a CACHED synthesis of facts+notes and it is the most
+        # prominent block in the prompt, so leaving it stale means a correction
+        # lands in facts immediately but keeps being contradicted by the portrait
+        # for up to a day (regen is a daily thread). Drop it whenever the inputs
+        # change; portrait.get() then returns None — build_system no-ops on that —
+        # until the reaper rebuilds from the survivors. Deliberately NOT
+        # re-synthesized inline: that would put an LLM call on the turn's tail.
+        if items:
+            portrait_mod.invalidate(state["user_id"])
     except Exception:
         pass
 

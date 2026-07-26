@@ -575,6 +575,22 @@ func fireDue(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 
 	for _, d := range due {
+		// EXPIRY IS CHECKED BEFORE DELIVERY. `until` means "stop after this", not
+		// "one more after this". Previously the insert happened first and only then
+		// did computeNext return nil for a past `until`, so an expired reminder
+		// always delivered one final unwanted notification — and after an outage
+		// that lands the moment the service comes back, which reads as "I asked for
+		// one day, why is it still reminding me?". Deactivate silently instead.
+		if d.until != nil && !d.until.After(time.Now()) {
+			if _, err := tx.Exec(ctx,
+				`UPDATE reminders SET active = false, next_fire = NULL WHERE id = $1`, d.id); err != nil {
+				return err
+			}
+			slog.Info("reminder expired, deactivated without firing",
+				"reminder_id", d.id, "user_id", d.userID)
+			continue
+		}
+
 		// Sink: write the in-app notification. Decoupled from firing so a WhatsApp/
 		// push adapter can be added later without touching the claim logic.
 		if _, err := tx.Exec(ctx, `

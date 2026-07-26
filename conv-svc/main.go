@@ -39,8 +39,17 @@ func main() {
 	srv := newServer(pool, pool.Ping)
 	handler := withLogging(srv.routes())
 
-	addr := ":" + port
-	slog.Info("listening", "port", port)
+	// Bind LOOPBACK by default — see the same note in user-svc/main.go. conv-svc has
+	// NO auth middleware at all: queryUserID IS the identity, so reaching this port
+	// directly means reading or deleting anyone's conversations and messages by
+	// supplying their uid. Containers set BIND_HOST=0.0.0.0 for bridge networking;
+	// the default is safe.
+	bindHost := os.Getenv("BIND_HOST")
+	if bindHost == "" {
+		bindHost = "127.0.0.1"
+	}
+	addr := bindHost + ":" + port
+	slog.Info("listening", "addr", addr)
 	if err := http.ListenAndServe(addr, handler); err != nil {
 		slog.Error("server stopped", "err", err.Error())
 		os.Exit(1)

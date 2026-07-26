@@ -77,12 +77,23 @@ func main() {
 	// 60s and writes templated check-in / weekly-summary / goal-nudge notifications.
 	startFitnessCoach(pool)
 
+	// Bind LOOPBACK by default. This service's public /users/{uid}/... routes carry
+	// NO authentication — the entire isolation model is "only the gateway can reach
+	// them", and the gateway is what forces uid from the JWT. Binding every
+	// interface made that premise false: an audit read this box's real user data
+	// from the LAN with no credentials, just by supplying a uid.
+	// Containers need 0.0.0.0 for bridge networking, so it is configurable — but
+	// the DEFAULT is safe and exposure has to be opted into explicitly.
+	bindHost := os.Getenv("BIND_HOST")
+	if bindHost == "" {
+		bindHost = "127.0.0.1"
+	}
 	httpSrv := &http.Server{
-		Addr:              ":" + port,
+		Addr:              bindHost + ":" + port,
 		Handler:           withLogging(srv.routes()),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	slog.Info("listening", "port", port)
+	slog.Info("listening", "addr", bindHost+":"+port)
 	if err := httpSrv.ListenAndServe(); err != nil {
 		slog.Error("server stopped", "err", err.Error())
 		os.Exit(1)

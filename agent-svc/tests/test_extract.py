@@ -23,16 +23,16 @@ GOOD = '{"items": [{"subject": "user", "predicate": "lives in", "object": "Berli
     "name,text,want",
     [
         (
-            "clean json",  # no confidence field -> explicit default (0.95)
+            "clean json",  # no confidence field -> inferred default (0.95)
             GOOD,
             [{"kind": "triple", "subject": "user", "predicate": "lives in",
-              "object": "Berlin", "confidence": 0.95}],
+              "object": "Berlin", "confidence": 0.70}],
         ),
         (
             "fenced json with preamble and trailing prose",
             "Sure! Here is the JSON you asked for:\n```json\n" + GOOD + "\n```\nHope that helps!",
             [{"kind": "triple", "subject": "user", "predicate": "lives in",
-              "object": "Berlin", "confidence": 0.95}],
+              "object": "Berlin", "confidence": 0.70}],
         ),
         ("prose only", "I could not find any durable facts in that exchange.", []),
         ("empty string", "", []),
@@ -45,7 +45,7 @@ GOOD = '{"items": [{"subject": "user", "predicate": "lives in", "object": "Berli
             ' {"subject": "user", "predicate": "drinks", "object": "tea"},'
             ' "not even an object"]}',
             [{"kind": "triple", "subject": "user", "predicate": "drinks",
-              "object": "tea", "confidence": 0.95}],
+              "object": "tea", "confidence": 0.70}],
         ),
         (
             "note item, tagged inferred",
@@ -53,9 +53,9 @@ GOOD = '{"items": [{"subject": "user", "predicate": "lives in", "object": "Berli
             [{"kind": "note", "content": "prefers short answers", "confidence": 0.70}],
         ),
         (
-            "bare list, no items wrapper -> explicit default",
+            "bare list, no items wrapper -> inferred default",
             '[{"note": "prefers short answers"}]',
-            [{"kind": "note", "content": "prefers short answers", "confidence": 0.95}],
+            [{"kind": "note", "content": "prefers short answers", "confidence": 0.70}],
         ),
     ],
 )
@@ -67,10 +67,15 @@ def test_confidence_menu():
     def conf(v):
         return extract.parse('{"items": [{"note": "x", "confidence": %s}]}' % v)[0]["confidence"]
 
-    assert conf('"explicit"') == 0.95
-    assert conf('"inferred"') == 0.70  # the ONLY tag that lowers a fact
-    assert conf('"high"') == 0.95  # off-menu -> explicit default, not a guessed-low
-    assert conf("null") == 0.95  # omitted/None -> explicit; a grounded fact is stated
+    assert conf('"explicit"') == 0.95  # only an explicit TAG earns high confidence
+    assert conf('"inferred"') == 0.70
+    # Off-menu and omitted both fall to INFERRED. This flipped after an audit found
+    # the column was dead: a 7B essentially never emits the tag, so every stored row
+    # was 0.95 and the UI labelled 100% of beliefs "high confidence" — a confident
+    # claim about provenance we could not back. "The model did not say" is not
+    # evidence, so it now reads as inferred and under-claims rather than over-claims.
+    assert conf('"high"') == 0.70
+    assert conf("null") == 0.70
     assert conf("0.42") == 0.42
     assert conf("7") == 1.0  # clamped
     assert conf("-3") > 0  # db CHECK is confidence > 0
@@ -180,8 +185,10 @@ def test_communication_style_directive_is_captured_and_grounded():
     kept = extract.extract(p, "just give me the short version from now on", "Sure.")
     assert kept, "an explicit style directive must survive grounding"
     assert any("short" in (it.get("object") or it.get("content")) for it in kept)
-    # explicit directive -> no inferred tag -> high confidence
-    assert all(it["confidence"] == extract.CONF_EXPLICIT for it in kept)
+    # The directive IS explicit to a human, but the model did not tag it, and we
+    # cannot tell "tagged explicit" from "forgot to tag". Storing it as inferred
+    # under-claims; the alternative labelled everything explicit, which was a lie.
+    assert all(it["confidence"] == extract.CONF_INFERRED for it in kept)
 
 
 def test_trivia_turn_yields_no_style_item():
