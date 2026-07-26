@@ -62,11 +62,37 @@ const CY = VB_H / 2;
 // packages for dozens of nodes). O(n²) repulsion + edge springs + gentle
 // centering, integrated with damping. Identity node is pinned at center so the
 // user stays put.
-const REPULSION = 6000;
-const SPRING_LEN = 90;
-const SPRING_K = 0.06;
-const CENTER_K = 0.02;
+// Tuned for ~10 spokes around the identity hub: the spring is long enough that a
+// predicate label fits at the mid-point, repulsion is strong enough to space the
+// ring evenly, and centering is weak enough not to drag everything back into a
+// clump (it exists only to keep a disconnected fragment on screen).
+const REPULSION = 14000;
+const SPRING_LEN = 200;
+const SPRING_K = 0.05;
+// Centering is elliptical: the canvas is half again as wide as it is tall, so a
+// circular layout leaves the sides empty and pushes nodes off the top and
+// bottom. Pulling harder in y than in x settles the same graph into an ellipse
+// that matches the frame. (Tuned, not derived — 2 reads better than the literal
+// 1.58 aspect once labels are counted.)
+const CENTER_K = 0.008;
+const CENTER_ASPECT = 2;
 const DAMPING = 0.9;
+
+// Post-integration separation. NODE_PAD is the gap between two discs; the label
+// band is the horizontal strip of text drawn under each node, and two nodes on
+// the same line whose bands overlap get pushed apart in x.
+const NODE_PAD = 26;
+const LABEL_BAND_H = 15;
+const LABEL_BAND_W = 92; // ~18 chars at 11px, the node-label truncation width
+
+// The predicate label is the whole relationship, so it is drawn on every edge
+// until the canvas would turn to mush. Above this, only the focused edges (and
+// the focused node's own edges) keep their label.
+const EDGE_LABEL_MAX = 28;
+
+// Persisted view choice — same convention as "raphael.view" in page.tsx.
+const MODE_KEY = "raphael.memoryView";
+const ARROW_ID = "raphael-memory-arrow";
 
 type Sim = GraphNode & {
   x: number;
@@ -160,8 +186,8 @@ function stepSim(sim: Sim[], edges: GraphEdge[], alpha: number): number {
   // centering + integrate
   let energy = 0;
   for (const s of sim) {
-    s.fx += (CX - s.x) * CENTER_K;
-    s.fy += (CY - s.y) * CENTER_K;
+    s.fx += ((CX - s.x) * CENTER_K) / CENTER_ASPECT;
+    s.fy += (CY - s.y) * CENTER_K * CENTER_ASPECT;
     if (s.pinned || s.dragging) {
       s.vx = 0;
       s.vy = 0;
@@ -173,7 +199,51 @@ function stepSim(sim: Sim[], edges: GraphEdge[], alpha: number): number {
     s.y += s.vy;
     energy += s.vx * s.vx + s.vy * s.vy;
   }
+  separate(sim);
+  // Keep everything inside the viewBox, with room under each node for its label.
+  for (const s of sim) {
+    if (s.pinned || s.dragging) continue;
+    s.x = clamp(s.x, s.r + 8, VB_W - s.r - 8);
+    s.y = clamp(s.y, s.r + 8, VB_H - s.r - 22);
+  }
   return energy;
+}
+
+// Position-based separation, run after integration so it can't be overpowered by
+// the springs: discs never overlap, and two labels never land on top of each
+// other. Positions move, velocities don't, so this can't inject energy.
+// ponytail: O(n²) like the repulsion pass above — fine to a few hundred nodes.
+function separate(sim: Sim[]): void {
+  const shove = (s: Sim, dx: number, dy: number) => {
+    if (s.pinned || s.dragging) return false;
+    s.x += dx;
+    s.y += dy;
+    return true;
+  };
+  for (let i = 0; i < sim.length; i++) {
+    for (let j = i + 1; j < sim.length; j++) {
+      const a = sim[i];
+      const b = sim[j];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const min = a.r + b.r + NODE_PAD;
+      const d = Math.hypot(dx, dy) || 0.01;
+      if (d < min) {
+        const push = (min - d) / 2;
+        const ux = (dx || 0.1) / d;
+        const uy = dy / d;
+        // If one end can't move (pinned/dragged), the other takes the whole push.
+        if (!shove(b, ux * push, uy * push)) shove(a, -ux * push * 2, -uy * push * 2);
+        else if (!shove(a, -ux * push, -uy * push)) shove(b, ux * push, uy * push);
+      } else if (Math.abs(dy) < LABEL_BAND_H && Math.abs(dx) < LABEL_BAND_W) {
+        // Labels would collide side by side: separate horizontally only, and
+        // gently — this fights the springs, so a full correction would jitter.
+        const push = (LABEL_BAND_W - Math.abs(dx)) * 0.18 * (dx < 0 ? -1 : 1);
+        if (!shove(b, push, 0)) shove(a, -push * 2, 0);
+        else if (!shove(a, -push, 0)) shove(b, push, 0);
+      }
+    }
+  }
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -223,20 +293,30 @@ export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") =>
   });
   const busy = forget.isPending ? forget.variables?.id ?? null : null;
 
-  const [modeOverride, setModeOverride] = useState<"list" | "graph" | null>(null);
+  // The spatial view is the default: relationships are the thing this screen is
+  // for, and only the graph shows them as shape. The list stays one click away —
+  // it is still the better read for scanning and for bulk forgetting.
+  const [mode, setMode] = useState<"list" | "graph">("graph");
   const [filter, setFilter] = useState<string | null>(null); // isolate one predicate
   const [selected, setSelected] = useState<string | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
+  const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
   const [showNotes, setShowNotes] = useState(true);
+
+  // localStorage doesn't exist during the server render, so read it in an effect
+  // (page.tsx does the same for the active tab).
+  useEffect(() => {
+    const saved = localStorage.getItem(MODE_KEY);
+    if (saved === "list" || saved === "graph") setMode(saved);
+  }, []);
+  useEffect(() => {
+    localStorage.setItem(MODE_KEY, mode);
+  }, [mode]);
 
   const edges = useMemo(() => graph?.edges ?? [], [graph]);
   const nodes = graph?.nodes ?? [];
   const notes = graph?.notes ?? [];
-
-  // The grouped list is the confident default: at ten facts a force layout is a
-  // few dots lost in the dark. The spatial view earns the default only once the
-  // graph is big enough that reading it as prose stops working.
-  const mode = modeOverride ?? (nodes.length > 60 ? "graph" : "list");
 
   // Predicate is the one real categorical dimension in this data (the payload's
   // only `kind` is identity/entity, which is structure, not category).
@@ -328,11 +408,11 @@ export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") =>
               aria-label="View"
               className="flex rounded-md border border-edge bg-panel p-0.5 text-sm"
             >
-              {(["list", "graph"] as const).map((m) => (
+              {(["graph", "list"] as const).map((m) => (
                 <button
                   key={m}
                   type="button"
-                  onClick={() => setModeOverride(m)}
+                  onClick={() => setMode(m)}
                   aria-pressed={mode === m}
                   className={`rounded px-3 py-1 capitalize transition-colors ${
                     mode === m
@@ -440,17 +520,31 @@ export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") =>
                   neighbors={neighbors}
                   selected={selected}
                   hovered={hovered}
-                  onSelect={setSelected}
+                  selectedEdge={selectedEdge}
+                  hoveredEdge={hoveredEdge}
+                  onSelect={(id) => {
+                    setSelected(id);
+                    setSelectedEdge(null);
+                  }}
                   onHover={setHovered}
+                  onSelectEdge={(id) => {
+                    setSelectedEdge(id);
+                    setSelected(null);
+                  }}
+                  onHoverEdge={setHoveredEdge}
                 />
                 <InspectPanel
                   nodeId={selected}
+                  edgeId={selectedEdge}
                   nodeById={nodeById}
                   edges={shown}
                   predColor={predColor}
                   busy={busy}
                   onForget={onForgetFact}
-                  onClear={() => setSelected(null)}
+                  onClear={() => {
+                    setSelected(null);
+                    setSelectedEdge(null);
+                  }}
                 />
               </div>
             )}
@@ -849,8 +943,12 @@ function Canvas({
   neighbors,
   selected,
   hovered,
+  selectedEdge,
+  hoveredEdge,
   onSelect,
   onHover,
+  onSelectEdge,
+  onHoverEdge,
 }: {
   edges: GraphEdge[];
   graph: GraphData;
@@ -858,8 +956,12 @@ function Canvas({
   neighbors: Map<string, Set<string>>;
   selected: string | null;
   hovered: string | null;
+  selectedEdge: string | null;
+  hoveredEdge: string | null;
   onSelect: (id: string | null) => void;
   onHover: (id: string | null) => void;
+  onSelectEdge: (id: string | null) => void;
+  onHoverEdge: (id: string | null) => void;
 }) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const simRef = useRef<Sim[]>([]);
@@ -993,6 +1095,9 @@ function Canvas({
 
   const pos = new Map(simRef.current.map((s) => [s.id, s]));
   const activeId = hovered ?? selected;
+  const activeEdgeId = hoveredEdge ?? selectedEdge;
+  const focusEdge = activeEdgeId ? edges.find((e) => e.id === activeEdgeId) : undefined;
+  const anyFocus = activeId != null || focusEdge != null;
   // Only nodes still touched by a visible link are drawn — filtering to one
   // predicate must not leave a field of orphans.
   const visible = new Set<string>();
@@ -1000,8 +1105,31 @@ function Canvas({
     visible.add(e.source);
     visible.add(e.target);
   }
-  const showAllLabels = edges.length <= 22;
+  const showAllLabels = edges.length <= EDGE_LABEL_MAX;
   const fade = motion ? "opacity 160ms ease" : undefined;
+
+  // Edge geometry, computed once and shared by the stroke, the hit area and the
+  // label: endpoints trimmed to the node rims so the arrowhead lands on the
+  // target's edge instead of under its disc.
+  const laid = edges.flatMap((e) => {
+    const a = pos.get(e.source);
+    const b = pos.get(e.target);
+    if (!a || !b) return [];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const d = Math.hypot(dx, dy) || 1;
+    const ux = dx / d;
+    const uy = dy / d;
+    const x1 = a.x + ux * (a.r + 1);
+    const y1 = a.y + uy * (a.r + 1);
+    const x2 = b.x - ux * (b.r + 9);
+    const y2 = b.y - uy * (b.r + 9);
+    // Keep the label upright: past vertical, flip it end-for-end.
+    let deg = (Math.atan2(dy, dx) * 180) / Math.PI;
+    if (deg > 90 || deg < -90) deg += 180;
+    const active = activeId === e.source || activeId === e.target || e.id === activeEdgeId;
+    return [{ e, x1, y1, x2, y2, mx: (x1 + x2) / 2, my: (y1 + y2) / 2, deg, span: d - a.r - b.r, active }];
+  });
 
   return (
     <div className="overflow-hidden rounded-xl border border-edge bg-panel">
@@ -1009,7 +1137,7 @@ function Canvas({
         ref={svgRef}
         viewBox={`0 0 ${VB_W} ${VB_H}`}
         role="img"
-        aria-label={`Knowledge graph: ${fmt(graph.nodes.length)} things, ${fmt(edges.length)} facts. The list view is the readable equivalent.`}
+        aria-label={`Knowledge graph: ${fmt(graph.nodes.length)} things joined by ${fmt(edges.length)} facts, each arrow labelled with its relationship and pointing from subject to object. The list view is the readable equivalent.`}
         className="w-full touch-none select-none"
         style={{ cursor: gestureRef.current?.mode === "pan" ? "grabbing" : "grab" }}
         onPointerDown={onDownBg}
@@ -1017,62 +1145,98 @@ function Canvas({
         onPointerUp={onUp}
         onPointerCancel={onUp}
       >
+        {/* One arrowhead for the whole canvas, sized in user units so a thick
+            (heavily reinforced) edge doesn't get a giant head. */}
+        <defs>
+          <marker
+            id={ARROW_ID}
+            viewBox="0 0 10 10"
+            refX={9}
+            refY={5}
+            markerWidth={9}
+            markerHeight={9}
+            markerUnits="userSpaceOnUse"
+            orient="auto-start-reverse"
+          >
+            <path d="M0 0 L10 5 L0 10 Z" fill={C_MUTED} />
+          </marker>
+        </defs>
+
         {/* Full-canvas hit area so a pointerdown on empty space pans. */}
         <rect x={0} y={0} width={VB_W} height={VB_H} fill={C_PANEL} />
 
         <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
-          {edges.map((e) => {
-            const a = pos.get(e.source);
-            const b = pos.get(e.target);
-            if (!a || !b) return null;
-            const active = activeId === e.source || activeId === e.target;
-            const dim = activeId != null && !active;
-            return (
-              <line
-                key={e.id}
-                x1={a.x}
-                y1={a.y}
-                x2={b.x}
-                y2={b.y}
-                stroke={predColor(e.label)}
-                strokeOpacity={active ? 0.95 : dim ? 0.12 : 0.55}
-                strokeWidth={strokeFor(e.times_seen)}
-                strokeLinecap="round"
-                // dashed = lower stored confidence, same encoding as the list
-                strokeDasharray={highConf(e.confidence) ? undefined : "5 4"}
-                style={{ transition: fade }}
-              />
-            );
-          })}
+          {laid.map(({ e, x1, y1, x2, y2, active }) => (
+            <line
+              key={e.id}
+              x1={x1}
+              y1={y1}
+              x2={x2}
+              y2={y2}
+              stroke={predColor(e.label)}
+              // opacity, not stroke-opacity: it has to carry the marker too.
+              opacity={active ? 0.95 : anyFocus ? 0.12 : 0.55}
+              strokeWidth={strokeFor(e.times_seen)}
+              strokeLinecap="round"
+              // dashed = lower stored confidence, same encoding as the list
+              strokeDasharray={highConf(e.confidence) ? undefined : "5 4"}
+              markerEnd={`url(#${ARROW_ID})`}
+              pointerEvents="none"
+              style={{ transition: fade }}
+            />
+          ))}
 
-          {edges.map((e) => {
-            const a = pos.get(e.source);
-            const b = pos.get(e.target);
-            if (!a || !b) return null;
-            const active = activeId === e.source || activeId === e.target;
+          {/* Fat invisible strokes: an edge is a click target too, so a fact can
+              be inspected (and forgotten) without going via one of its nodes. */}
+          {laid.map(({ e, x1, y1, x2, y2 }) => (
+            <line
+              key={e.id}
+              x1={x1}
+              y1={y1}
+              x2={x2}
+              y2={y2}
+              stroke="transparent"
+              strokeWidth={14}
+              pointerEvents="stroke"
+              className="cursor-pointer"
+              onPointerDown={(ev) => ev.stopPropagation()}
+              onPointerEnter={() => onHoverEdge(e.id)}
+              onPointerLeave={() => onHoverEdge(null)}
+              onClick={() => onSelectEdge(e.id)}
+            />
+          ))}
+
+          {/* The predicate IS the fact. Drawn along the edge, in the edge's
+              colour, with a halo so it stays legible where lines cross. */}
+          {laid.map(({ e, mx, my, deg, span, active }) => {
             if (!active && !showAllLabels) return null;
+            if (span < 34) return null; // no room; hover the edge to read it
             return (
               <text
                 key={e.id}
-                x={(a.x + b.x) / 2}
-                y={(a.y + b.y) / 2}
+                x={mx}
+                y={my}
+                transform={`rotate(${deg.toFixed(1)} ${mx.toFixed(1)} ${my.toFixed(1)})`}
+                dy={-4}
                 textAnchor="middle"
                 fontSize={9.5}
                 className="pointer-events-none"
-                fill={active ? C_TEXT : C_MUTED}
+                fill={predColor(e.label)}
+                opacity={active ? 1 : anyFocus ? 0.25 : 0.9}
                 style={{ paintOrder: "stroke", stroke: C_PANEL, strokeWidth: 3.5 }}
               >
-                {e.label}
+                {truncate(e.label, Math.max(4, Math.floor(span / 6)))}
               </text>
             );
           })}
 
           {simRef.current.map((s) => {
             if (!visible.has(s.id)) return null;
-            const isActive = activeId === s.id;
+            const onFocusEdge = focusEdge?.source === s.id || focusEdge?.target === s.id;
+            const isActive = activeId === s.id || onFocusEdge;
             const isNeighbor =
               activeId != null && (neighbors.get(activeId)?.has(s.id) ?? false);
-            const dim = activeId != null && !isActive && !isNeighbor;
+            const dim = anyFocus && !isActive && !isNeighbor;
             const identity = s.kind === "identity";
             const picked = selected === s.id;
             const stroke = picked || identity ? C_ACCENT : C_EDGE;
@@ -1112,7 +1276,8 @@ function Canvas({
         </g>
       </svg>
       <p className="border-t border-edge px-3 py-1.5 text-right text-[11px] text-faint">
-        drag a node · scroll to zoom · drag the canvas to pan
+        click a node or a labelled arrow to inspect · drag a node · scroll to zoom ·
+        drag the canvas to pan
       </p>
     </div>
   );
@@ -1122,6 +1287,7 @@ function Canvas({
 // same delete affordance as the list. The list view is the readable equivalent.
 function InspectPanel({
   nodeId,
+  edgeId,
   nodeById,
   edges,
   predColor,
@@ -1130,6 +1296,7 @@ function InspectPanel({
   onClear,
 }: {
   nodeId: string | null;
+  edgeId: string | null;
   nodeById: Map<string, GraphNode>;
   edges: GraphEdge[];
   predColor: (p: string) => string;
@@ -1137,42 +1304,47 @@ function InspectPanel({
   onForget: (e: GraphEdge) => void;
   onClear: () => void;
 }) {
-  if (!nodeId) {
+  // `edges` is the filtered set, so a selection the filter hid falls back to the
+  // prompt rather than showing an empty panel with a stale title.
+  const picked = edgeId ? edges.find((e) => e.id === edgeId) : undefined;
+  const node = nodeId ? nodeById.get(nodeId) : undefined;
+  if (!picked && !node) {
     return (
       <div className="rounded-xl border border-edge bg-panel p-4 text-sm text-faint">
-        Click a node to see its facts — and to forget any of them.
+        Click a node or an arrow to see the facts behind it — and to forget any of
+        them.
       </div>
     );
   }
-  const node = nodeById.get(nodeId);
-  const incident = edges
-    .filter((e) => e.source === nodeId || e.target === nodeId)
-    .map((e) => ({
-      edge: e,
-      other: nodeById.get(e.source === nodeId ? e.target : e.source)?.label ?? nodeId,
-    }));
+  const name = (id: string) => nodeById.get(id)?.label ?? id;
+  // Subject and object come from the edge's own direction, never from which end
+  // happens to be selected — the arrow on the canvas has to mean what it says.
+  const rows = (picked ? [picked] : edges.filter((e) => e.source === nodeId || e.target === nodeId))
+    .map((edge) => ({ edge, subject: name(edge.source), object: name(edge.target) }));
 
   return (
     <div className="rounded-xl border border-edge bg-panel p-4">
       <div className="flex items-start justify-between gap-2">
-        <h3 className="text-base font-semibold text-on-surface">{node?.label ?? nodeId}</h3>
+        <h3 className="text-base font-semibold text-on-surface">
+          {picked ? `${name(picked.source)} → ${name(picked.target)}` : node?.label}
+        </h3>
         <button
           type="button"
           onClick={onClear}
-          className="text-xs text-muted hover:text-on-surface"
+          className="shrink-0 text-xs text-muted hover:text-on-surface"
         >
           Clear
         </button>
       </div>
       <ul className="mt-3 flex flex-col gap-3">
-        {incident.length === 0 && <li className="text-sm text-faint">No facts on this node.</li>}
-        {incident.map(({ edge, other }) => (
+        {rows.length === 0 && <li className="text-sm text-faint">No facts on this node.</li>}
+        {rows.map(({ edge, subject, object }) => (
           <FactRow
             key={edge.id}
             edge={edge}
             color={predColor(edge.label)}
-            subject={node?.label ?? nodeId}
-            object={other}
+            subject={subject}
+            object={object}
             busy={busy === edge.id}
             onForget={() => onForget(edge)}
           />
@@ -1186,8 +1358,8 @@ function InspectPanel({
 
 // Hues spaced by golden angle over the SORTED predicate list, not by a raw hash:
 // a hash mod 360 puts two relationships two degrees apart often enough to matter,
-// and above 22 edges the canvas drops edge labels, so colour would be carrying
-// the meaning alone. Same list -> same colours in both views and across reloads;
+// and above EDGE_LABEL_MAX edges the canvas drops the unfocused edge labels, so
+// colour would be carrying the meaning alone. Same list -> same colours in both views and across reloads;
 // the legend is always rendered, so colour is never the only key.
 function makePredColor(predicates: string[]): (p: string) => string {
   const idx = new Map([...predicates].sort().map((p, i) => [p, i]));
@@ -1221,7 +1393,8 @@ function shortDate(iso: string): string {
 // --- self-check (runs in dev) ------------------------------------------------
 // If the force step breaks, these fail loudly in the console. Invariants:
 // overlapping nodes must repel apart, a connected pair must relax toward the
-// spring rest length, and the sim must settle to ~0 energy.
+// spring rest length, the sim must settle to ~0 energy, labels must not stack,
+// and nothing may end up off-canvas.
 function verifySim(): void {
   const mk = (id: string, kind: GraphNode["kind"], x: number, y: number): Sim => ({
     id,
@@ -1260,6 +1433,28 @@ function verifySim(): void {
   for (let i = 0; i < 400; i++) stepSim(c, [edge], 0.4);
   const d = Math.hypot(c[0].x - c[1].x, c[0].y - c[1].y);
   console.assert(Math.abs(d - SPRING_LEN) < SPRING_LEN, "spring should relax near rest length", d);
+  // ...and far enough apart for a mid-edge predicate label to be readable.
+  console.assert(d > 90, "a linked pair must leave room for an edge label", d);
+
+  // two nodes on the same baseline must slide apart so their labels don't stack
+  const lab = [mk("a", "entity", CX - 30, CY), mk("b", "entity", CX + 30, CY + 4)];
+  for (let i = 0; i < 60; i++) separate(lab);
+  console.assert(
+    Math.abs(lab[0].x - lab[1].x) > LABEL_BAND_W - 4 ||
+      Math.abs(lab[0].y - lab[1].y) > LABEL_BAND_H,
+    "overlapping label bands must separate",
+    lab[0].x - lab[1].x,
+  );
+
+  // nothing may sit outside the viewBox, whatever the forces did
+  const out = [mk("a", "entity", 5000, -400)];
+  stepSim(out, [], 0.4);
+  console.assert(
+    out[0].x <= VB_W - out[0].r - 8 && out[0].y >= out[0].r + 8,
+    "nodes must be clamped into the canvas",
+    out[0].x,
+    out[0].y,
+  );
 
   // colour must be stable for a given predicate set, and well spaced
   const color = makePredColor(["loves", "cooks", "lives in"]);
