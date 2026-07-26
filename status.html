@@ -145,6 +145,7 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
     <a href="#now">Working</a>
     <a href="#services">Services</a>
     <a href="#features">Features</a>
+    <a href="#obs">Observability</a>
     <a href="#partial">Partial</a>
     <a href="#open">Open / broken</a>
     <a href="#notbuilt">Not built</a>
@@ -166,9 +167,9 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
   </p>
   <div class="meta">
     <span class="chip"><i class="dot" style="color:var(--accent)"></i>5 services · 18 migrations</span>
-    <span class="chip"><i class="dot" style="color:var(--done)"></i>273 unit tests + a 10-stage e2e</span>
+    <span class="chip"><i class="dot" style="color:var(--done)"></i>278 unit tests + a 10-stage e2e</span>
     <span class="chip"><i class="dot" style="color:var(--accent2)"></i>3 provider paths</span>
-    <span class="chip"><i class="dot" style="color:var(--data)"></i>latest: TanStack Query migration</span>
+    <span class="chip"><i class="dot" style="color:var(--data)"></i>latest: observability + one-command dev loop</span>
   </div>
 </header>
 
@@ -229,6 +230,19 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
       browser never makes a cross-origin call. One port to expose; CORS and the SameSite cookie split
       disappear. Data fetching is TanStack Query with a 30s stale time.</p>
     </div>
+    <div class="card accent">
+      <h3>A frontend you can find things in</h3>
+      <p>The 1&nbsp;966-line <code>page.tsx</code> is split: ~395 lines of auth shell, all chat in
+      <code>app/chat/ChatView.tsx</code>, settings in <code>app/settings/</code>, and login /
+      onboarding / notifications as their own files. Chat stays mounted on every tab and is hidden
+      with CSS, so a tab switch no longer aborts a streaming reply.</p>
+    </div>
+    <div class="card accent">
+      <h3>Logs you can actually read</h3>
+      <p>All four services emit one JSON schema, a request id crosses every hop, and
+      <code>./dev.sh</code> / <code>./logs.sh</code> / <code>./stop.sh</code> make the whole stack one
+      command. Loki + Grafana behind an opt-in compose profile when grep isn't enough.</p>
+    </div>
   </div>
 </section>
 
@@ -242,10 +256,10 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
       <tbody>
         <tr><td>gateway</td><td><code>8080</code></td><td>Go · Fiber</td>
           <td>The only public surface: CORS, JWT, Redis rate limit (300/min/user), SSE passthrough, Google login + session cookie, uid-forcing proxies, <code>requireAdmin</code></td>
-          <td><code>24</code></td><td><span class="pill done">Done</span></td></tr>
+          <td><code>26</code></td><td><span class="pill done">Done</span></td></tr>
         <tr><td>user-svc</td><td><code>8081</code></td><td>Go · ServeMux</td>
           <td>Credentials (AES-256-GCM), profile, tasks, reminders + notifications, timezone, fitness/nutrition/goals/config, Google tokens, <code>/internal/*</code>; hosts both schedulers</td>
-          <td><code>51</code></td><td><span class="pill done">Done</span></td></tr>
+          <td><code>54</code></td><td><span class="pill done">Done</span></td></tr>
         <tr><td>conv-svc</td><td><code>8082</code></td><td>Go · ServeMux</td>
           <td>Conversations + messages, owner-authorized writes, neutral <code>tool_calls</code> validator (now genuinely exercised — tool calls are written every day)</td>
           <td><code>27</code></td><td><span class="pill done">Done</span></td></tr>
@@ -253,7 +267,7 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
           <td>Pipeline, resolver + 3 chat adapters, in-process encoder, memory layer, all tool definitions and handlers, daily reaper + portrait regen</td>
           <td><code>171</code></td><td><span class="pill done">Done</span></td></tr>
         <tr><td>web</td><td><code>3000</code></td><td>Next.js · TS · Tailwind</td>
-          <td>8 views (dashboard, chat, graph, tasks, reminders, fitness, admin, settings), TanStack Query, same-origin proxy, persisted active tab</td>
+          <td>8 views (dashboard, chat, graph, tasks, reminders, fitness, admin, settings), TanStack Query, same-origin proxy, persisted active tab. <code>page.tsx</code> is now a ~395-line auth shell; chat lives in <code>app/chat/</code>, settings in <code>app/settings/</code></td>
           <td><code>2 files</code></td><td><span class="pill partial">Thin coverage</span></td></tr>
       </tbody>
     </table>
@@ -310,6 +324,64 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
   </div>
 </section>
 
+<!-- ═══════════ OBSERVABILITY ═══════════ -->
+<section id="obs">
+  <h2>Observability &amp; the dev loop</h2>
+  <p class="sub">New since the last snapshot. Stdlib only — no runtime dependency was added for any of it.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Piece</th><th>What exists</th><th>State</th></tr></thead>
+      <tbody>
+        <tr><td>Structured JSON logs</td>
+          <td>All four services, one field schema (<code>time, level, msg, service, request_id, user_id, method, path, status, duration_ms, err</code>). Go 1.24 <code>log/slog</code>; a hand-written formatter in <code>agent-svc/src/logsetup.py</code>. Verbosity via <code>LOG_LEVEL</code>. No secret, token, header, body or message content is ever logged.</td>
+          <td><span class="pill done">Done</span></td></tr>
+        <tr><td>Request-ID correlation</td>
+          <td>The gateway adopts a sanitised inbound <code>X-Request-Id</code> (≤64 chars, restricted charset) or mints one from <code>crypto/rand</code>, echoes it, and stamps it on every outbound call. The other three adopt it into request context; agent-svc hand-carries it onto the <code>/chat</code> worker thread.</td>
+          <td><span class="pill partial">One gap</span></td></tr>
+        <tr><td>Access logs</td>
+          <td>One line per request per service. agent-svc uses raw ASGI, <em>not</em> <code>BaseHTTPMiddleware</code>, so SSE streaming is untouched. <code>/health</code> logs at debug so polling doesn't spam.</td>
+          <td><span class="pill done">Done</span></td></tr>
+        <tr><td><code>GET /health</code></td>
+          <td>Same shape on all four. user-svc and conv-svc ping Postgres and return <b>503</b> when the pool is down; the gateway keeps <code>/readyz</code> as the dependency-aware probe.</td>
+          <td><span class="pill done">Done</span></td></tr>
+        <tr><td>Startup config banner</td>
+          <td>One <code>msg:"config"</code> line per service: resolved ports, downstream URLs, redirect URI, CORS/web origin, TTLs, <code>dev_auth_enabled</code> (with a <code>WARN</code> when that backdoor is on). Secrets as <code>SET</code>/<code>UNSET</code>, never values. A missing <code>JWT_SECRET</code> / <code>DATABASE_URL</code> / <code>INTERNAL_TOKEN</code> logs an error and exits non-zero.</td>
+          <td><span class="pill done">Done</span></td></tr>
+        <tr><td>Central logging</td>
+          <td>Loki 3.5.7 + Grafana 12.0.2 + Alloy v1.11.0 behind the <code>observability</code> compose profile — <code>docker compose --profile observability up -d</code>. Grafana on <code>:3001</code>, Loki datasource pre-provisioned with a <code>request_id</code> derived field for click-through tracing. Alloy bind-mounts <code>./logs</code> read-only, because in dev the services are host processes.</td>
+          <td><span class="pill done">Done</span></td></tr>
+        <tr><td>One-command dev loop</td>
+          <td><code>./dev.sh</code> frees ports, brings up postgres/redis and waits for health, builds the Go binaries, starts all five in order into <code>logs/&lt;svc&gt;.log</code>, health-checks each and prints UP/FAILED. <code>./logs.sh</code> is a unified prefixed stream through <code>jq</code>; <code>./stop.sh</code> tears it down. See <code>ops/README.md</code>.</td>
+          <td><span class="pill done">Done</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Label hygiene, so Loki stays fast</h3>
+  <ul class="plain">
+    <li><b>Labels</b> (indexed): <code>service</code>, <code>level</code>, <code>job</code> — bounded, ~6 × 4.</li>
+    <li><b>Structured metadata</b> (queryable, no new streams): <code>request_id</code>, <code>user_id</code> — as labels they would create one stream per request and melt the index.</li>
+    <li><b>Line body</b>, parsed at query time: <code>method</code>, <code>path</code>, <code>status</code>, <code>duration_ms</code>, <code>err</code>.</li>
+  </ul>
+  <div class="cards" style="margin-top:16px">
+    <div class="card">
+      <h3>The query that matters</h3>
+      <p><code>{job="raphael"} | json | request_id="&lt;id&gt;"</code> — one chat turn, every service that
+      touched it, in time order.</p>
+    </div>
+    <div class="card">
+      <h3>Everything wrong, everywhere</h3>
+      <p><code>{job="raphael", level="error"}</code>. Or without Grafana at all:
+      <code>./logs.sh | grep -E 'ERROR|"level":"error"'</code>.</p>
+    </div>
+    <div class="card">
+      <h3>Slow paths</h3>
+      <p><code>{job="raphael"} | json | duration_ms &gt; 1000</code>, and
+      <code>sum by (service) (rate({job="raphael", level="error"}[5m]))</code> for a rate graph.</p>
+    </div>
+  </div>
+</section>
+
 <!-- ═══════════ PARTIAL ═══════════ -->
 <section id="partial">
   <h2>Partial — real, but with a stated ceiling</h2>
@@ -338,12 +410,25 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
       single global advisory lock.</span></li>
     <li><b>Frontend test coverage is thin</b> <span class="pill partial">partial</span>
       <span class="why">Two node test files (<code>gateway.test.ts</code>, <code>quests.test.ts</code>).
-      The 6&nbsp;400 lines of view code under <code>web/app/</code> are covered by in-file dev-only
-      self-checks and by using the app, not by a suite.</span></li>
-    <li><b>Observability is <code>/healthz</code> and log lines</b> <span class="pill partial">partial</span>
-      <span class="why">Per-turn token counts are logged and surfaced in the UI, and
-      <code>/readyz</code> reports dependencies. There is no OpenTelemetry, no metrics endpoint and no
-      tracing anywhere in the repo.</span></li>
+      The ~6&nbsp;800 lines under <code>web/app/</code> are covered by in-file dev-only self-checks and
+      by using the app, not by a suite. The <code>page.tsx</code> split made the code findable; it did
+      not make it tested.</span></li>
+    <li><b>Observability is logs, not telemetry</b> <span class="pill partial">partial</span>
+      <span class="why">Structured JSON everywhere, a request id across every hop, <code>/health</code>
+      on all four, a config banner, and Loki/Grafana on an opt-in profile. What is still absent:
+      no metrics endpoint, no OpenTelemetry, no distributed tracing. A request id correlates log lines;
+      it is not a span tree, and there is no latency histogram or error-budget signal anywhere.</span></li>
+    <li><b>Request-ID propagation stops at agent-svc's outbound calls</b> <span class="pill partial">known gap</span>
+      <span class="why">agent-svc's own <code>httpx</code> calls to user-svc and conv-svc do not forward
+      <code>X-Request-Id</code>, so the callees mint a fresh one. A trace is complete from the browser
+      down to agent-svc; the writes agent-svc then makes appear under ids of their own. The fix is one
+      shared header injector on the httpx clients.</span></li>
+    <li><b>Central logging is dev-shaped</b> <span class="pill partial">by design</span>
+      <span class="why">Alloy tails host files in <code>./logs</code> because in dev the five services
+      are host processes, not containers. A containerized deployment would need a docker/journald
+      source instead. Retention is 7 days, and Grafana's default credentials are
+      <code>admin</code>/<code>raphael</code> unless <code>GRAFANA_USER</code>/<code>GRAFANA_PASSWORD</code>
+      are set before its first start.</span></li>
   </ul>
 </section>
 
@@ -358,6 +443,15 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
       it with <code>psql</code>. Symptom: a feature 500s with "relation does not exist".
       <code>fitness_coach.go</code> already carries a guard comment about exactly this for
       <code>db/018</code>. There is no migration runner and no applied-versions table.</span></li>
+    <li><b>Login over the devtunnel is not yet human-verified</b> <span class="pill partial">unproven</span>
+      <span class="why">The same-origin proxy, <code>GATEWAY_INTERNAL_URL</code>,
+      <code>ALLOWED_DEV_ORIGINS</code> and the <code>env -u NEXT_PUBLIC_GATEWAY_URL</code> guard in
+      <code>dev.sh</code> all exist so that a Google sign-in works through a tunnel. Nobody has actually
+      completed that round trip from a remote device yet. Until someone does, treat remote login as
+      unproven, not working. <b>The <code>AuthProvider</code>/React-context refactor is deliberately
+      parked behind this</b> — <code>token</code> and <code>onFail</code> are still threaded as props to
+      every tab, and changing how auth state propagates while the auth path itself is unverified would
+      make a failure impossible to attribute.</span></li>
     <li><b>The dev-login backdoor</b> <span class="pill hazard">security</span>
       <span class="why">Passwordless, mints a real JWT, and the seeded address comes back as
       <code>admin</code>. Defaults are closed (<code>DEV_AUTH_ENABLED=false</code>), which is correct —
@@ -368,8 +462,11 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
       current intent is empty, i.e. use the same-origin proxy) and does not mention
       <code>GATEWAY_INTERNAL_URL</code>, <code>ALLOWED_DEV_ORIGINS</code>,
       <code>NEXT_PUBLIC_DEV_AUTH</code>, <code>CORS_ORIGINS</code>/<code>WEB_ORIGIN</code>,
-      <code>ACCESS_TTL</code>/<code>SESSION_TTL</code>, <code>RATE_LIMIT_PER_MIN</code> or
-      <code>SYSTEM_CONFIG_UID</code> at all.</span></li>
+      <code>ACCESS_TTL</code>/<code>SESSION_TTL</code>, <code>RATE_LIMIT_PER_MIN</code>,
+      <code>SYSTEM_CONFIG_UID</code> or <code>GRAFANA_USER</code>/<code>GRAFANA_PASSWORD</code> at all.
+      <code>LOG_LEVEL</code> did get added. Worse than an omission: the root <code>.env</code> carries a
+      comment explaining that <code>NEXT_PUBLIC_GATEWAY_URL</code> must <em>not</em> be set there, and
+      <code>.env.example</code> — the file people copy — sets it.</span></li>
     <li><b>No CI, so portability rule 6 is unmet</b> <span class="pill todo">gap</span>
       <span class="why">There is no <code>.github/</code> workflow. "The suite runs against Ollama on
       every commit" is an intention, not a fact — <code>make test</code> and
@@ -433,7 +530,7 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
   <h2>Verification</h2>
   <p class="sub">What actually gets checked, and how.</p>
   <div class="cards">
-    <div class="card"><div class="big">273</div><div class="note">unit tests — gateway 24 · user-svc 51 · conv-svc 27 · agent-svc 171. Run with <code>make test</code>.</div></div>
+    <div class="card"><div class="big">278</div><div class="note">unit tests — gateway 26 · user-svc 54 · conv-svc 27 · agent-svc 171 (the request-id sanitizer and the access-log level rule are covered in <code>gateway/logging_test.go</code> and <code>user-svc/logging_test.go</code>). Run with <code>make test</code>.</div></div>
     <div class="card"><div class="big">10</div><div class="note">e2e stages in <code>scripts/e2e.sh</code>: health, model select, dev-login, system provider config, conversation, SSE, persistence + 768-d memory, neutral tool shape, no wire format in the DB, lifeboat on a real 401, 429 must <em>not</em> degrade, restore, two-doors + skip-gate.</div></div>
     <div class="card"><div class="big">0</div><div class="note">e2e stages that touch the real account. Stage 1 mints a <b>dedicated throwaway user</b>; DEV_UID's facts and memories are never written or deleted by a test.</div></div>
     <div class="card"><div class="big">—</div><div class="note">No CI. Everything above is run by hand, so "green" means "green when someone last ran it".</div></div>
@@ -453,9 +550,11 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
   <p class="sub">Ordered by "what would hurt most if it stayed as it is".</p>
   <ol class="next">
     <li><b>A migration runner.</b> An applied-versions table and a <code>make migrate</code> that runs pending <code>db/*.sql</code> in order. Every file is already additive and idempotent, so this is bookkeeping, not surgery — and it removes the single most likely way to break a running install.</li>
+    <li><b>Verify a real Google login through the devtunnel, by hand, from another device.</b> It is the last unproven link in the same-origin-proxy work, it is fifteen minutes, and the <code>AuthProvider</code> refactor is queued directly behind it. Turn both dev-auth switches off first.</li>
     <li><b>CI, running the suite against Ollama.</b> Closes portability rule 6, and turns "green when someone last ran it" into a fact. Should also run the e2e against the local model.</li>
     <li><b>Reconcile <code>.env.example</code> with the code</b> and note the exposed-deployment checklist (both dev-auth switches off, <code>GATEWAY_INTERNAL_URL</code> + <code>ALLOWED_DEV_ORIGINS</code> set, <code>NEXT_PUBLIC_GATEWAY_URL</code> empty) next to it.</li>
     <li><b>Prove the OpenRouter and Claude paths</b> the way the local path is proven — one e2e run per provider tier, so parity stops being an assertion.</li>
+    <li><b>Close the request-ID gap in agent-svc</b> — one header injector on its httpx clients — so a single trace covers the writes it makes downstream, not just the turn itself.</li>
     <li><b>Tune the guessed knobs against real data:</b> the retrieval relevance floor and the reap window, once there are ~200 real turns to measure against.</li>
     <li><b>Decide on session durability</b> before any deployment: either accept "a Redis restart logs everyone out" in writing, or turn on persistence.</li>
     <li><b>Then</b>, if the integrations still matter: Gmail is the largest remaining gap, and it is a scope/verification decision before it is a code decision.</li>
@@ -467,6 +566,7 @@ footer{max-width:78rem;margin:0 auto;padding:32px 24px 64px;border-top:1px solid
   <code>scripts/e2e.sh</code> and the web app. Test counts are counted from the test files, not recalled.
   Nothing here is claimed to work unless the code supports it; where something is unproven rather than
   broken, it says so. Companions: <a href="architecture.html">architecture.html</a> (how it works) ·
+  <a href="ops/README.md">ops/README.md</a> (run it, read its logs) ·
   <a href="docs/RUNNING.md">docs/RUNNING.md</a> (how to run it) · <a href="plan.md">plan.md</a> (original intent).
 </footer>
 

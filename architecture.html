@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Raphael — System Architecture</title>
-<meta name="description" content="Raphael architecture reference: services and ports, request flows, data model, auth/RBAC, the chat pipeline, memory layer, feature subsystems, frontend, local dev, and the invariants a new developer must not break.">
+<meta name="description" content="Raphael architecture reference: services and ports, request flows, data model, auth/RBAC, the chat pipeline, memory layer, feature subsystems, frontend, local dev, observability, and the invariants a new developer must not break.">
 <style>
 /* ═══════════════════════════════════════════════════════════
    Tokens. Dark is the base; light overrides follow.
@@ -319,6 +319,7 @@ footer{max-width:82rem;margin:0 auto;padding:var(--sp-6) var(--sp-5) var(--sp-8)
     <li><a href="#features">Feature subsystems</a></li>
     <li><a href="#frontend">Frontend</a></li>
     <li><a href="#dev">Local development</a></li>
+    <li><a href="#observability">Observability</a></li>
     <li><a href="#invariants">Invariants</a></li>
   </ol>
 </aside>
@@ -547,7 +548,7 @@ footer{max-width:82rem;margin:0 auto;padding:var(--sp-6) var(--sp-5) var(--sp-8)
       <caption>Everything under <code>/api</code> requires a valid JWT and is rate limited. Everything else is public by necessity and carries its own guard.</caption>
       <thead><tr><th>Route</th><th>Guard</th><th>Goes to</th></tr></thead>
       <tbody>
-        <tr><td><code>GET /healthz</code> <code>/readyz</code></td><td>none</td><td>liveness / dependency readiness</td></tr>
+        <tr><td><code>GET /health</code> <code>/healthz</code> <code>/readyz</code></td><td>none</td><td>uniform cross-service health (§11) / liveness / dependency readiness</td></tr>
         <tr><td><code>GET /auth/google/login</code></td><td>none (no uid yet)</td><td>returns the consent URL as JSON — never a 302, so nothing rides a redirect</td></tr>
         <tr><td><code>GET /auth/google/callback</code></td><td>HMAC-signed <code>state</code></td><td>user-svc <code>/internal/google/login</code>, then sets the session cookie</td></tr>
         <tr><td><code>GET /auth/session</code></td><td>session cookie</td><td>returns user + role + a fresh short-lived access JWT</td></tr>
@@ -1580,7 +1581,7 @@ active credential → adapter
 <!-- ══════════════ 9 ══════════════ -->
 <section id="frontend" class="sec">
   <h2><span class="num">09</span>Frontend architecture</h2>
-  <p class="sub">Next.js App Router, one client shell, TanStack Query for data, and a same-origin proxy that removes CORS entirely.</p>
+  <p class="sub">Next.js App Router, a thin auth shell, one always-mounted chat component, TanStack Query for data, and a same-origin proxy that removes CORS entirely.</p>
 
   <h3>Layout and view model</h3>
 <pre class="code">web/
@@ -1588,19 +1589,63 @@ active credential → adapter
   app/
     layout.tsx         fonts + &lt;Providers&gt; (QueryClientProvider)
     providers.tsx      QueryClient: staleTime 30s, retry 1, refetchOnWindowFocus false
-    page.tsx           the client shell: token, user, view, conversations, SSE chat
+    page.tsx     ~395  <b>the shell: auth only.</b> token / user / authError, the single-flight
+                       session refresh, session restore, the view switch, profile +
+                       onboarding gate, timezone auto-stamp, the ?google= notice,
+                       and the search-toggle state
+    LoginScreen.tsx    Google button, plus the dev-login button when the build had
+                       NEXT_PUBLIC_DEV_AUTH=1
+    OnboardingScreen.tsx   first-run assistant naming
+    NotificationsBell.tsx  in-app delivery feed (polls unread, marks read on open)
+    shared.ts          the few constants/types used by BOTH the shell and a component
+                       moved out of it (tz keys, detectedTz, DEV_EMAIL, UiMessage)
     Sidebar.tsx        View = dashboard | chat | graph | settings | tasks | reminders
                               | fitness | admin
+    chat/
+      ChatView.tsx ~557  <b>the whole chat concern:</b> conversation list, thread,
+                         composer/draft, the SSE stream + abort, select-mode and
+                         bulk delete
+      MessageRow.tsx     one message: avatar, body, provenance, degraded banner
+    settings/
+      SettingsView.tsx   providers + lifeboat designation; composes the four forms
+      GoogleSection.tsx  AssistantNameForm.tsx  TimezoneForm.tsx  AddProviderForm.tsx
     Dashboard.tsx  MemoryGraph.tsx  Tasks.tsx  Reminders.tsx  Fitness.tsx  Admin.tsx
     healthz/route.ts   container liveness
   lib/
     gateway.ts         the typed API client + the SSE reader
     quests.ts          task → quest presentation</pre>
   <ul class="bul">
-    <li><b>One shell, many views.</b> <code>page.tsx</code> owns auth state and the active view; the sidebar switches a discriminated <code>View</code> union. The active tab is persisted to localStorage so a hard refresh returns you where you were.</li>
+    <li><b>The shell is auth and nothing else.</b> <code>page.tsx</code> was a 1&nbsp;966-line monolith that also owned conversations, messages and the SSE reader; that is now <code>chat/ChatView.tsx</code>. What remains is the auth state machine, the view switch, and the props each tab needs.</li>
     <li><b>The JWT lives in React state only</b> — never localStorage. On mount the shell calls <code>/auth/session</code> to trade the httpOnly cookie for a fresh one.</li>
+    <li><b>One <code>failed(e)</code> funnel, single-flighted.</b> Every view reports failures through the same callback. On a 401 it fires <em>one</em> shared <code>/auth/session</code> refresh (a <code>useRef</code> holds the in-flight promise) — otherwise an expired token makes the whole dashboard 401 at once and the burst of refreshes trips the rate limiter. Only if the refresh also fails does it log out.</li>
+    <li><b>The active tab is persisted</b> to localStorage so a hard refresh returns you where you were. <code>admin</code> is deliberately excluded from the restorable set: it is role-gated, and restoring it for a non-admin would show an empty panel.</li>
     <li><b>Server components are minimal by design.</b> Everything interactive is a client component; the App Router is used for routing, fonts and the rewrite layer rather than for RSC data fetching.</li>
   </ul>
+
+  <div class="card key" style="margin-top:var(--sp-5)">
+    <h4>Invariant: ChatView is never unmounted by a tab switch</h4>
+    <p>
+      Chat is rendered on <em>every</em> tab and hidden with CSS —
+      <code>&lt;div className={view === "chat" ? "contents" : "hidden"}&gt;</code> — not swapped out by
+      the view ternary like the other panes. The reason is that the open thread, the loaded messages
+      and any in-flight SSE reply now live inside <code>ChatView</code>: unmounting it on a tab switch
+      would drop the conversation and abort a reply mid-sentence, which it did not do before the split.
+      <code>contents</code> (rather than a plain wrapper) makes the div vanish from layout when visible,
+      so <code>ChatView</code>'s root stays a direct flex child of the content column.
+    </p>
+    <p>
+      Logout still cuts the stream, and that is not an accident either: dropping the token renders
+      <code>LoginScreen</code>, which <em>does</em> unmount <code>ChatView</code> and fire its
+      abort-on-unmount cleanup. If you ever make chat conditional again, you must move the abort
+      somewhere else first.
+    </p>
+    <p class="note">
+      Deliberately <b>not</b> done: there is no <code>AuthProvider</code> / React context.
+      <code>token</code> and <code>onFail</code> are still passed as props to each tab. The refactor is
+      cheap but touches every view, so it is parked until login over the tunnel is verified by a human
+      — see <a href="status.html">status.html</a>.
+    </p>
+  </div>
 
   <h3>Data fetching — TanStack Query</h3>
   <ul class="bul">
@@ -1631,26 +1676,62 @@ ALLOWED_DEV_ORIGINS           ← comma-separated extra dev hosts (tunnel domain
 <!-- ══════════════ 10 ══════════════ -->
 <section id="dev" class="sec">
   <h2><span class="num">10</span>Local development</h2>
-  <p class="sub">Two containers, five host processes, plus Ollama. Full detail in <code>docs/RUNNING.md</code>; the contract lives in <code>docs/CONTRACT.md</code>.</p>
+  <p class="sub">Two containers, five host processes, plus Ollama — brought up by one script. Full detail in <code>ops/README.md</code> and <code>docs/RUNNING.md</code>; the contract lives in <code>docs/CONTRACT.md</code>.</p>
 
-<pre class="code"># 1. infra
-docker compose up -d postgres redis          # or: make up
+<pre class="code"># the whole stack, one command
+./dev.sh                     # NO_WEB=1 ./dev.sh  to skip the Next.js UI
+./logs.sh                    # one interleaved, prefixed, jq-pretty-printed stream
+./stop.sh                    # host processes only   (--all also stops the containers)
 
-# 2. all five services on the host (builds Go binaries, creates the agent-svc
-#    venv, installs web deps, writes .env from .env.example on first run and
-#    generates CREDENTIAL_ENC_KEY + INTERNAL_TOKEN)
-bash scripts/dev.sh                          # or: make dev
+# the local model (separate, and optional if you only use a hosted provider)
+ollama serve &amp;               # ollama pull qwen2.5:7b (does native tools)
 
-# 3. the local model
-ollama serve &amp;                               # ollama pull qwen2.5:7b (does native tools)
-
-# verify — agent-svc warms the encoder at boot, allow ~15-30s
-make health                                  # curls every /healthz
 open http://localhost:3000
+make test                    # every service's own suite
+bash scripts/e2e.sh          # end-to-end acceptance (LOCAL_MODEL=&lt;name&gt; to pin)</pre>
 
-make stop                                    # kills the five host processes
-make test                                    # every service's own suite
-bash scripts/e2e.sh                          # end-to-end acceptance (LOCAL_MODEL=&lt;name&gt; to pin)</pre>
+  <p><code>./dev.sh</code> does, in order:</p>
+  <ul class="bul">
+    <li>Sources the root <code>.env</code> <b>once</b> and exports it, so all five processes get byte-identical config — the fix for the drift class of bug described below.</li>
+    <li>Force-frees <code>8080 / 8081 / 8082 / 8000 / 3000</code> (stale squatters), then <code>docker compose up -d postgres redis</code> and waits for <code>raphael_db</code> to report <em>healthy</em>.</li>
+    <li>Builds the three Go binaries, then starts <code>user-svc → conv-svc → gateway → agent-svc → web</code>, each with stdout+stderr to <code>logs/&lt;service&gt;.log</code> and its pid in <code>logs/&lt;service&gt;.pid</code>.</li>
+    <li>Polls each service (<code>/health</code>, falling back to <code>/healthz</code>, then a bare TCP probe) with a per-service budget — 90s for agent-svc, which warms the encoder, and for web's first Next compile — and prints an <b>UP</b>/<b>FAILED</b> table. Its exit code is the number of failures.</li>
+  </ul>
+  <p class="note">
+    <code>make up</code> / <code>make dev</code> / <code>make stop</code> still work and still call
+    <code>scripts/dev.sh</code>; the root <code>./dev.sh</code> is the newer, self-contained entry point
+    and the one <code>ops/README.md</code> documents.
+  </p>
+
+  <div class="card hazard" style="margin-top:var(--sp-5)">
+    <h4>Two footguns <code>dev.sh</code> encodes — do not "simplify" them away</h4>
+    <p>
+      <b>1. <code>NEXT_PUBLIC_GATEWAY_URL</code> must not be set in the root <code>.env</code>.</b>
+      Sourcing <code>.env</code> exports it into the shell, and a process env var <em>overrides</em>
+      <code>web/.env.local</code>. The result is an absolute <code>http://localhost:8080</code> baked
+      into the client bundle at build time, which kills the same-origin proxy and therefore every
+      tunnelled or remote session — while working perfectly on the developer's own laptop. The root
+      <code>.env</code> carries a comment saying so, and web is started under
+      <code>env -u NEXT_PUBLIC_GATEWAY_URL</code>.
+    </p>
+    <p>
+      <b>2. agent-svc must run as <code>agent-svc/.venv/bin/python -m uvicorn main:app</code></b>, from
+      <code>agent-svc/src</code> so <code>main:app</code> resolves. A bare <code>python</code> is not on
+      PATH in this environment; the script fails fast with the venv-creation command rather than
+      starting four of five services and leaving you to notice.
+    </p>
+  </div>
+
+  <div class="card hazard" style="margin-top:var(--sp-4)">
+    <h4><code>GOOGLE_REDIRECT_URI</code> is read independently by two services</h4>
+    <p>
+      The gateway builds the consent URL with it and user-svc sends it in the token exchange. Google
+      requires the two to be identical, so if you change it you must restart <b>both</b> — a stale value
+      in one of them fails the exchange with an error that points nowhere near the cause. This cost
+      hours once. The startup config banner (§11) now prints the resolved value in both services, so a
+      mismatch is visible in the first line of each log.
+    </p>
+  </div>
 
   <h3>Environment variables that matter</h3>
   <div class="tablewrap">
@@ -1664,7 +1745,9 @@ bash scripts/e2e.sh                          # end-to-end acceptance (LOCAL_MODE
         <tr><td><code>INTERNAL_TOKEN</code></td><td>generated by <code>dev.sh</code></td><td>Shared secret for user-svc <code>/internal/*</code> (which returns decrypted keys) and the gateway's <code>/internal/chat</code>. Empty ⇒ those doors fail closed.</td></tr>
         <tr><td><code>DEV_AUTH_ENABLED</code></td><td><code>false</code></td><td>Mounts the passwordless dev-login. <b>Off whenever exposed.</b></td></tr>
         <tr><td><code>NEXT_PUBLIC_DEV_AUTH</code></td><td>unset</td><td><code>1</code> renders the dev-login button. Off whenever exposed.</td></tr>
-        <tr><td><code>NEXT_PUBLIC_GATEWAY_URL</code></td><td><code>""</code> (relative)</td><td>Leave empty to use the same-origin proxy. <em>(<code>.env.example</code> still ships an absolute value — the empty default is the current intent.)</em></td></tr>
+        <tr><td><code>NEXT_PUBLIC_GATEWAY_URL</code></td><td><code>""</code> (relative)</td><td>Leave empty to use the same-origin proxy, and keep it in <code>web/.env.local</code> — <b>never</b> in the root <code>.env</code> (see the footgun above). <em>(<code>.env.example</code> still ships an absolute value — the empty default is the current intent.)</em></td></tr>
+        <tr><td><code>LOG_LEVEL</code></td><td><code>info</code></td><td><code>debug|info|warn|error</code>, honoured by all four services. <code>debug</code> also surfaces the <code>/health</code> probe lines, which are otherwise suppressed.</td></tr>
+        <tr><td><code>GRAFANA_USER</code> / <code>GRAFANA_PASSWORD</code></td><td><code>admin</code> / <code>raphael</code></td><td>Only used by the <code>observability</code> compose profile. Set before Grafana's first start — it persists the admin user in its volume.</td></tr>
         <tr><td><code>GATEWAY_INTERNAL_URL</code></td><td><code>http://localhost:8080</code></td><td>Where the Next rewrites forward. Set this in a container/tunnel setup.</td></tr>
         <tr><td><code>ALLOWED_DEV_ORIGINS</code></td><td>unset</td><td>Comma-separated tunnel hosts for Next dev. Keep tunnel-specific values in <code>.env.local</code>, not in the committed config.</td></tr>
         <tr><td><code>CORS_ORIGINS</code> / <code>WEB_ORIGIN</code></td><td><code>http://localhost:3000</code></td><td>Gateway CORS + redirect target. Explicit origins only (credentials forbid a wildcard).</td></tr>
@@ -1684,17 +1767,161 @@ bash scripts/e2e.sh                          # end-to-end acceptance (LOCAL_MODE
   <ul class="bul">
     <li><b>Migrations don't auto-apply to an existing volume.</b> Newly added <code>db/*.sql</code> files must be run by hand with <code>psql</code> (see §3). Symptom: a feature 500s with "relation does not exist".</li>
     <li><b><code>make dev</code> and <code>docker compose up</code> collide.</b> <code>make up</code> starts infrastructure only, on purpose — a bare <code>docker compose up -d</code> starts containerized copies of the five services on the same ports.</li>
-    <li><b>agent-svc is slow to become ready.</b> The encoder warms at boot; <code>/healthz</code> reports <code>{"deps":{"db":…,"embeddings":…}}</code>, so wait for it rather than assuming a crash.</li>
+    <li><b>agent-svc is slow to become ready.</b> The encoder warms at boot; <code>/healthz</code> reports <code>{"deps":{"db":…,"embeddings":…}}</code>, so wait for it rather than assuming a crash. <code>dev.sh</code> already gives it a 90s budget.</li>
     <li><b>Exposing the app over a tunnel:</b> expose only the web port, set <code>GATEWAY_INTERNAL_URL</code> and <code>ALLOWED_DEV_ORIGINS</code>, keep <code>NEXT_PUBLIC_GATEWAY_URL</code> empty — and turn <b>both</b> dev-auth switches off.</li>
     <li><b>Never test against DEV_UID.</b> <code>…0001</code> is the human's real account with real facts and memories. Create a throwaway dev-login user instead, and never blanket-delete from <code>facts</code>/<code>memories</code>.</li>
-    <li><b>Logs</b> are in <code>logs/&lt;service&gt;.log</code>, pids in <code>logs/*.pid</code>. Port stuck? <code>lsof -i :8080</code>.</li>
+    <li><b>Logs</b> are JSON lines in <code>logs/&lt;service&gt;.log</code>, pids in <code>logs/*.pid</code>. Read them with <code>./logs.sh</code> rather than <code>tail</code> — see §11. Port stuck? <code>./stop.sh</code>, or <code>lsof -i :8080</code>.</li>
     <li><b>Deployment artifacts:</b> <code>docker-compose.yml</code> is the only one. Every service has a Dockerfile (Go services on distroless static, agent-svc on <code>python:3.13-slim</code> with the encoder weights baked in so there is no cold-start fetch, web on <code>node:22-alpine</code> standalone). There is no Terraform, no ECS task definition and no CI workflow in this repo.</li>
   </ul>
 </section>
 
 <!-- ══════════════ 11 ══════════════ -->
+<section id="observability" class="sec">
+  <h2><span class="num">11</span>Observability</h2>
+  <p class="sub">Four services, one log schema, one request id that crosses all of them — and an opt-in Loki/Grafana stack to query it. Stdlib only: no new runtime dependency was added for any of this.</p>
+
+  <h3>Structured logs, one schema</h3>
+  <p>
+    Every service writes JSON lines to stdout (and therefore to <code>logs/&lt;service&gt;.log</code>).
+    The Go services use <code>log/slog</code>'s JSON handler; agent-svc uses a ~200-line hand-written
+    <code>logging.Formatter</code> in <code>agent-svc/src/logsetup.py</code>. Each module keeps its
+    ordinary <code>logging.getLogger(__name__)</code> — records propagate to the root handler installed
+    at boot and come out with the shared field names attached.
+  </p>
+<pre class="code">{"time":"2026-07-26T15:31:02.114Z","level":"INFO","msg":"request","service":"gateway",
+ "request_id":"3f9c1a2b7d4e5f60","user_id":"89dc1446-…","method":"POST","path":"/api/chat",
+ "status":200,"duration_ms":1843.2}
+
+fields:  time  level  msg  service  request_id  user_id  method  path  status  duration_ms  err
+level:   LOG_LEVEL = debug | info | warn | error        (Python WARNING is normalised to WARN)</pre>
+  <ul class="bul">
+    <li><b>Never logged:</b> secrets, API keys, tokens, OAuth codes, <code>Authorization</code> headers, session ids, request bodies, or any user message content. Secrets appear only as <code>SET</code>/<code>UNSET</code>.</li>
+    <li>The four streams share field <em>names</em> deliberately: that is what makes one grep — or one Loki query — cover the whole system.</li>
+  </ul>
+
+  <h3>Request-ID correlation</h3>
+  <p>
+    The highest-value piece, because a single chat turn touches the gateway, conv-svc, agent-svc and
+    user-svc. The gateway's <code>requestLogger</code> is mounted <b>first</b> in the middleware chain —
+    before CORS — so every request, including a preflight and anything the router rejects, gets an id
+    and exactly one access line.
+  </p>
+  <ul class="bul">
+    <li><b>Adopt or mint.</b> An inbound <code>X-Request-Id</code> is sanitised — at most 64 characters from <code>[A-Za-z0-9-_.]</code>, anything else is discarded — and otherwise an id is minted from <code>crypto/rand</code>. A caller-supplied value lands in log files and downstream headers, so it is bounded and control-character-free by construction.</li>
+    <li><b>Correlation only, never auth.</b> The id is attacker-controllable. Nothing reads it for identity, authorization or rate limiting. <code>user_id</code> on a log line still comes from the verified JWT.</li>
+    <li><b>Echoed and forwarded.</b> The gateway sets the header on its own response so the caller can correlate, and stamps it on every outbound call — <code>forward</code>, <code>forwardInternal</code>, <code>streamChatTo</code> and both Google exchanges. user-svc, conv-svc and agent-svc adopt it into the request context and log it on every line they emit for that request.</li>
+    <li><b>agent-svc hand-carries it across the thread boundary.</b> The id lives in a <code>ContextVar</code>, which does not follow work onto the <code>/chat</code> worker thread, so it is read and re-<code>set</code> inside the worker. Without that, every line of the actual turn would be uncorrelated.</li>
+  </ul>
+
+  <div class="card hazard" style="margin-top:var(--sp-4)">
+    <h4>Known gap</h4>
+    <p>
+      agent-svc's own outbound <code>httpx</code> calls to user-svc and conv-svc do <b>not</b> yet
+      propagate <code>X-Request-Id</code>. Those callees mint a fresh id, so a trace of one turn is
+      complete from the browser down to agent-svc, but the writes agent-svc makes on your behalf appear
+      under ids of their own. Fixing it means one shared header injector on the httpx clients.
+    </p>
+  </div>
+
+  <h3>Access logs and <code>/health</code></h3>
+  <ul class="bul">
+    <li>Each service has its own access-log middleware emitting <b>one</b> line per request with method, path, status and <code>duration_ms</code>.</li>
+    <li><b>agent-svc's is raw ASGI, not <code>BaseHTTPMiddleware</code></b> — deliberately. <code>BaseHTTPMiddleware</code> sits between the response generator and the socket and would break, buffer or delay the <code>/chat</code> SSE stream. The ASGI version only inspects the <code>http.response.start</code> message for a status code and lets every body chunk through untouched.</li>
+    <li><code>/health</code> and <code>/healthz</code> log at <b>debug</b>, so a polling loop or a container healthcheck does not drown the info stream.</li>
+    <li><b><code>GET /health</code> now exists on all four services</b> with the same shape, <code>{"service":…,"ok":true}</code>, so one loop can check the whole stack (<code>dev.sh</code> is that loop). user-svc and conv-svc own a pool, so theirs pings Postgres and returns <b>503</b> with <code>"db":"down"</code> when it is unreachable. The gateway owns no data, so its <code>/health</code> is cheap and <code>/readyz</code> stays the dependency-aware probe.</li>
+  </ul>
+
+  <h3>The startup config banner</h3>
+  <p>
+    Every service logs exactly one <code>msg:"config"</code> line at boot with the configuration it
+    actually resolved: ports, downstream service URLs, <code>google_redirect_uri</code>, CORS/web
+    origin, <code>system_config_uid</code>, rate limit, the access/session TTLs, and
+    <code>dev_auth_enabled</code>. Secrets are reported as <code>SET</code>/<code>UNSET</code>;
+    <code>DATABASE_URL</code> and <code>REDIS_URL</code> are treated as secrets because they embed
+    credentials. This exists because config drift between two processes is invisible by nature — the
+    stale-redirect-URI afternoon in §10 is the canonical example, and both services now print that value
+    in their first line.
+  </p>
+  <ul class="bul">
+    <li><b>The dev-auth warning.</b> When <code>DEV_AUTH_ENABLED</code> is on, the gateway follows the config line with a <code>WARN</code> saying that <code>/auth/dev-login</code> mints a JWT for any email with no password. A passwordless admin door should never be silent.</li>
+    <li><b>Fail fast.</b> A missing required variable — <code>JWT_SECRET</code>, <code>DATABASE_URL</code>, <code>INTERNAL_TOKEN</code>, <code>CREDENTIAL_ENC_KEY</code> — logs an error and exits non-zero at boot, instead of booting successfully and failing on the first login or the first credential read, far from the cause.</li>
+  </ul>
+
+  <h3>Reading the logs</h3>
+<pre class="code">./logs.sh                       # every service, one stream, each line prefixed
+./logs.sh gateway agent-svc     # just these
+./logs.sh -n 5000 | grep 3f9c1a2b7d4e5f60      # one request, across every service</pre>
+  <p class="note">
+    <code>logs.sh</code> pipes each file through <code>jq</code> into
+    <code>time LEVEL msg  key=val …</code>. Non-JSON lines — the Next dev banner, a Go panic, a Python
+    traceback — pass through verbatim, and without <code>jq</code> installed everything is simply raw;
+    it never hard-fails. Colour is emitted only to a TTY, so piping into <code>grep</code> stays clean.
+  </p>
+
+  <h3>Central log aggregation — opt-in</h3>
+  <p>
+    Behind the <code>observability</code> compose profile, so a plain <code>docker compose up</code> is
+    completely unchanged:
+  </p>
+<pre class="code">docker compose --profile observability up -d
+docker compose --profile observability down
+
+  Grafana   grafana/grafana:12.0.2   http://localhost:3001   (3000 is web)   admin / raphael
+  Loki      grafana/loki:3.5.7       http://localhost:3100   7-day retention
+  Alloy     grafana/alloy:v1.11.0    http://localhost:12345  (its own debug UI)
+
+  config:   ops/loki/loki-config.yaml   ops/alloy/config.alloy
+            ops/grafana/provisioning/datasources/loki.yaml</pre>
+  <ul class="bul">
+    <li><b>Alloy, not Promtail</b> — Promtail is feature-frozen/EOL and Alloy is Grafana's own migration target. It bind-mounts <code>./logs</code> <b>read-only</b> at <code>/var/log/raphael</code> and tails the same files <code>dev.sh</code> writes, because in local dev the services are host processes, not containers — so there is no docker log driver to wire up, and a shipper can never write to what it reads.</li>
+    <li><b>The Loki datasource is pre-provisioned</b> (no click-ops on first boot) with a <em>derived field</em> on <code>request_id</code>: any id in a log line becomes a click-through that pulls up every other service's lines for the same request.</li>
+    <li><b>Timestamps come from the service's own <code>time</code> field</b>, not from ingest time, so re-reading a file after a restart does not stack every line onto "now". <code>level</code> is lower-cased in the pipeline because Go emits <code>INFO</code> and Python emits <code>info</code>, and <code>{level="error"}</code> must not silently miss half the stack.</li>
+  </ul>
+
+  <h4 style="margin-top:var(--sp-5)">Label hygiene — the thing that decides whether Loki stays fast</h4>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Tier</th><th>Fields</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Labels <span class="tag info">indexed</span></td><td><code>service</code>, <code>level</code>, <code>job</code></td>
+          <td>One stream per combination, and the combination count is bounded: ~6 services × 4 levels.</td></tr>
+        <tr><td>Structured metadata</td><td><code>request_id</code>, <code>user_id</code></td>
+          <td>Queryable without creating streams. As labels they would be unbounded — one stream per request — and would melt the index.</td></tr>
+        <tr><td>Line body</td><td><code>method</code>, <code>path</code>, <code>status</code>, <code>duration_ms</code>, <code>err</code></td>
+          <td>Parsed at query time with <code>| json</code>. Cheap to filter, pointless to index.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note">
+    <code>service</code> is taken from the JSON <code>service</code> field, falling back to the filename
+    (<code>logs/gateway.log</code> → <code>gateway</code>) so non-JSON output is still attributed to the
+    right process.
+  </p>
+
+  <h4 style="margin-top:var(--sp-5)">Queries worth knowing</h4>
+<pre class="code"># the one that matters: one chat turn, every service that touched it
+{job="raphael"} | json | request_id="3f9c1a2b7d4e5f60"
+{job="raphael"} | request_id="3f9c1a2b7d4e5f60"        # same, using structured metadata
+
+# everything that went wrong, everywhere
+{job="raphael", level="error"}
+
+# every 5xx the gateway served, and everything slower than a second
+{service="gateway"} | json | status &gt;= 500
+{job="raphael"}     | json | duration_ms &gt; 1000
+
+# error rate per service, graphable
+sum by (service) (rate({job="raphael", level="error"}[5m]))</pre>
+  <p class="note">
+    Still absent, and honestly so: no metrics endpoint, no OpenTelemetry, no distributed tracing. The
+    request id is a correlation key across log lines, not a span tree. More in
+    <a href="status.html">status.html</a>.
+  </p>
+</section>
+
+<!-- ══════════════ 12 ══════════════ -->
 <section id="invariants" class="sec">
-  <h2><span class="num">11</span>Conventions &amp; invariants a new dev must not break</h2>
+  <h2><span class="num">12</span>Conventions &amp; invariants a new dev must not break</h2>
   <p class="sub">If a change makes one of these false, the change is wrong — or the invariant needs an explicit, documented decision to retire it.</p>
 
   <div class="tablewrap">
@@ -1716,6 +1943,8 @@ bash scripts/e2e.sh                          # end-to-end acceptance (LOCAL_MODE
         <tr><td>13</td><td><b>Secrets live in <code>.env</code> (gitignored) and never in an image or a log.</b> <code>api_key_enc</code> is never returned by any API.</td><td>The AES master key was once one <code>git add</code> away from being committed.</td></tr>
         <tr><td>14</td><td><b>Schedulers are LLM-free and idempotent.</b> Claim rows <code>FOR UPDATE SKIP LOCKED</code>, stamp a clock, advance from the fire time.</td><td>Two instances must never double-send, and a crash must auto-recover.</td></tr>
         <tr><td>15</td><td><b>Declare a tier and a fallback for every new feature.</b> If a provider path can't do it, refuse visibly rather than guessing.</td><td>Silent degradation is worse than a stated limitation.</td></tr>
+        <tr><td>16</td><td><b><code>ChatView</code> stays mounted on every tab</b>, hidden with CSS. Never move it into the view ternary.</td><td>The open thread and the in-flight SSE reply live in its state; unmounting on a tab switch aborts a reply mid-sentence. Logout is the one intended unmount, and it is what cancels the stream.</td></tr>
+        <tr><td>17</td><td><b><code>X-Request-Id</code> is for correlation only.</b> Sanitize it on the way in; never read it for identity, authorization or rate limiting.</td><td>It is caller-supplied and therefore attacker-controlled. It also lands in log files, so length and charset are bounded at the boundary like any other untrusted input.</td></tr>
       </tbody>
     </table>
   </div>
@@ -1739,6 +1968,7 @@ bash scripts/e2e.sh                          # end-to-end acceptance (LOCAL_MODE
 <footer>
   Architecture reference for Raphael, written against the repository source (services, <code>db/001</code>–<code>db/018</code>, and the web app).
   Companion documents: <a href="status.html">status.html</a> (what is built, partial and broken right now) ·
+  <a href="ops/README.md">ops/README.md</a> (running the stack, reading its logs) ·
   <a href="docs/RUNNING.md">docs/RUNNING.md</a> (runbook) · <a href="docs/CONTRACT.md">docs/CONTRACT.md</a> (service contract) ·
   <a href="plan.md">plan.md</a> (original design intent).
 </footer>
