@@ -852,11 +852,18 @@ export type GraphNode = {
 };
 
 export type GraphEdge = {
+  // The facts row id — the only stable per-edge handle, and the only safe unit
+  // of deletion (a node id is normalized text shared by many facts).
+  id: string;
   source: string;
   target: string;
   label: string;
   confidence: number;
   times_seen: number;
+  // How often this fact was recalled INTO a prompt. 0 = no recorded recalls.
+  // UNDEFINED = the server didn't report the field (older build) — that is
+  // "unknown", not zero, and the UI must not render it as "never recalled".
+  access_count?: number;
   first_seen?: string;
   last_seen?: string;
 };
@@ -893,13 +900,47 @@ export type MemoryStats = {
   truncated: boolean;
 };
 
+// Per-edge validation at the boundary, so no component downstream has to guess
+// whether a missing number means 0 or "the server never said". Numbers stay
+// undefined when absent; only the required identity/shape fields are enforced.
+const num = (v: unknown): number | undefined =>
+  typeof v === "number" && Number.isFinite(v) ? v : undefined;
+const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+
+function toEdge(raw: unknown): GraphEdge | null {
+  if (!raw || typeof raw !== "object") return null;
+  const e = raw as Record<string, unknown>;
+  const id = str(e.id);
+  const source = str(e.source);
+  const target = str(e.target);
+  const label = str(e.label);
+  if (!id || !source || !target || !label) return null;
+  return {
+    id,
+    source,
+    target,
+    label,
+    confidence: num(e.confidence) ?? 0,
+    times_seen: num(e.times_seen) ?? 0,
+    access_count: num(e.access_count),
+    first_seen: str(e.first_seen),
+    last_seen: str(e.last_seen),
+  };
+}
+
 export async function getMemoryGraph(token: string): Promise<GraphData> {
   const res = await fetch(`${GATEWAY_URL}/api/memory/graph`, { headers: authHeader(token) });
   if (!res.ok) throw new ApiError(`memory graph failed: ${res.status}`, res.status);
   const d = await res.json();
+  const edges = (Array.isArray(d.edges) ? d.edges : [])
+    .map(toEdge)
+    .filter((e: GraphEdge | null): e is GraphEdge => e !== null);
+  const ids = new Set(edges.flatMap((e: GraphEdge) => [e.source, e.target]));
   return {
-    nodes: Array.isArray(d.nodes) ? d.nodes : [],
-    edges: Array.isArray(d.edges) ? d.edges : [],
+    // Drop nodes no surviving edge references — otherwise a malformed edge
+    // leaves an orphan dot the graph can never explain.
+    nodes: (Array.isArray(d.nodes) ? d.nodes : []).filter((n: GraphNode) => ids.has(n?.id)),
+    edges,
     notes: Array.isArray(d.notes) ? d.notes : [],
     truncated: !!d.truncated,
   };
@@ -917,6 +958,28 @@ export async function getMemoryStats(token: string): Promise<MemoryStats> {
     activity: Array.isArray(d.activity) ? d.activity : [],
     truncated: !!d.truncated,
   };
+}
+
+// Memory governance: the user's door for removing something Raphael believes but
+// shouldn't. Destructive and irreversible — the UI confirms before calling these.
+// There is deliberately no edit: facts.embedding is derived from the fact text, so
+// a PATCH without re-embedding would leave retrieval matching the old meaning.
+// Delete-and-reteach is the loop.
+
+export async function deleteFact(token: string, id: string): Promise<void> {
+  const res = await fetch(`${GATEWAY_URL}/api/memory/facts/${id}`, {
+    method: "DELETE",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "delete fact"), res.status);
+}
+
+export async function deleteNote(token: string, id: string): Promise<void> {
+  const res = await fetch(`${GATEWAY_URL}/api/memory/notes/${id}`, {
+    method: "DELETE",
+    headers: authHeader(token),
+  });
+  if (!res.ok) throw new ApiError(await errText(res, "delete note"), res.status);
 }
 
 // The user-portrait transparency door: the prose sketch Raphael injects into every

@@ -1,63 +1,62 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  deleteFact,
+  deleteNote,
   getMemoryGraph,
   type GraphData,
   type GraphEdge,
   type GraphNode,
+  type GraphNote,
 } from "@/lib/gateway";
 import { useAuthed } from "./auth/AuthProvider";
+
+// This view is not an entity explorer over a corpus. It is a portrait of what
+// Raphael believes about ONE person, and it exists to answer four questions:
+// what do you think you know about me, how sure are you, do you actually use
+// it, and how do I remove something wrong. Governance first, spectacle never.
 
 const fmt = (n: number) => n.toLocaleString();
 const pct = (c: number) => `${Math.round(c * 100)}%`;
 
+// The stored confidence score, and nothing more. The extractor writes ~0.95 when
+// it tags a fact "explicit" AND when it omits the field entirely (a small local
+// model routinely omits it), so a high score does NOT prove the user said this —
+// it only means nothing marked the fact as inferred. Never render it as "you
+// said it": that would be a fabricated citation in the trust indicator itself.
+const HIGH_CONF = 0.85;
+const highConf = (c: number) => c >= HIGH_CONF;
+const confLabel = (c: number) => (highConf(c) ? "high confidence" : "lower confidence");
+
+// What high confidence actually means, said once, everywhere it's needed.
+const CONF_HELP =
+  "High confidence means the extractor stored this as stated — it isn't proof you said it in these words. Lower confidence means it was marked as inferred.";
+
+// A belief nobody has reinforced in this long reads as stale.
+const STALE_DAYS = 90;
+
+// The server returns at most this many episodic notes (read.py NOTES_LIMIT), and
+// `truncated` is computed from the FACTS rowcount only — so a full page of notes
+// must be labelled as a capped view rather than counted as the total.
+const NOTES_CAP = 50;
+
+// Theme tokens, duplicated as hex because SVG paint attributes can't take the
+// Tailwind classes. Keep in sync with @theme in globals.css.
+const C_PANEL = "#131316";
+const C_RAISED = "#1a1a1f";
+const C_EDGE = "#26262b";
+const C_TEXT = "#e6e6e9";
+const C_MUTED = "#8b8b93";
+const C_ACCENT = "#4d8eff";
+
 // Fixed viewBox; pan/zoom is a transform on the inner <g>, so the coordinate
 // system the sim runs in never changes.
 const VB_W = 820;
-const VB_H = 560;
+const VB_H = 520;
 const CX = VB_W / 2;
 const CY = VB_H / 2;
-
-// --- holographic HUD palette -------------------------------------------------
-// Deliberately its own palette (not --color-accent): the graph canvas is a
-// heads-up display, everything around it stays on the app's blue/violet tokens.
-const CANVAS = "#04070d"; // near-black backdrop, also the label halo colour
-const HOLO = "#22d3ee"; // primary cyan
-const HOLO_SOFT = "#38bdf8"; // edges / secondary strokes
-const HOLO_PALE = "#7dd3fc"; // labels
-const LOCK = "#fbbf24"; // selected ("locked on") node
-
-// Cap on simultaneously animated edge pulses — a dense graph must not turn into
-// a light show, and 24 travelling dashes is already plenty of life.
-const PULSE_CAP = 24;
-
-// One <style> for the whole canvas: every decorative animation is declarative
-// CSS (no JS timers, nothing driven from the sim's RAF loop) and every one of
-// them is switched off under prefers-reduced-motion, leaving a static — still
-// holographic — HUD.
-const HUD_CSS = `
-/* --mg-lo/--mg-hi are set per node so the pulse keeps each node's own
-   brightness (lit vs. resting) instead of flattening them all to one value. */
-@keyframes mg-halo { 0%,100% { opacity:var(--mg-lo,.3); transform:scale(.9); } 50% { opacity:var(--mg-hi,.6); transform:scale(1.1); } }
-@keyframes mg-dash { to { stroke-dashoffset:-64; } }
-@keyframes mg-spin { to { transform:rotate(360deg); } }
-@keyframes mg-spin-rev { to { transform:rotate(-360deg); } }
-@keyframes mg-sweep { 0%,72% { transform:translateX(-160px); opacity:0; } 74% { opacity:.5; } 96% { opacity:.5; } 100% { transform:translateX(${VB_W}px); opacity:0; } }
-@keyframes mg-in { from { opacity:0; transform:scale(.55); } }
-/* rotate/scale about the element's own centre, not the viewBox origin */
-.mg-o { transform-box:fill-box; transform-origin:center; }
-.mg-halo { animation:mg-halo 5.5s ease-in-out infinite; }
-.mg-dash { animation:mg-dash 3.4s linear infinite; }
-.mg-spin { animation:mg-spin 7s linear infinite; }
-.mg-spin-rev { animation:mg-spin-rev 11s linear infinite; }
-.mg-sweep { animation:mg-sweep 11s linear infinite; }
-.mg-in { animation:mg-in 480ms cubic-bezier(.2,.8,.3,1) backwards; }
-@media (prefers-reduced-motion: reduce) {
-  .mg-halo,.mg-dash,.mg-spin,.mg-spin-rev,.mg-in { animation:none; }
-  .mg-sweep { display:none; }
-}
-`;
 
 // Hand-rolled force sim (no dependency; d3-force would pull 4 transitive
 // packages for dozens of nodes). O(n²) repulsion + edge springs + gentle
@@ -81,17 +80,25 @@ type Sim = GraphNode & {
   dragging: boolean;
 };
 
-function seed(graph: GraphData): Sim[] {
+// Seeds positions for a graph. `prev` is the previous sim: a node that still
+// exists KEEPS its coordinates, a node that vanished is dropped, and only new
+// nodes are placed on the ring. Without this, every delete re-randomizes the
+// whole map and the user can't tell what actually changed.
+function seed(graph: GraphData, prev: Sim[] = []): Sim[] {
   const rootId =
     graph.nodes.find((n) => n.kind === "identity")?.id ?? graph.nodes[0]?.id;
+  const old = new Map(prev.map((s) => [s.id, s]));
   const n = Math.max(1, graph.nodes.length);
   return graph.nodes.map((node, i) => {
     const identity = node.id === rootId;
     const a = (i / n) * Math.PI * 2;
+    const was = old.get(node.id);
     return {
       ...node,
-      x: identity ? CX : CX + Math.cos(a) * 150 + (Math.random() - 0.5) * 40,
-      y: identity ? CY : CY + Math.sin(a) * 150 + (Math.random() - 0.5) * 40,
+      // identity is pinned at centre, so it never inherits a stale position —
+      // it matters when a delete promotes a DIFFERENT node to identity.
+      x: identity ? CX : was?.x ?? CX + Math.cos(a) * 150 + (Math.random() - 0.5) * 40,
+      y: identity ? CY : was?.y ?? CY + Math.sin(a) * 150 + (Math.random() - 0.5) * 40,
       vx: 0,
       vy: 0,
       fx: 0,
@@ -173,63 +180,687 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 
 export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") => void }) {
   const { token, failed: onFail } = useAuthed();
-  const [graph, setGraph] = useState<GraphData | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<"graph" | "list">("graph");
+  const qc = useQueryClient();
+
+  const {
+    data: graph,
+    error,
+    isPending,
+    refetch,
+  } = useQuery({
+    queryKey: ["memory", "graph", token],
+    queryFn: () => getMemoryGraph(token),
+    enabled: !!token,
+  });
+
+  // Surface a load failure to the shell — this drives the single-flight token
+  // refresh in the auth provider. A token change re-keys the query above.
+  useEffect(() => {
+    if (error) onFail(error);
+  }, [error, onFail]);
+
+  // Forgetting is the whole point of the screen. One mutation for both kinds;
+  // per-row "busy" comes from the mutation's variables (Reminders pattern).
+  const [delError, setDelError] = useState<string | null>(null);
+  const forget = useMutation({
+    mutationFn: ({ fn }: { id: string; fn: () => Promise<void> }) => fn(),
+    onMutate: () => setDelError(null),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["memory"] });
+      // The Dashboard's portrait and counters are derived from these facts but
+      // sit outside the ["memory"] prefix — without these they keep showing a
+      // belief the user just deleted.
+      qc.invalidateQueries({ queryKey: ["dashboard", "portrait"] });
+      qc.invalidateQueries({ queryKey: ["dashboard", "stats"] });
+    },
+    onError: (e: unknown) => {
+      // The shell's banner lives inside ChatView, which is display:none on this
+      // tab — so a failure there is invisible. Show it HERE; still notify the
+      // shell so the 401 single-flight token refresh keeps working.
+      setDelError(e instanceof Error ? e.message : "Unknown error");
+      onFail(e);
+    },
+  });
+  const busy = forget.isPending ? forget.variables?.id ?? null : null;
+
+  const [modeOverride, setModeOverride] = useState<"list" | "graph" | null>(null);
+  const [filter, setFilter] = useState<string | null>(null); // isolate one predicate
   const [selected, setSelected] = useState<string | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
-  const [showNotes, setShowNotes] = useState(false);
-  // Once the data lands, a big or truncated graph defaults to the List view —
-  // the SVG is unreadable past ~60 nodes. The user can still flip back.
-  const [autoListed, setAutoListed] = useState(false);
+  const [showNotes, setShowNotes] = useState(true);
 
-  useEffect(() => {
-    let live = true;
-    getMemoryGraph(token)
-      .then((g) => {
-        if (!live) return;
-        setGraph(g);
-        if (!autoListed && (g.nodes.length > 60 || g.truncated)) {
-          setMode("list");
-          setAutoListed(true);
-        }
-      })
-      .catch((e) => {
-        if (!live) return;
-        setError(e instanceof Error ? e.message : String(e));
-        onFail(e);
-      });
-    return () => {
-      live = false;
-    };
-    // autoListed intentionally omitted: we only want the initial fetch to set it.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, onFail]);
+  const edges = useMemo(() => graph?.edges ?? [], [graph]);
+  const nodes = graph?.nodes ?? [];
+  const notes = graph?.notes ?? [];
 
-  // Adjacency for neighbor-highlighting on hover/select.
+  // The grouped list is the confident default: at ten facts a force layout is a
+  // few dots lost in the dark. The spatial view earns the default only once the
+  // graph is big enough that reading it as prose stops working.
+  const mode = modeOverride ?? (nodes.length > 60 ? "graph" : "list");
+
+  // Predicate is the one real categorical dimension in this data (the payload's
+  // only `kind` is identity/entity, which is structure, not category).
+  const predicates = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const e of edges) m.set(e.label, (m.get(e.label) ?? 0) + 1);
+    return [...m.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  }, [edges]);
+
+  // One colour assigner for the whole screen, built from the full predicate set
+  // (not the filtered one) so filtering never recolours anything.
+  const predColor = useMemo(
+    () => makePredColor(predicates.map(([p]) => p)),
+    [predicates],
+  );
+
+  const shown = useMemo(
+    () => (filter ? edges.filter((e) => e.label === filter) : edges),
+    [edges, filter],
+  );
+
+  const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+
+  // Adjacency for neighbour-highlighting on hover/select.
   const neighbors = useMemo(() => {
     const m = new Map<string, Set<string>>();
     const add = (a: string, b: string) =>
       (m.get(a) ?? m.set(a, new Set()).get(a)!).add(b);
-    for (const e of graph?.edges ?? []) {
+    for (const e of shown) {
       add(e.source, e.target);
       add(e.target, e.source);
     }
     return m;
-  }, [graph]);
+  }, [shown]);
 
-  // Honour prefers-reduced-motion: when reduced, the sim is run to convergence
-  // once (synchronously) and never animated — no RAF, no in-flight motion.
-  const [motion, setMotion] = useState(true);
+  // Only edges whose recall counter is actually reported and zero. A server that
+  // omits access_count must read as "unknown", never as "never recalled".
+  const neverUsed = edges.filter((e) => e.access_count === 0).length;
+  const recallKnown = edges.some((e) => e.access_count != null);
+
+  const onForgetFact = (e: GraphEdge) =>
+    forget.mutate({ id: e.id, fn: () => deleteFact(token, e.id) });
+  const onForgetNote = (n: GraphNote) =>
+    forget.mutate({ id: n.id, fn: () => deleteNote(token, n.id) });
+
+  if (error && !graph) {
+    return (
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
+        <div className="mx-auto flex max-w-4xl flex-col items-start gap-2 rounded-xl border border-edge bg-panel px-4 py-3">
+          <p role="alert" className="text-sm text-error">
+            Couldn&apos;t load what Raphael remembers.
+          </p>
+          <button
+            type="button"
+            onClick={() => void refetch()}
+            className="rounded-md border border-edge bg-raised px-3 py-1 text-xs text-on-surface transition-colors hover:bg-panel"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (isPending || !graph) {
+    return (
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
+        <p className="mx-auto max-w-4xl text-sm text-faint">Loading…</p>
+      </div>
+    );
+  }
+
+  const empty = nodes.length === 0 && notes.length === 0;
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
+      <div className="mx-auto flex max-w-4xl flex-col gap-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-2xl font-semibold text-on-surface">What Raphael knows</h2>
+            <p className="mt-1 max-w-xl text-sm text-muted">
+              Everything below is used to answer you. If something is wrong, forget it
+              here and tell Raphael the right version in chat.
+            </p>
+          </div>
+          {nodes.length > 0 && (
+            <div
+              role="group"
+              aria-label="View"
+              className="flex rounded-md border border-edge bg-panel p-0.5 text-sm"
+            >
+              {(["list", "graph"] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setModeOverride(m)}
+                  aria-pressed={mode === m}
+                  className={`rounded px-3 py-1 capitalize transition-colors ${
+                    mode === m
+                      ? "bg-raised font-medium text-on-surface"
+                      : "text-muted hover:text-on-surface"
+                  }`}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {delError && (
+          <p role="alert" className="border-l-2 border-error bg-error/10 px-3 py-2 text-sm text-error">
+            Couldn&apos;t forget that — it is still remembered. {delError}
+          </p>
+        )}
+
+        {error && (
+          <p role="status" className="border-l-2 border-warning bg-warning/10 px-3 py-2 text-sm text-warning">
+            Couldn&apos;t refresh — showing the last view that loaded.
+          </p>
+        )}
+
+        {graph.truncated && (
+          <div
+            role="status"
+            className="border-l-2 border-warning bg-warning/10 px-3 py-2 text-sm text-warning"
+          >
+            Showing the 200 most-reinforced facts — the counts below cover only those.
+          </div>
+        )}
+
+        {empty ? (
+          <div className="rounded-xl border border-edge bg-panel px-5 py-10 text-center">
+            <p className="text-sm text-faint">
+              Raphael hasn&apos;t learned anything about you yet. Chat with it and it&apos;ll
+              start remembering.
+            </p>
+            <button
+              type="button"
+              onClick={() => onNavigate("chat")}
+              className="mt-4 rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong"
+            >
+              Start a chat
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <StatTile
+                label="Things"
+                value={fmt(nodes.length)}
+                sub="subjects & objects in the facts"
+              />
+              <StatTile label="Facts" value={fmt(edges.length)} sub="subject → object links" />
+              <StatTile
+                label="Episodic notes"
+                value={notes.length >= NOTES_CAP ? `${fmt(NOTES_CAP)}+` : fmt(notes.length)}
+                sub={
+                  notes.length >= NOTES_CAP
+                    ? `newest ${NOTES_CAP} only`
+                    : "remembered moments"
+                }
+              />
+              <StatTile
+                label="No recalls yet"
+                value={recallKnown ? fmt(neverUsed) : "—"}
+                sub={
+                  !recallKnown
+                    ? "recall counts unavailable"
+                    : neverUsed
+                      ? "no recorded recall into a reply"
+                      : "all have been recalled"
+                }
+                accent={neverUsed ? "var(--color-warning)" : undefined}
+              />
+            </div>
+
+            {predicates.length > 0 && (
+              <Legend
+                predicates={predicates}
+                predColor={predColor}
+                filter={filter}
+                onFilter={(p) => setFilter((f) => (f === p ? null : p))}
+              />
+            )}
+
+            {mode === "list" ? (
+              <Beliefs
+                edges={shown}
+                nodeById={nodeById}
+                predColor={predColor}
+                busy={busy}
+                onForget={onForgetFact}
+              />
+            ) : (
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_17rem]">
+                <Canvas
+                  edges={shown}
+                  graph={graph}
+                  predColor={predColor}
+                  neighbors={neighbors}
+                  selected={selected}
+                  hovered={hovered}
+                  onSelect={setSelected}
+                  onHover={setHovered}
+                />
+                <InspectPanel
+                  nodeId={selected}
+                  nodeById={nodeById}
+                  edges={shown}
+                  predColor={predColor}
+                  busy={busy}
+                  onForget={onForgetFact}
+                  onClear={() => setSelected(null)}
+                />
+              </div>
+            )}
+          </>
+        )}
+
+        {notes.length > 0 && (
+          <div className="rounded-xl border border-edge bg-panel p-4">
+            <button
+              type="button"
+              onClick={() => setShowNotes((s) => !s)}
+              className="flex w-full items-center justify-between text-left text-sm font-medium text-on-surface"
+              aria-expanded={showNotes}
+            >
+              <span>
+                Moments Raphael remembers (
+                {notes.length >= NOTES_CAP ? `newest ${fmt(NOTES_CAP)}` : fmt(notes.length)})
+              </span>
+              <span className="text-muted" aria-hidden="true">
+                {showNotes ? "–" : "+"}
+              </span>
+            </button>
+            {showNotes && (
+              <ul className="mt-3 flex flex-col divide-y divide-edge">
+                {notes.map((note) => (
+                  <li
+                    key={note.id}
+                    className={`flex items-start gap-3 py-2 text-sm ${
+                      busy === note.id ? "opacity-40" : ""
+                    }`}
+                  >
+                    <span className="min-w-0 flex-1 text-on-surface">{note.content}</span>
+                    <Tag
+                      tone={highConf(note.confidence) ? "muted" : "warning"}
+                      title={CONF_HELP}
+                    >
+                      {highConf(note.confidence) ? "high" : "lower"} conf {pct(note.confidence)}
+                    </Tag>
+                    <Forget
+                      what={note.content}
+                      busy={busy === note.id}
+                      onConfirm={() => onForgetNote(note)}
+                    />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// --- stat tiles + chips --------------------------------------------------------
+
+function StatTile({
+  label,
+  value,
+  sub,
+  accent,
+}: {
+  label: string;
+  value: React.ReactNode;
+  sub?: string;
+  accent?: string;
+}) {
+  return (
+    <div className="rounded-xl border border-edge bg-panel p-3">
+      <p className="text-xs text-faint">{label}</p>
+      <p
+        className="mt-1 truncate text-lg font-semibold tabular-nums"
+        style={{ color: accent ?? "var(--color-on-surface)" }}
+      >
+        {value}
+      </p>
+      {sub && <p className="mt-0.5 truncate text-[11px] text-muted">{sub}</p>}
+    </div>
+  );
+}
+
+function Tag({
+  children,
+  tone = "muted",
+  dotted,
+  title,
+}: {
+  children: React.ReactNode;
+  tone?: "muted" | "warning" | "faint";
+  dotted?: boolean;
+  title?: string;
+}) {
+  const color =
+    tone === "warning"
+      ? "var(--color-warning)"
+      : tone === "faint"
+        ? "var(--color-faint)"
+        : "var(--color-muted)";
+  return (
+    <span
+      title={title}
+      className="shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wider"
+      style={{
+        color,
+        border: `1px ${dotted ? "dashed" : "solid"} color-mix(in srgb, ${color} 40%, transparent)`,
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+// --- legend / filter -----------------------------------------------------------
+
+function Legend({
+  predicates,
+  predColor,
+  filter,
+  onFilter,
+}: {
+  predicates: [string, number][];
+  predColor: (p: string) => string;
+  filter: string | null;
+  onFilter: (p: string) => void;
+}) {
+  return (
+    <div className="rounded-xl border border-edge bg-panel p-3">
+      <div className="flex flex-wrap gap-1.5">
+        {predicates.map(([p, n]) => {
+          const on = filter === p;
+          const c = predColor(p);
+          return (
+            <button
+              key={p}
+              type="button"
+              onClick={() => onFilter(p)}
+              aria-pressed={on}
+              className="flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors"
+              style={{
+                borderColor: on ? c : C_EDGE,
+                backgroundColor: on ? `${c}1f` : "transparent",
+                color: on ? c : "var(--color-muted)",
+              }}
+            >
+              <span
+                aria-hidden="true"
+                className="h-2 w-2 shrink-0 rounded-full"
+                style={{ backgroundColor: c }}
+              />
+              {p}
+              <span className="tabular-nums opacity-70">{n}</span>
+            </button>
+          );
+        })}
+        {filter && (
+          <button
+            type="button"
+            onClick={() => onFilter(filter)}
+            className="rounded-full px-2.5 py-1 text-xs text-faint underline underline-offset-2 hover:text-on-surface"
+          >
+            show all
+          </button>
+        )}
+      </div>
+      <p className="mt-2.5 text-[11px] leading-relaxed text-faint">
+        Colour is the relationship — this legend is the key, so a colour never has to
+        be read on its own. A <span className="text-muted">solid</span> bar is{" "}
+        <span className="text-muted">high confidence</span>, a{" "}
+        <span className="text-warning">dashed</span> one is lower. {CONF_HELP} “No recalls”
+        = nothing has been recorded as recalling it into a reply. “Stale” = nothing has
+        reinforced it in {STALE_DAYS} days.
+      </p>
+    </div>
+  );
+}
+
+// --- the default view: beliefs grouped by predicate ----------------------------
+
+function Beliefs({
+  edges,
+  nodeById,
+  predColor,
+  busy,
+  onForget,
+}: {
+  edges: GraphEdge[];
+  nodeById: Map<string, GraphNode>;
+  predColor: (p: string) => string;
+  busy: string | null;
+  onForget: (e: GraphEdge) => void;
+}) {
+  const groups = new Map<string, GraphEdge[]>();
+  for (const e of edges) {
+    const g = groups.get(e.label) ?? [];
+    g.push(e);
+    groups.set(e.label, g);
+  }
+  const label = (id: string) => nodeById.get(id)?.label ?? id;
+
+  return (
+    <div className="flex flex-col gap-3">
+      {[...groups.entries()].map(([predicate, es]) => {
+        const c = predColor(predicate);
+        return (
+          <section key={predicate} className="rounded-xl border border-edge bg-panel p-4">
+            <h3 className="flex items-center gap-2 text-[11px] uppercase tracking-widest text-faint">
+              <span
+                aria-hidden="true"
+                className="h-2 w-2 rounded-full"
+                style={{ backgroundColor: c }}
+              />
+              {predicate}
+              <span className="tabular-nums">({fmt(es.length)})</span>
+            </h3>
+            <ul className="mt-2 flex flex-col divide-y divide-edge">
+              {es.map((e) => (
+                <FactRow
+                  key={e.id}
+                  edge={e}
+                  color={c}
+                  subject={label(e.source)}
+                  object={label(e.target)}
+                  busy={busy === e.id}
+                  onForget={() => onForget(e)}
+                />
+              ))}
+            </ul>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function FactRow({
+  edge: e,
+  color,
+  subject,
+  object,
+  busy,
+  onForget,
+}: {
+  edge: GraphEdge;
+  color: string;
+  subject: string;
+  object: string;
+  busy: boolean;
+  onForget: () => void;
+}) {
+  const high = highConf(e.confidence);
+  const age = ageDays(e.last_seen);
+  const stale = age != null && age > STALE_DAYS;
+  return (
+    <li
+      className={`flex items-start gap-3 py-2 pl-3 text-sm ${busy ? "opacity-40" : ""}`}
+      // Solid = high confidence, dashed = lower. This is the stored score, not a
+      // claim about who said it — see CONF_HELP.
+      style={{ borderLeft: `2px ${high ? "solid" : "dashed"} ${color}` }}
+    >
+      <div className="min-w-0 flex-1">
+        <p className={stale ? "text-muted" : "text-on-surface"}>
+          <span className="font-medium">{subject}</span>{" "}
+          <span className="text-muted">{e.label}</span>{" "}
+          <span className={high ? "font-medium" : "font-medium italic"}>{object}</span>
+        </p>
+        <p className="mt-0.5 text-[11px] text-muted">
+          <span title={CONF_HELP}>
+            {confLabel(e.confidence)} ({pct(e.confidence)})
+          </span>{" "}
+          · reinforced {fmt(e.times_seen)}×
+          {e.access_count ? ` · recalled ${fmt(e.access_count)}×` : ""}
+          {e.last_seen ? ` · last ${shortDate(e.last_seen)}` : ""}
+        </p>
+      </div>
+      {e.access_count === 0 && (
+        <Tag tone="warning" dotted title="No recall into a reply has been recorded for this fact.">
+          no recalls
+        </Tag>
+      )}
+      {stale && <Tag tone="faint">stale</Tag>}
+      <Forget what={`${subject} ${e.label} ${object}`} busy={busy} onConfirm={onForget} />
+    </li>
+  );
+}
+
+// --- the delete affordance -----------------------------------------------------
+// Two-step and unmistakable: the row's own text turns into the warning, and the
+// confirming button is the only red thing on screen. Both steps are real
+// <button>s, so the whole loop is keyboard reachable.
+
+function Forget({
+  what,
+  busy,
+  onConfirm,
+}: {
+  what: string;
+  busy: boolean;
+  onConfirm: () => void;
+}) {
+  const [armed, setArmed] = useState(false);
+  const keepRef = useRef<HTMLButtonElement>(null);
+  const trashRef = useRef<HTMLButtonElement>(null);
+  const first = useRef(true);
+
+  // Focus moves to the SAFE control on arm (a <button> fires on Enter, so
+  // autofocusing "Forget" would let two Enters destroy a belief with focus never
+  // resting anywhere safe), and back to the trash icon on cancel. The `first`
+  // guard keeps page load from stealing focus into every row.
   useEffect(() => {
-    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const apply = () => setMotion(!mq.matches);
-    apply();
-    mq.addEventListener("change", apply);
-    return () => mq.removeEventListener("change", apply);
-  }, []);
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    (armed ? keepRef : trashRef).current?.focus();
+  }, [armed]);
 
-  // --- force sim + interaction plumbing --------------------------------------
+  if (armed) {
+    return (
+      <span
+        role="group"
+        aria-label={`Confirm forgetting: ${what}`}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.stopPropagation();
+            setArmed(false);
+          }
+        }}
+        className="flex shrink-0 items-center gap-1.5"
+      >
+        <span role="alert" className="text-[11px] text-error">
+          Forget permanently?
+        </span>
+        <button
+          type="button"
+          ref={keepRef}
+          onClick={() => setArmed(false)}
+          aria-label={`Keep: ${what}`}
+          className="rounded-md border border-edge px-2 py-0.5 text-[11px] text-muted transition-colors hover:text-on-surface"
+        >
+          Keep
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => {
+            setArmed(false);
+            onConfirm();
+          }}
+          aria-label={`Forget permanently: ${what}`}
+          className="rounded-md bg-error px-2 py-0.5 text-[11px] font-medium text-surface transition-opacity hover:opacity-90 disabled:opacity-40"
+        >
+          Forget
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      ref={trashRef}
+      disabled={busy}
+      onClick={() => setArmed(true)}
+      aria-label={`Forget: ${what}`}
+      title="Forget this"
+      className="shrink-0 rounded-md p-1 text-faint transition-colors hover:bg-raised hover:text-error focus-visible:text-error disabled:opacity-40"
+    >
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.75}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="h-3.5 w-3.5"
+        aria-hidden="true"
+      >
+        <path d="M3 6h18" />
+        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+        <path d="M6 6v14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V6" />
+        <path d="M10 11v6M14 11v6" />
+      </svg>
+    </button>
+  );
+}
+
+// --- the spatial view ----------------------------------------------------------
+// Same force sim as before, calm styling: no grid, no scanline, no glow filters,
+// no reticle. Colour carries the predicate, dashes carry "inferred", width
+// carries reinforcement. The only motion left is the layout settling.
+
+function Canvas({
+  edges,
+  graph,
+  predColor,
+  neighbors,
+  selected,
+  hovered,
+  onSelect,
+  onHover,
+}: {
+  edges: GraphEdge[];
+  graph: GraphData;
+  predColor: (p: string) => string;
+  neighbors: Map<string, Set<string>>;
+  selected: string | null;
+  hovered: string | null;
+  onSelect: (id: string | null) => void;
+  onHover: (id: string | null) => void;
+}) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const simRef = useRef<Sim[]>([]);
   const alphaRef = useRef(0);
@@ -242,12 +873,23 @@ export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") =>
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
   const [, tick] = useReducer((c: number) => c + 1, 0);
 
+  // Honour prefers-reduced-motion: when reduced, the sim is run to convergence
+  // once (synchronously) and never animated — no RAF, no in-flight motion.
+  const [motion, setMotion] = useState(true);
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const apply = () => setMotion(!mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, []);
+
   const reheat = useCallback(() => {
     if (!motion) return;
     alphaRef.current = Math.max(alphaRef.current, 0.6);
     if (rafRef.current != null) return;
     const loop = () => {
-      stepSim(simRef.current, graph?.edges ?? [], alphaRef.current);
+      stepSim(simRef.current, graph.edges, alphaRef.current);
       alphaRef.current *= 0.985;
       tick();
       if (alphaRef.current > 0.02 || gestureRef.current?.mode === "node") {
@@ -260,9 +902,13 @@ export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") =>
   }, [motion, graph]);
 
   // (Re)seed and settle whenever the data or the motion preference changes.
+  // Note it keys on the whole graph, not the filtered edges: filtering hides
+  // links, it must not rearrange the layout under the user. Seeding carries the
+  // previous positions forward, so a refetch after a delete moves only what
+  // actually changed instead of reshuffling the whole map.
   useEffect(() => {
-    if (!graph || graph.nodes.length === 0) return;
-    simRef.current = seed(graph);
+    if (graph.nodes.length === 0) return;
+    simRef.current = seed(graph, simRef.current);
     if (!motion) {
       for (let i = 0; i < 300; i++) stepSim(simRef.current, graph.edges, 0.4);
       tick();
@@ -278,8 +924,7 @@ export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") =>
 
   // clientX/Y -> viewBox coords (no rotation/skew, so a/d + e/f suffice).
   const toVB = useCallback((clientX: number, clientY: number) => {
-    const svg = svgRef.current;
-    const ctm = svg?.getScreenCTM();
+    const ctm = svgRef.current?.getScreenCTM();
     if (!ctm) return { x: 0, y: 0 };
     return { x: (clientX - ctm.e) / ctm.a, y: (clientY - ctm.f) / ctm.d };
   }, []);
@@ -346,557 +991,213 @@ export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") =>
     svgRef.current?.releasePointerCapture?.(e.pointerId);
   };
 
-  if (error) {
-    return (
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
-        <div className="mx-auto max-w-4xl">
-          <div
-            role="alert"
-            className="border-l-2 border-error bg-error/10 px-3 py-2 text-sm text-error"
-          >
-            {error}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (!graph) {
-    return (
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
-        <p className="mx-auto max-w-4xl text-sm text-faint">Loading…</p>
-      </div>
-    );
-  }
-
-  const nodeById = new Map(graph.nodes.map((n) => [n.id, n]));
-  const empty = graph.nodes.length === 0;
-  const activeId = hovered ?? selected;
   const pos = new Map(simRef.current.map((s) => [s.id, s]));
-  // Showing every edge label at once is noise past a couple dozen edges; below
-  // that show them all, above it show them only for the active node.
-  const showAllLabels = graph.edges.length <= 22;
-  // Past ~60 nodes the decorative layer gets scaled back: haloes only on the
-  // nodes you're looking at, and no edge pulses at all.
-  const heavy = graph.nodes.length > 60;
+  const activeId = hovered ?? selected;
+  // Only nodes still touched by a visible link are drawn — filtering to one
+  // predicate must not leave a field of orphans.
+  const visible = new Set<string>();
+  for (const e of edges) {
+    visible.add(e.source);
+    visible.add(e.target);
+  }
+  const showAllLabels = edges.length <= 22;
+  const fade = motion ? "opacity 160ms ease" : undefined;
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
-      <div className="mx-auto flex max-w-5xl flex-col gap-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-2xl font-semibold text-on-surface">Knowledge graph</h2>
-            <p className="mt-1 text-sm text-muted">
-              What Raphael knows about you and how the pieces connect.
-            </p>
-          </div>
-          <div className="flex rounded-md border border-edge bg-panel p-0.5 text-sm">
-            {(["graph", "list"] as const).map((m) => (
-              <button
-                key={m}
-                onClick={() => setMode(m)}
-                className={`rounded px-3 py-1 capitalize transition-colors ${
-                  mode === m
-                    ? "bg-raised font-medium text-on-surface"
-                    : "text-muted hover:text-on-surface"
-                }`}
+    <div className="overflow-hidden rounded-xl border border-edge bg-panel">
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${VB_W} ${VB_H}`}
+        role="img"
+        aria-label={`Knowledge graph: ${fmt(graph.nodes.length)} things, ${fmt(edges.length)} facts. The list view is the readable equivalent.`}
+        className="w-full touch-none select-none"
+        style={{ cursor: gestureRef.current?.mode === "pan" ? "grabbing" : "grab" }}
+        onPointerDown={onDownBg}
+        onPointerMove={onMove}
+        onPointerUp={onUp}
+        onPointerCancel={onUp}
+      >
+        {/* Full-canvas hit area so a pointerdown on empty space pans. */}
+        <rect x={0} y={0} width={VB_W} height={VB_H} fill={C_PANEL} />
+
+        <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
+          {edges.map((e) => {
+            const a = pos.get(e.source);
+            const b = pos.get(e.target);
+            if (!a || !b) return null;
+            const active = activeId === e.source || activeId === e.target;
+            const dim = activeId != null && !active;
+            return (
+              <line
+                key={e.id}
+                x1={a.x}
+                y1={a.y}
+                x2={b.x}
+                y2={b.y}
+                stroke={predColor(e.label)}
+                strokeOpacity={active ? 0.95 : dim ? 0.12 : 0.55}
+                strokeWidth={strokeFor(e.times_seen)}
+                strokeLinecap="round"
+                // dashed = lower stored confidence, same encoding as the list
+                strokeDasharray={highConf(e.confidence) ? undefined : "5 4"}
+                style={{ transition: fade }}
+              />
+            );
+          })}
+
+          {edges.map((e) => {
+            const a = pos.get(e.source);
+            const b = pos.get(e.target);
+            if (!a || !b) return null;
+            const active = activeId === e.source || activeId === e.target;
+            if (!active && !showAllLabels) return null;
+            return (
+              <text
+                key={e.id}
+                x={(a.x + b.x) / 2}
+                y={(a.y + b.y) / 2}
+                textAnchor="middle"
+                fontSize={9.5}
+                className="pointer-events-none"
+                fill={active ? C_TEXT : C_MUTED}
+                style={{ paintOrder: "stroke", stroke: C_PANEL, strokeWidth: 3.5 }}
               >
-                {m}
-              </button>
-            ))}
-          </div>
-        </div>
+                {e.label}
+              </text>
+            );
+          })}
 
-        {graph.truncated && (
-          <div
-            role="status"
-            className="border-l-2 border-warning bg-warning/10 px-3 py-2 text-sm text-warning"
-          >
-            Showing the 200 most-reinforced facts.
-          </div>
-        )}
-
-        {empty ? (
-          <div className="rounded-xl border border-edge bg-panel px-5 py-10 text-center">
-            <p className="text-sm text-faint">
-              Raphael hasn&apos;t learned anything about you yet. Chat with it and it&apos;ll
-              start remembering.
-            </p>
-            <button
-              onClick={() => onNavigate("chat")}
-              className="mt-4 rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong"
-            >
-              Start a chat
-            </button>
-          </div>
-        ) : mode === "graph" ? (
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_18rem]">
-            <div
-              className="relative overflow-hidden rounded-xl border"
-              style={{
-                background: `radial-gradient(120% 90% at 50% 40%, #0a1420 0%, ${CANVAS} 70%)`,
-                borderColor: "rgba(34,211,238,0.22)",
-                boxShadow: "inset 0 0 60px -20px rgba(34,211,238,0.35)",
-              }}
-            >
-              <style>{HUD_CSS}</style>
-              <svg
-                ref={svgRef}
-                viewBox={`0 0 ${VB_W} ${VB_H}`}
-                role="img"
-                aria-label={`knowledge graph, ${fmt(graph.edges.length)} facts`}
-                className="w-full touch-none select-none"
-                style={{ cursor: gestureRef.current?.mode === "pan" ? "grabbing" : "grab" }}
-                onPointerDown={onDownBg}
-                onPointerMove={onMove}
-                onPointerUp={onUp}
-                onPointerCancel={onUp}
+          {simRef.current.map((s) => {
+            if (!visible.has(s.id)) return null;
+            const isActive = activeId === s.id;
+            const isNeighbor =
+              activeId != null && (neighbors.get(activeId)?.has(s.id) ?? false);
+            const dim = activeId != null && !isActive && !isNeighbor;
+            const identity = s.kind === "identity";
+            const picked = selected === s.id;
+            const stroke = picked || identity ? C_ACCENT : C_EDGE;
+            return (
+              <g
+                key={s.id}
+                className="cursor-pointer"
+                onPointerDown={(e) => onDownNode(e, s.id)}
+                onPointerEnter={() => onHover(s.id)}
+                onPointerLeave={() => onHover(null)}
+                onClick={() => onSelect(s.id)}
+                opacity={dim ? 0.3 : 1}
+                style={{ transition: fade }}
               >
-                {/* One shared set of defs for the whole canvas: gradients, the
-                    grid pattern and exactly two blur filters, referenced by id.
-                    Never a filter per node. */}
-                <defs>
-                  <radialGradient id="mg-core" cx="50%" cy="50%" r="50%">
-                    <stop offset="0%" stopColor={HOLO_PALE} stopOpacity="0.75" />
-                    <stop offset="45%" stopColor={HOLO} stopOpacity="0.35" />
-                    <stop offset="100%" stopColor={HOLO} stopOpacity="0" />
-                  </radialGradient>
-                  <radialGradient id="mg-lock" cx="50%" cy="50%" r="50%">
-                    <stop offset="0%" stopColor={LOCK} stopOpacity="0.8" />
-                    <stop offset="45%" stopColor={LOCK} stopOpacity="0.35" />
-                    <stop offset="100%" stopColor={LOCK} stopOpacity="0" />
-                  </radialGradient>
-                  <linearGradient id="mg-scan" x1="0" y1="0" x2="1" y2="0">
-                    <stop offset="0%" stopColor={HOLO} stopOpacity="0" />
-                    <stop offset="80%" stopColor={HOLO} stopOpacity="0.12" />
-                    <stop offset="100%" stopColor={HOLO_PALE} stopOpacity="0.5" />
-                  </linearGradient>
-                  <pattern id="mg-grid" width="41" height="40" patternUnits="userSpaceOnUse">
-                    <path
-                      d="M41 0H0V40"
-                      fill="none"
-                      stroke={HOLO}
-                      strokeOpacity="0.075"
-                      strokeWidth="0.6"
-                    />
-                  </pattern>
-                  <filter id="mg-glow" x="-120%" y="-120%" width="340%" height="340%">
-                    <feGaussianBlur stdDeviation="2.6" result="b" />
-                    <feMerge>
-                      <feMergeNode in="b" />
-                      <feMergeNode in="SourceGraphic" />
-                    </feMerge>
-                  </filter>
-                  <filter id="mg-glow-hot" x="-150%" y="-150%" width="400%" height="400%">
-                    <feGaussianBlur stdDeviation="5" result="b" />
-                    <feMerge>
-                      <feMergeNode in="b" />
-                      <feMergeNode in="b" />
-                      <feMergeNode in="SourceGraphic" />
-                    </feMerge>
-                  </filter>
-                </defs>
-
-                {/* ---- HUD chrome: fixed to the canvas, outside pan/zoom ---- */}
-                <g aria-hidden="true" className="pointer-events-none">
-                  <rect x={0} y={0} width={VB_W} height={VB_H} fill="url(#mg-grid)" />
-                  <rect
-                    className="mg-sweep"
-                    x={0}
-                    y={0}
-                    width={160}
-                    height={VB_H}
-                    fill="url(#mg-scan)"
-                  />
-                  {/* corner brackets */}
-                  {[
-                    [14, 14, 1, 1],
-                    [VB_W - 14, 14, -1, 1],
-                    [14, VB_H - 14, 1, -1],
-                    [VB_W - 14, VB_H - 14, -1, -1],
-                  ].map(([x, y, sx, sy], i) => (
-                    <path
-                      key={i}
-                      d={`M${x + sx * 30} ${y} H${x} V${y + sy * 30}`}
-                      fill="none"
-                      stroke={HOLO}
-                      strokeOpacity="0.45"
-                      strokeWidth="1.5"
-                    />
-                  ))}
-                </g>
-
-                {/* Full-canvas hit area so a pointerdown on empty space pans. */}
-                <rect x={0} y={0} width={VB_W} height={VB_H} fill="transparent" />
-
-                <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
-                  {/* ---- edges: thin luminous lines + travelling data pulses ---- */}
-                  {graph.edges.map((e, i) => {
-                    const a = pos.get(e.source);
-                    const b = pos.get(e.target);
-                    if (!a || !b) return null;
-                    const active = activeId === e.source || activeId === e.target;
-                    const dim = activeId != null && !active;
-                    // Sparse by design: only the first PULSE_CAP edges carry a
-                    // pulse, none on a heavy graph, and none on dimmed edges.
-                    const pulse = !heavy && i < PULSE_CAP && !dim;
-                    return (
-                      <g key={i}>
-                        <line
-                          x1={a.x}
-                          y1={a.y}
-                          x2={b.x}
-                          y2={b.y}
-                          stroke={active ? HOLO_PALE : HOLO_SOFT}
-                          strokeOpacity={active ? 0.85 : dim ? 0.05 : 0.22}
-                          strokeWidth={strokeFor(e.times_seen)}
-                          style={{ transition: "stroke-opacity 200ms ease" }}
-                        />
-                        {pulse && (
-                          <line
-                            className="mg-dash"
-                            x1={a.x}
-                            y1={a.y}
-                            x2={b.x}
-                            y2={b.y}
-                            stroke={HOLO_PALE}
-                            strokeOpacity={active ? 0.95 : 0.4}
-                            strokeWidth={Math.min(2.4, strokeFor(e.times_seen) + 0.4)}
-                            strokeLinecap="round"
-                            strokeDasharray="3 61"
-                            style={{ animationDelay: `${(i % 8) * 420}ms` }}
-                          />
-                        )}
-                      </g>
-                    );
-                  })}
-
-                  {/* ---- edge labels ---- */}
-                  {graph.edges.map((e, i) => {
-                    const a = pos.get(e.source);
-                    const b = pos.get(e.target);
-                    if (!a || !b) return null;
-                    const active = activeId === e.source || activeId === e.target;
-                    if (!active && !showAllLabels) return null;
-                    return (
-                      <text
-                        key={i}
-                        x={(a.x + b.x) / 2}
-                        y={(a.y + b.y) / 2}
-                        textAnchor="middle"
-                        fontSize={9}
-                        className="pointer-events-none"
-                        fill={active ? "#dff4ff" : "#6f8ea3"}
-                        opacity={active ? 1 : 0.75}
-                        style={{
-                          fontFamily: "ui-monospace, monospace",
-                          letterSpacing: "0.04em",
-                          paintOrder: "stroke",
-                          stroke: CANVAS,
-                          strokeWidth: 3.5,
-                        }}
-                      >
-                        {e.label}
-                      </text>
-                    );
-                  })}
-
-                  {/* ---- nodes ---- */}
-                  {simRef.current.map((s, i) => {
-                    const isActive = activeId === s.id;
-                    const isNeighbor =
-                      activeId != null && (neighbors.get(activeId)?.has(s.id) ?? false);
-                    const dim = activeId != null && !isActive && !isNeighbor;
-                    const lit = isActive || isNeighbor || selected === s.id;
-                    const identity = s.kind === "identity";
-                    const locked = selected === s.id; // "lock on" target
-                    const ring = locked ? LOCK : identity ? HOLO_PALE : HOLO;
-                    return (
-                      <g
-                        key={s.id}
-                        className="mg-in mg-o cursor-pointer"
-                        onPointerDown={(e) => onDownNode(e, s.id)}
-                        onPointerEnter={() => setHovered(s.id)}
-                        onPointerLeave={() => setHovered(null)}
-                        onClick={() => setSelected(s.id)}
-                        opacity={dim ? 0.22 : 1}
-                        // Entrance stagger; cycled so a big graph still lands fast.
-                        style={{
-                          transition: "opacity 200ms ease",
-                          animationDelay: `${(i % 24) * 35}ms`,
-                        }}
-                      >
-                        {/* soft pulsing halo — staggered so nothing breathes in unison */}
-                        {(identity || lit || !heavy) && (
-                          <circle
-                            className="mg-o mg-halo"
-                            cx={s.x}
-                            cy={s.y}
-                            r={s.r * (identity ? 2.4 : 1.9)}
-                            fill={locked ? "url(#mg-lock)" : "url(#mg-core)"}
-                            // attribute = the reduced-motion resting value
-                            opacity={identity ? 0.85 : lit ? 0.6 : 0.32}
-                            style={
-                              {
-                                "--mg-lo": identity ? 0.6 : lit ? 0.42 : 0.22,
-                                "--mg-hi": identity ? 1 : lit ? 0.8 : 0.42,
-                                animationDelay: `${(i % 9) * 640}ms`,
-                              } as React.CSSProperties
-                            }
-                          />
-                        )}
-                        {/* concentric ring */}
-                        <circle
-                          cx={s.x}
-                          cy={s.y}
-                          r={s.r + 5}
-                          fill="none"
-                          stroke={ring}
-                          strokeOpacity={lit ? 0.55 : 0.25}
-                          strokeWidth={1}
-                          strokeDasharray="3 6"
-                        />
-                        {/* lock-on reticle: counter-rotating rings + bracket ticks */}
-                        {locked && (
-                          <>
-                            <circle
-                              className="mg-o mg-spin"
-                              cx={s.x}
-                              cy={s.y}
-                              r={s.r + 12}
-                              fill="none"
-                              stroke={LOCK}
-                              strokeOpacity={0.9}
-                              strokeWidth={1.4}
-                              strokeDasharray="16 12"
-                            />
-                            <circle
-                              className="mg-o mg-spin-rev"
-                              cx={s.x}
-                              cy={s.y}
-                              r={s.r + 18}
-                              fill="none"
-                              stroke={LOCK}
-                              strokeOpacity={0.45}
-                              strokeWidth={1}
-                              strokeDasharray="2 10"
-                            />
-                            {[
-                              [-1, -1],
-                              [1, -1],
-                              [-1, 1],
-                              [1, 1],
-                            ].map(([sx, sy], k) => {
-                              const d = s.r + 22;
-                              return (
-                                <path
-                                  key={k}
-                                  d={`M${s.x + sx * d} ${s.y + sy * (d - 7)} V${s.y + sy * d} H${s.x + sx * (d - 7)}`}
-                                  fill="none"
-                                  stroke={LOCK}
-                                  strokeOpacity={0.85}
-                                  strokeWidth={1.4}
-                                />
-                              );
-                            })}
-                          </>
-                        )}
-                        <circle
-                          cx={s.x}
-                          cy={s.y}
-                          r={s.r}
-                          fill={identity ? "rgba(34,211,238,0.22)" : "rgba(8,20,32,0.9)"}
-                          stroke={ring}
-                          strokeWidth={identity ? 2.5 : lit ? 2 : 1.25}
-                          strokeOpacity={lit || identity ? 1 : 0.6}
-                          filter={locked ? "url(#mg-glow-hot)" : lit ? "url(#mg-glow)" : undefined}
-                          style={{ transition: "stroke 200ms ease" }}
-                        />
-                        {/* Labels sit outside the glow filter and keep a solid
-                            backdrop stroke, so nothing smears them. */}
-                        <text
-                          x={s.x}
-                          y={s.y + s.r + 13}
-                          textAnchor="middle"
-                          fontSize={11}
-                          className="pointer-events-none"
-                          fill={locked ? LOCK : lit || identity ? "#eaf8ff" : "#9db4c4"}
-                          style={{
-                            fontFamily: "ui-monospace, monospace",
-                            letterSpacing: "0.03em",
-                            paintOrder: "stroke",
-                            stroke: CANVAS,
-                            strokeWidth: 3.5,
-                          }}
-                        >
-                          {truncate(s.label, 18)}
-                        </text>
-                      </g>
-                    );
-                  })}
-                </g>
-              </svg>
-              {/* HUD readouts */}
-              <div
-                aria-hidden="true"
-                className="pointer-events-none absolute left-5 top-3 font-mono text-[10px] uppercase tracking-[0.18em]"
-                style={{ color: "rgba(125,211,252,0.7)" }}
-              >
-                nodes {fmt(graph.nodes.length)} · links {fmt(graph.edges.length)}
-              </div>
-              <div
-                aria-hidden="true"
-                className="pointer-events-none absolute right-5 top-3 max-w-[45%] truncate font-mono text-[10px] uppercase tracking-[0.18em]"
-                style={{ color: selected ? LOCK : "rgba(125,211,252,0.55)" }}
-              >
-                {selected
-                  ? `◈ lock ${truncate(nodeById.get(selected)?.label ?? selected, 22)}`
-                  : "◇ standby"}
-              </div>
-              <div
-                className="pointer-events-none absolute bottom-3 right-5 font-mono text-[10px] tracking-wider"
-                style={{ color: "rgba(125,211,252,0.45)" }}
-              >
-                drag node · scroll zoom · drag canvas to pan
-              </div>
-            </div>
-
-            <InspectPanel
-              nodeId={selected}
-              nodeById={nodeById}
-              edges={graph.edges}
-              onClear={() => setSelected(null)}
-            />
-          </div>
-        ) : (
-          <ListView edges={graph.edges} nodeById={nodeById} />
-        )}
-
-        {graph.notes.length > 0 && (
-          <div className="rounded-xl border border-edge bg-panel p-4">
-            <button
-              onClick={() => setShowNotes((s) => !s)}
-              className="flex w-full items-center justify-between text-left text-sm font-medium text-on-surface"
-              aria-expanded={showNotes}
-            >
-              <span>Things Raphael remembers ({fmt(graph.notes.length)})</span>
-              <span className="text-muted">{showNotes ? "–" : "+"}</span>
-            </button>
-            {showNotes && (
-              <ul className="mt-3 flex flex-col gap-2">
-                {graph.notes.map((note) => (
-                  <li key={note.id} className="flex items-start justify-between gap-3 text-sm">
-                    <span className="min-w-0 text-on-surface">{note.content}</span>
-                    <span className="shrink-0 rounded-md bg-raised px-2 py-0.5 text-[10px] uppercase tracking-widest text-muted">
-                      {pct(note.confidence)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-      </div>
+                <circle
+                  cx={s.x}
+                  cy={s.y}
+                  r={s.r}
+                  fill={identity ? "#4d8eff22" : C_RAISED}
+                  stroke={stroke}
+                  strokeWidth={picked ? 2.5 : 1.25}
+                />
+                <text
+                  x={s.x}
+                  y={s.y + s.r + 13}
+                  textAnchor="middle"
+                  fontSize={11}
+                  className="pointer-events-none"
+                  fill={picked || identity ? C_TEXT : C_MUTED}
+                  style={{ paintOrder: "stroke", stroke: C_PANEL, strokeWidth: 3.5 }}
+                >
+                  {truncate(s.label, 18)}
+                </text>
+              </g>
+            );
+          })}
+        </g>
+      </svg>
+      <p className="border-t border-edge px-3 py-1.5 text-right text-[11px] text-faint">
+        drag a node · scroll to zoom · drag the canvas to pan
+      </p>
     </div>
   );
 }
 
-// Right-side panel: the selected node's facts with provenance. The List view is
-// the screen-reader-friendly equivalent; this is the point-and-inspect path.
+// Right-side panel: the selected node's facts, with the same provenance and the
+// same delete affordance as the list. The list view is the readable equivalent.
 function InspectPanel({
   nodeId,
   nodeById,
   edges,
+  predColor,
+  busy,
+  onForget,
   onClear,
 }: {
   nodeId: string | null;
   nodeById: Map<string, GraphNode>;
   edges: GraphEdge[];
+  predColor: (p: string) => string;
+  busy: string | null;
+  onForget: (e: GraphEdge) => void;
   onClear: () => void;
 }) {
   if (!nodeId) {
     return (
       <div className="rounded-xl border border-edge bg-panel p-4 text-sm text-faint">
-        Click a node to see its facts.
+        Click a node to see its facts — and to forget any of them.
       </div>
     );
   }
   const node = nodeById.get(nodeId);
-  // Every edge touching this node, phrased from its point of view.
   const incident = edges
     .filter((e) => e.source === nodeId || e.target === nodeId)
-    .map((e) => {
-      const otherId = e.source === nodeId ? e.target : e.source;
-      return { edge: e, other: nodeById.get(otherId)?.label ?? otherId };
-    });
+    .map((e) => ({
+      edge: e,
+      other: nodeById.get(e.source === nodeId ? e.target : e.source)?.label ?? nodeId,
+    }));
 
   return (
     <div className="rounded-xl border border-edge bg-panel p-4">
       <div className="flex items-start justify-between gap-2">
         <h3 className="text-base font-semibold text-on-surface">{node?.label ?? nodeId}</h3>
-        <button onClick={onClear} className="text-xs text-muted hover:text-on-surface">
+        <button
+          type="button"
+          onClick={onClear}
+          className="text-xs text-muted hover:text-on-surface"
+        >
           Clear
         </button>
       </div>
-      <div className="mt-3 flex flex-col gap-3">
-        {incident.length === 0 && <p className="text-sm text-faint">No facts on this node.</p>}
-        {incident.map(({ edge, other }, i) => (
-          <div key={i} className="border-l-2 border-edge pl-3 text-sm">
-            <p className="text-on-surface">
-              <span className="text-muted">{edge.label}</span> {other}
-            </p>
-            <p className="mt-0.5 text-xs text-muted">
-              {pct(edge.confidence)} · seen {fmt(edge.times_seen)}×
-              {edge.first_seen ? ` · since ${shortDate(edge.first_seen)}` : ""}
-              {edge.last_seen ? ` · last ${shortDate(edge.last_seen)}` : ""}
-            </p>
-          </div>
+      <ul className="mt-3 flex flex-col gap-3">
+        {incident.length === 0 && <li className="text-sm text-faint">No facts on this node.</li>}
+        {incident.map(({ edge, other }) => (
+          <FactRow
+            key={edge.id}
+            edge={edge}
+            color={predColor(edge.label)}
+            subject={node?.label ?? nodeId}
+            object={other}
+            busy={busy === edge.id}
+            onForget={() => onForget(edge)}
+          />
         ))}
-      </div>
+      </ul>
     </div>
   );
 }
 
-// The accessible alternative AND the large-graph fallback: relations grouped by
-// predicate, as real DOM.
-function ListView({
-  edges,
-  nodeById,
-}: {
-  edges: GraphEdge[];
-  nodeById: Map<string, GraphNode>;
-}) {
-  const groups = new Map<string, GraphEdge[]>();
-  for (const e of edges) {
-    const g = groups.get(e.label) ?? [];
-    g.push(e);
-    groups.set(e.label, g);
-  }
-  const label = (id: string) => nodeById.get(id)?.label ?? id;
+// --- helpers -------------------------------------------------------------------
 
-  return (
-    <div className="flex flex-col gap-4">
-      {[...groups.entries()].map(([predicate, es]) => (
-        <div key={predicate} className="rounded-xl border border-edge bg-panel p-4">
-          <h3 className="text-[11px] uppercase tracking-widest text-faint">{predicate}</h3>
-          <div className="mt-2 flex flex-col divide-y divide-edge">
-            {es.map((e, i) => (
-              <div key={i} className="flex items-center justify-between gap-3 py-2 text-sm">
-                <p className="min-w-0 text-on-surface">
-                  <span className="font-medium">{label(e.source)}</span>{" "}
-                  <span className="text-muted">{predicate}</span>{" "}
-                  <span className="font-medium">{label(e.target)}</span>
-                </p>
-                <span className="shrink-0 text-[10px] uppercase tracking-widest text-muted">
-                  {pct(e.confidence)} · {fmt(e.times_seen)}×
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
+// Hues spaced by golden angle over the SORTED predicate list, not by a raw hash:
+// a hash mod 360 puts two relationships two degrees apart often enough to matter,
+// and above 22 edges the canvas drops edge labels, so colour would be carrying
+// the meaning alone. Same list -> same colours in both views and across reloads;
+// the legend is always rendered, so colour is never the only key.
+function makePredColor(predicates: string[]): (p: string) => string {
+  const idx = new Map([...predicates].sort().map((p, i) => [p, i]));
+  return (p) => `hsl(${(((idx.get(p) ?? idx.size) * 137.508 + 20) % 360).toFixed(1)} 62% 63%)`;
+}
+
+function ageDays(iso?: string): number | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : Math.floor((Date.now() - t) / 86400000);
 }
 
 function radiusFor(n: GraphNode): number {
@@ -947,10 +1248,44 @@ function verifySim(): void {
 
   // a connected pair started far apart should relax near SPRING_LEN
   const c = [mk("a", "entity", CX - 200, CY), mk("b", "entity", CX + 200, CY)];
-  const edge: GraphEdge = { source: "a", target: "b", label: "rel", confidence: 1, times_seen: 1 };
+  const edge: GraphEdge = {
+    id: "e1",
+    source: "a",
+    target: "b",
+    label: "rel",
+    confidence: 1,
+    times_seen: 1,
+    access_count: 0,
+  };
   for (let i = 0; i < 400; i++) stepSim(c, [edge], 0.4);
   const d = Math.hypot(c[0].x - c[1].x, c[0].y - c[1].y);
   console.assert(Math.abs(d - SPRING_LEN) < SPRING_LEN, "spring should relax near rest length", d);
+
+  // colour must be stable for a given predicate set, and well spaced
+  const color = makePredColor(["loves", "cooks", "lives in"]);
+  const hue = (p: string) => Number(color(p).slice(4, color(p).indexOf(" ")));
+  console.assert(color("cooks") === makePredColor(["lives in", "cooks", "loves"])("cooks"),
+    "predicate colour must not depend on input order");
+  const hues = ["loves", "cooks", "lives in"].map(hue).sort((a, b) => a - b);
+  console.assert(
+    hues.every((h, i) => i === 0 || h - hues[i - 1] > 30),
+    "predicate hues must be spaced, not collide",
+    hues,
+  );
+
+  // the confidence split, and the layout carried across a refetch
+  console.assert(highConf(0.95) && !highConf(0.7), "0.95 is high confidence, 0.70 is lower");
+  const g = (ids: string[]): GraphData => ({
+    nodes: ids.map((id) => ({ id, label: id, kind: "entity" as const, degree: 1 })),
+    edges: [],
+    notes: [],
+    truncated: false,
+  });
+  const before = seed(g(["a", "b", "c"]));
+  before[2].x = 111; // "c" — not the pinned identity node, which is always centred
+  const after = seed(g(["b", "c", "d"]), before);
+  console.assert(after.find((s) => s.id === "c")?.x === 111, "a surviving node keeps its position");
+  console.assert(after.length === 3 && !after.some((s) => s.id === "a"), "a deleted node is dropped");
 }
 
 if (process.env.NODE_ENV !== "production") verifySim();
