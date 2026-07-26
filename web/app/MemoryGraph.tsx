@@ -17,7 +17,46 @@ const VB_W = 820;
 const VB_H = 560;
 const CX = VB_W / 2;
 const CY = VB_H / 2;
-const CANVAS = "#0b0b12";
+
+// --- holographic HUD palette -------------------------------------------------
+// Deliberately its own palette (not --color-accent): the graph canvas is a
+// heads-up display, everything around it stays on the app's blue/violet tokens.
+const CANVAS = "#04070d"; // near-black backdrop, also the label halo colour
+const HOLO = "#22d3ee"; // primary cyan
+const HOLO_SOFT = "#38bdf8"; // edges / secondary strokes
+const HOLO_PALE = "#7dd3fc"; // labels
+const LOCK = "#fbbf24"; // selected ("locked on") node
+
+// Cap on simultaneously animated edge pulses — a dense graph must not turn into
+// a light show, and 24 travelling dashes is already plenty of life.
+const PULSE_CAP = 24;
+
+// One <style> for the whole canvas: every decorative animation is declarative
+// CSS (no JS timers, nothing driven from the sim's RAF loop) and every one of
+// them is switched off under prefers-reduced-motion, leaving a static — still
+// holographic — HUD.
+const HUD_CSS = `
+/* --mg-lo/--mg-hi are set per node so the pulse keeps each node's own
+   brightness (lit vs. resting) instead of flattening them all to one value. */
+@keyframes mg-halo { 0%,100% { opacity:var(--mg-lo,.3); transform:scale(.9); } 50% { opacity:var(--mg-hi,.6); transform:scale(1.1); } }
+@keyframes mg-dash { to { stroke-dashoffset:-64; } }
+@keyframes mg-spin { to { transform:rotate(360deg); } }
+@keyframes mg-spin-rev { to { transform:rotate(-360deg); } }
+@keyframes mg-sweep { 0%,72% { transform:translateX(-160px); opacity:0; } 74% { opacity:.5; } 96% { opacity:.5; } 100% { transform:translateX(${VB_W}px); opacity:0; } }
+@keyframes mg-in { from { opacity:0; transform:scale(.55); } }
+/* rotate/scale about the element's own centre, not the viewBox origin */
+.mg-o { transform-box:fill-box; transform-origin:center; }
+.mg-halo { animation:mg-halo 5.5s ease-in-out infinite; }
+.mg-dash { animation:mg-dash 3.4s linear infinite; }
+.mg-spin { animation:mg-spin 7s linear infinite; }
+.mg-spin-rev { animation:mg-spin-rev 11s linear infinite; }
+.mg-sweep { animation:mg-sweep 11s linear infinite; }
+.mg-in { animation:mg-in 480ms cubic-bezier(.2,.8,.3,1) backwards; }
+@media (prefers-reduced-motion: reduce) {
+  .mg-halo,.mg-dash,.mg-spin,.mg-spin-rev,.mg-in { animation:none; }
+  .mg-sweep { display:none; }
+}
+`;
 
 // Hand-rolled force sim (no dependency; d3-force would pull 4 transitive
 // packages for dozens of nodes). O(n²) repulsion + edge springs + gentle
@@ -343,6 +382,9 @@ export default function MemoryGraph({
   // Showing every edge label at once is noise past a couple dozen edges; below
   // that show them all, above it show them only for the active node.
   const showAllLabels = graph.edges.length <= 22;
+  // Past ~60 nodes the decorative layer gets scaled back: haloes only on the
+  // nodes you're looking at, and no edge pulses at all.
+  const heavy = graph.nodes.length > 60;
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
@@ -396,9 +438,14 @@ export default function MemoryGraph({
         ) : mode === "graph" ? (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_18rem]">
             <div
-              className="relative overflow-hidden rounded-xl border border-edge"
-              style={{ background: CANVAS }}
+              className="relative overflow-hidden rounded-xl border"
+              style={{
+                background: `radial-gradient(120% 90% at 50% 40%, #0a1420 0%, ${CANVAS} 70%)`,
+                borderColor: "rgba(34,211,238,0.22)",
+                boxShadow: "inset 0 0 60px -20px rgba(34,211,238,0.35)",
+              }}
             >
+              <style>{HUD_CSS}</style>
               <svg
                 ref={svgRef}
                 viewBox={`0 0 ${VB_W} ${VB_H}`}
@@ -411,13 +458,34 @@ export default function MemoryGraph({
                 onPointerUp={onUp}
                 onPointerCancel={onUp}
               >
+                {/* One shared set of defs for the whole canvas: gradients, the
+                    grid pattern and exactly two blur filters, referenced by id.
+                    Never a filter per node. */}
                 <defs>
-                  {/* Core aura of the identity node + lit entities. */}
                   <radialGradient id="mg-core" cx="50%" cy="50%" r="50%">
-                    <stop offset="0%" stopColor="var(--color-accent-strong)" stopOpacity="0.9" />
-                    <stop offset="45%" stopColor="var(--color-accent)" stopOpacity="0.5" />
-                    <stop offset="100%" stopColor="var(--color-accent)" stopOpacity="0" />
+                    <stop offset="0%" stopColor={HOLO_PALE} stopOpacity="0.75" />
+                    <stop offset="45%" stopColor={HOLO} stopOpacity="0.35" />
+                    <stop offset="100%" stopColor={HOLO} stopOpacity="0" />
                   </radialGradient>
+                  <radialGradient id="mg-lock" cx="50%" cy="50%" r="50%">
+                    <stop offset="0%" stopColor={LOCK} stopOpacity="0.8" />
+                    <stop offset="45%" stopColor={LOCK} stopOpacity="0.35" />
+                    <stop offset="100%" stopColor={LOCK} stopOpacity="0" />
+                  </radialGradient>
+                  <linearGradient id="mg-scan" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0%" stopColor={HOLO} stopOpacity="0" />
+                    <stop offset="80%" stopColor={HOLO} stopOpacity="0.12" />
+                    <stop offset="100%" stopColor={HOLO_PALE} stopOpacity="0.5" />
+                  </linearGradient>
+                  <pattern id="mg-grid" width="41" height="40" patternUnits="userSpaceOnUse">
+                    <path
+                      d="M41 0H0V40"
+                      fill="none"
+                      stroke={HOLO}
+                      strokeOpacity="0.075"
+                      strokeWidth="0.6"
+                    />
+                  </pattern>
                   <filter id="mg-glow" x="-120%" y="-120%" width="340%" height="340%">
                     <feGaussianBlur stdDeviation="2.6" result="b" />
                     <feMerge>
@@ -425,31 +493,87 @@ export default function MemoryGraph({
                       <feMergeNode in="SourceGraphic" />
                     </feMerge>
                   </filter>
+                  <filter id="mg-glow-hot" x="-150%" y="-150%" width="400%" height="400%">
+                    <feGaussianBlur stdDeviation="5" result="b" />
+                    <feMerge>
+                      <feMergeNode in="b" />
+                      <feMergeNode in="b" />
+                      <feMergeNode in="SourceGraphic" />
+                    </feMerge>
+                  </filter>
                 </defs>
+
+                {/* ---- HUD chrome: fixed to the canvas, outside pan/zoom ---- */}
+                <g aria-hidden="true" className="pointer-events-none">
+                  <rect x={0} y={0} width={VB_W} height={VB_H} fill="url(#mg-grid)" />
+                  <rect
+                    className="mg-sweep"
+                    x={0}
+                    y={0}
+                    width={160}
+                    height={VB_H}
+                    fill="url(#mg-scan)"
+                  />
+                  {/* corner brackets */}
+                  {[
+                    [14, 14, 1, 1],
+                    [VB_W - 14, 14, -1, 1],
+                    [14, VB_H - 14, 1, -1],
+                    [VB_W - 14, VB_H - 14, -1, -1],
+                  ].map(([x, y, sx, sy], i) => (
+                    <path
+                      key={i}
+                      d={`M${x + sx * 30} ${y} H${x} V${y + sy * 30}`}
+                      fill="none"
+                      stroke={HOLO}
+                      strokeOpacity="0.45"
+                      strokeWidth="1.5"
+                    />
+                  ))}
+                </g>
 
                 {/* Full-canvas hit area so a pointerdown on empty space pans. */}
                 <rect x={0} y={0} width={VB_W} height={VB_H} fill="transparent" />
 
                 <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
-                  {/* ---- edges ---- */}
+                  {/* ---- edges: thin luminous lines + travelling data pulses ---- */}
                   {graph.edges.map((e, i) => {
                     const a = pos.get(e.source);
                     const b = pos.get(e.target);
                     if (!a || !b) return null;
                     const active = activeId === e.source || activeId === e.target;
                     const dim = activeId != null && !active;
+                    // Sparse by design: only the first PULSE_CAP edges carry a
+                    // pulse, none on a heavy graph, and none on dimmed edges.
+                    const pulse = !heavy && i < PULSE_CAP && !dim;
                     return (
-                      <line
-                        key={i}
-                        x1={a.x}
-                        y1={a.y}
-                        x2={b.x}
-                        y2={b.y}
-                        stroke="var(--color-accent)"
-                        strokeOpacity={active ? 0.9 : dim ? 0.06 : 0.2}
-                        strokeWidth={strokeFor(e.times_seen)}
-                        style={{ transition: "stroke-opacity 200ms ease" }}
-                      />
+                      <g key={i}>
+                        <line
+                          x1={a.x}
+                          y1={a.y}
+                          x2={b.x}
+                          y2={b.y}
+                          stroke={active ? HOLO_PALE : HOLO_SOFT}
+                          strokeOpacity={active ? 0.85 : dim ? 0.05 : 0.22}
+                          strokeWidth={strokeFor(e.times_seen)}
+                          style={{ transition: "stroke-opacity 200ms ease" }}
+                        />
+                        {pulse && (
+                          <line
+                            className="mg-dash"
+                            x1={a.x}
+                            y1={a.y}
+                            x2={b.x}
+                            y2={b.y}
+                            stroke={HOLO_PALE}
+                            strokeOpacity={active ? 0.95 : 0.4}
+                            strokeWidth={Math.min(2.4, strokeFor(e.times_seen) + 0.4)}
+                            strokeLinecap="round"
+                            strokeDasharray="3 61"
+                            style={{ animationDelay: `${(i % 8) * 420}ms` }}
+                          />
+                        )}
+                      </g>
                     );
                   })}
 
@@ -468,9 +592,15 @@ export default function MemoryGraph({
                         textAnchor="middle"
                         fontSize={9}
                         className="pointer-events-none"
-                        fill={active ? "var(--color-on-surface)" : "var(--color-faint)"}
-                        opacity={active ? 1 : 0.7}
-                        style={{ paintOrder: "stroke", stroke: CANVAS, strokeWidth: 3 }}
+                        fill={active ? "#dff4ff" : "#6f8ea3"}
+                        opacity={active ? 1 : 0.75}
+                        style={{
+                          fontFamily: "ui-monospace, monospace",
+                          letterSpacing: "0.04em",
+                          paintOrder: "stroke",
+                          stroke: CANVAS,
+                          strokeWidth: 3.5,
+                        }}
                       >
                         {e.label}
                       </text>
@@ -478,57 +608,132 @@ export default function MemoryGraph({
                   })}
 
                   {/* ---- nodes ---- */}
-                  {simRef.current.map((s) => {
+                  {simRef.current.map((s, i) => {
                     const isActive = activeId === s.id;
                     const isNeighbor =
                       activeId != null && (neighbors.get(activeId)?.has(s.id) ?? false);
                     const dim = activeId != null && !isActive && !isNeighbor;
                     const lit = isActive || isNeighbor || selected === s.id;
                     const identity = s.kind === "identity";
+                    const locked = selected === s.id; // "lock on" target
+                    const ring = locked ? LOCK : identity ? HOLO_PALE : HOLO;
                     return (
                       <g
                         key={s.id}
-                        className="cursor-pointer"
+                        className="mg-in mg-o cursor-pointer"
                         onPointerDown={(e) => onDownNode(e, s.id)}
                         onPointerEnter={() => setHovered(s.id)}
                         onPointerLeave={() => setHovered(null)}
                         onClick={() => setSelected(s.id)}
-                        opacity={dim ? 0.35 : 1}
-                        style={{ transition: "opacity 200ms ease" }}
+                        opacity={dim ? 0.22 : 1}
+                        // Entrance stagger; cycled so a big graph still lands fast.
+                        style={{
+                          transition: "opacity 200ms ease",
+                          animationDelay: `${(i % 24) * 35}ms`,
+                        }}
                       >
-                        {(identity || lit) && (
+                        {/* soft pulsing halo — staggered so nothing breathes in unison */}
+                        {(identity || lit || !heavy) && (
                           <circle
+                            className="mg-o mg-halo"
                             cx={s.x}
                             cy={s.y}
-                            r={s.r * (identity ? 2.4 : 1.8)}
-                            fill="url(#mg-core)"
-                            opacity={identity ? 0.8 : 0.5}
+                            r={s.r * (identity ? 2.4 : 1.9)}
+                            fill={locked ? "url(#mg-lock)" : "url(#mg-core)"}
+                            // attribute = the reduced-motion resting value
+                            opacity={identity ? 0.85 : lit ? 0.6 : 0.32}
+                            style={
+                              {
+                                "--mg-lo": identity ? 0.6 : lit ? 0.42 : 0.22,
+                                "--mg-hi": identity ? 1 : lit ? 0.8 : 0.42,
+                                animationDelay: `${(i % 9) * 640}ms`,
+                              } as React.CSSProperties
+                            }
                           />
+                        )}
+                        {/* concentric ring */}
+                        <circle
+                          cx={s.x}
+                          cy={s.y}
+                          r={s.r + 5}
+                          fill="none"
+                          stroke={ring}
+                          strokeOpacity={lit ? 0.55 : 0.25}
+                          strokeWidth={1}
+                          strokeDasharray="3 6"
+                        />
+                        {/* lock-on reticle: counter-rotating rings + bracket ticks */}
+                        {locked && (
+                          <>
+                            <circle
+                              className="mg-o mg-spin"
+                              cx={s.x}
+                              cy={s.y}
+                              r={s.r + 12}
+                              fill="none"
+                              stroke={LOCK}
+                              strokeOpacity={0.9}
+                              strokeWidth={1.4}
+                              strokeDasharray="16 12"
+                            />
+                            <circle
+                              className="mg-o mg-spin-rev"
+                              cx={s.x}
+                              cy={s.y}
+                              r={s.r + 18}
+                              fill="none"
+                              stroke={LOCK}
+                              strokeOpacity={0.45}
+                              strokeWidth={1}
+                              strokeDasharray="2 10"
+                            />
+                            {[
+                              [-1, -1],
+                              [1, -1],
+                              [-1, 1],
+                              [1, 1],
+                            ].map(([sx, sy], k) => {
+                              const d = s.r + 22;
+                              return (
+                                <path
+                                  key={k}
+                                  d={`M${s.x + sx * d} ${s.y + sy * (d - 7)} V${s.y + sy * d} H${s.x + sx * (d - 7)}`}
+                                  fill="none"
+                                  stroke={LOCK}
+                                  strokeOpacity={0.85}
+                                  strokeWidth={1.4}
+                                />
+                              );
+                            })}
+                          </>
                         )}
                         <circle
                           cx={s.x}
                           cy={s.y}
                           r={s.r}
-                          fill={identity ? "var(--color-accent)" : "var(--color-raised)"}
-                          stroke={
-                            identity
-                              ? "var(--color-accent-strong)"
-                              : lit
-                                ? "var(--color-accent)"
-                                : "var(--color-edge)"
-                          }
+                          fill={identity ? "rgba(34,211,238,0.22)" : "rgba(8,20,32,0.9)"}
+                          stroke={ring}
                           strokeWidth={identity ? 2.5 : lit ? 2 : 1.25}
-                          filter={lit ? "url(#mg-glow)" : undefined}
+                          strokeOpacity={lit || identity ? 1 : 0.6}
+                          filter={locked ? "url(#mg-glow-hot)" : lit ? "url(#mg-glow)" : undefined}
                           style={{ transition: "stroke 200ms ease" }}
                         />
+                        {/* Labels sit outside the glow filter and keep a solid
+                            backdrop stroke, so nothing smears them. */}
                         <text
                           x={s.x}
-                          y={s.y + s.r + 12}
+                          y={s.y + s.r + 13}
                           textAnchor="middle"
                           fontSize={11}
                           className="pointer-events-none"
-                          fill={lit || identity ? "var(--color-on-surface)" : "var(--color-muted)"}
-                          style={{ paintOrder: "stroke", stroke: CANVAS, strokeWidth: 3 }}
+                          fill={locked ? LOCK : lit || identity ? "#eaf8ff" : "#9db4c4"}
+                          style={{
+                            fontFamily: "ui-monospace, monospace",
+                            letterSpacing: "0.03em",
+                            paintOrder: "stroke",
+                            stroke: CANVAS,
+                            strokeWidth: 3.5,
+                          }}
                         >
                           {truncate(s.label, 18)}
                         </text>
@@ -537,8 +742,28 @@ export default function MemoryGraph({
                   })}
                 </g>
               </svg>
-              <div className="pointer-events-none absolute bottom-2 right-3 text-[10px] text-faint">
-                drag a node · scroll to zoom · drag canvas to pan
+              {/* HUD readouts */}
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute left-5 top-3 font-mono text-[10px] uppercase tracking-[0.18em]"
+                style={{ color: "rgba(125,211,252,0.7)" }}
+              >
+                nodes {fmt(graph.nodes.length)} · links {fmt(graph.edges.length)}
+              </div>
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute right-5 top-3 max-w-[45%] truncate font-mono text-[10px] uppercase tracking-[0.18em]"
+                style={{ color: selected ? LOCK : "rgba(125,211,252,0.55)" }}
+              >
+                {selected
+                  ? `◈ lock ${truncate(nodeById.get(selected)?.label ?? selected, 22)}`
+                  : "◇ standby"}
+              </div>
+              <div
+                className="pointer-events-none absolute bottom-3 right-5 font-mono text-[10px] tracking-wider"
+                style={{ color: "rgba(125,211,252,0.45)" }}
+              >
+                drag node · scroll zoom · drag canvas to pan
               </div>
             </div>
 
