@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -522,7 +522,7 @@ func startScheduler(pool *pgxpool.Pool) {
 		for range ticker.C {
 			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 			if err := fireDue(ctx, pool); err != nil {
-				log.Printf("reminder scheduler: %v", err)
+				slog.Error("reminder scheduler tick failed", "err", err.Error())
 			}
 			cancel()
 		}
@@ -594,7 +594,7 @@ func fireDue(ctx context.Context, pool *pgxpool.Pool) error {
 		if err != nil {
 			// A stored cron that no longer parses (shouldn't happen — validated at
 			// create) would fire forever; deactivate it instead of looping.
-			log.Printf("reminder %s: cannot advance, deactivating: %v", d.id, err)
+			slog.Warn("reminder cannot advance, deactivating", "reminder_id", d.id, "err", err.Error())
 			next = nil
 		}
 

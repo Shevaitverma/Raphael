@@ -2,8 +2,9 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -27,17 +28,56 @@ type Server struct {
 }
 
 func main() {
+	setupLogging()
+	// Fail fast: without these the gateway boots and then fails on the first
+	// login (bad signature) or the first DB-backed call, far from the cause.
+	requireEnv("JWT_SECRET", "DATABASE_URL")
+
 	cfg := LoadConfig()
+	logConfig(cfg)
 
 	srv, err := NewServer(cfg)
 	if err != nil {
-		log.Fatalf("gateway: startup failed: %v", err)
+		slog.Error("startup failed", "err", err.Error())
+		os.Exit(1)
 	}
 
 	app := srv.BuildApp()
-	log.Printf("gateway: listening on :%s", cfg.Port)
+	slog.Info("listening", "port", cfg.Port)
 	if err := app.Listen(":" + cfg.Port); err != nil {
-		log.Fatalf("gateway: %v", err)
+		slog.Error("server stopped", "err", err.Error())
+		os.Exit(1)
+	}
+}
+
+// logConfig prints ONE line with the resolved critical config. Drift between
+// services (a stale GOOGLE_REDIRECT_URI here and a new one in user-svc) is then
+// visible in the first line of the log instead of costing an afternoon.
+// Secrets are reported as SET/UNSET only — never their values, and never
+// DATABASE_URL/REDIS_URL, which embed credentials.
+func logConfig(cfg Config) {
+	slog.Info("config",
+		"port", cfg.Port,
+		"user_svc_url", cfg.UserSvcURL,
+		"conv_svc_url", cfg.ConvSvcURL,
+		"agent_svc_url", cfg.AgentSvcURL,
+		"google_redirect_uri", cfg.GoogleRedirectURI,
+		"web_origin", cfg.WebOrigin,
+		"cors_origins", cfg.CORSOrigins,
+		"system_config_uid", cfg.SystemConfigUID,
+		"rate_limit_per_min", cfg.RateLimitPerMin,
+		"access_ttl", cfg.AccessTTL.String(),
+		"session_ttl", cfg.SessionTTL.String(),
+		"dev_auth_enabled", cfg.DevAuthEnabled,
+		"database_url", secretState(cfg.DatabaseURL),
+		"redis_url", secretState(cfg.RedisURL),
+		"jwt_secret", secretState(cfg.JWTSecret),
+		"internal_token", secretState(cfg.InternalToken),
+		"google_client_id", secretState(cfg.GoogleClientID),
+		"google_client_secret", secretState(cfg.GoogleClientSecret),
+	)
+	if cfg.DevAuthEnabled {
+		slog.Warn("DEV_AUTH_ENABLED is on: /auth/dev-login mints a JWT for any email with no password — disable it anywhere reachable beyond localhost")
 	}
 }
 
@@ -85,6 +125,10 @@ func (s *Server) BuildApp() *fiber.App {
 		StreamRequestBody: true,
 	})
 
+	// Correlation + access log. Mounted FIRST so every request — including the
+	// CORS preflight and anything the router rejects — gets an id and one line.
+	app.Use(s.requestLogger)
+
 	// CORS: the browser SPA is a different origin than the gateway, so without
 	// this every /auth and /api call is blocked by the preflight. Allows the
 	// configured web origin(s), the Authorization header, and the verbs we use.
@@ -98,8 +142,9 @@ func (s *Server) BuildApp() *fiber.App {
 		AllowCredentials: true,
 	}))
 
-	app.Get("/healthz", s.handleHealth) // liveness
-	app.Get("/readyz", s.handleReady)   // readiness
+	app.Get("/health", s.handleServiceHealth) // uniform cross-service health
+	app.Get("/healthz", s.handleHealth)       // liveness
+	app.Get("/readyz", s.handleReady)         // readiness
 
 	if s.cfg.DevAuthEnabled {
 		app.Post("/auth/dev-login", s.handleDevLogin)

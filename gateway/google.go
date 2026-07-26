@@ -186,6 +186,7 @@ func (s *Server) handleGoogleCallback(c *fiber.Ctx) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Token", s.cfg.InternalToken)
+	setReqID(c, req)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -214,6 +215,7 @@ func (s *Server) handleLoginExchange(c *fiber.Ctx, code string) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Token", s.cfg.InternalToken)
+	setReqID(c, req)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

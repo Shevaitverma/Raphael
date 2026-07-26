@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -79,7 +79,7 @@ func startFitnessCoach(pool *pgxpool.Pool) {
 		for range ticker.C {
 			ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
 			if err := fitnessCoachTick(ctx, pool); err != nil {
-				log.Printf("fitness coach: %v", err)
+				slog.Error("fitness coach tick failed", "err", err.Error())
 			}
 			cancel()
 		}
@@ -110,10 +110,10 @@ func fitnessCoachTick(ctx context.Context, pool *pgxpool.Pool) error {
 
 	for _, id := range ids {
 		if err := coachUser(ctx, pool, id); err != nil {
-			log.Printf("fitness coach: user %s: %v", id, err)
+			slog.Error("fitness coach failed", "user_id", id, "err", err.Error())
 		}
 		if err := nudgeGoals(ctx, pool, id); err != nil {
-			log.Printf("fitness coach: goals for user %s: %v", id, err)
+			slog.Error("fitness coach goal nudge failed", "user_id", id, "err", err.Error())
 		}
 	}
 	return nil

@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
@@ -666,7 +666,7 @@ func (s *store) recomputeGoals(ctx context.Context, userID string) (err error) {
 	// bug hid until a live test caught it.
 	defer func() {
 		if err != nil {
-			log.Printf("recomputeGoals user=%s: %v", userID, err)
+			slog.Error("recomputeGoals failed", "user_id", userID, "err", err.Error())
 		}
 	}()
 	if !validUUID(userID) {

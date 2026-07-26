@@ -30,6 +30,7 @@ func newServer(db DB, ping func(context.Context) error) *Server {
 
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", s.handleHealth) // uniform cross-service health
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("POST /conversations", s.handleCreateConversation)
 	mux.HandleFunc("GET /conversations", s.handleListConversations)

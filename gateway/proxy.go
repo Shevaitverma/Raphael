@@ -32,6 +32,7 @@ func (s *Server) forward(c *fiber.Ctx, method, targetURL string, body []byte) er
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	setReqID(c, req) // one id across gateway → user-svc/conv-svc/agent-svc
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -410,6 +411,7 @@ func (s *Server) streamChatTo(c *fiber.Ctx, uid, conversationID, message string,
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	setReqID(c, req)
 
 	resp, err := s.streamClient.Do(req)
 	if err != nil {

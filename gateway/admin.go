@@ -49,6 +49,7 @@ func (s *Server) forwardInternal(c *fiber.Ctx, method, targetURL string, body []
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-Internal-Token", s.cfg.InternalToken)
+	setReqID(c, req)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

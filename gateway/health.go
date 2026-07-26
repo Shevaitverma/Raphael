@@ -8,6 +8,14 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
+// handleServiceHealth is the uniform /health every Raphael service answers:
+// same shape, same field names, so one loop can check all four. Deliberately
+// cheap — the gateway owns no data of its own, so there is nothing to ping
+// here; /readyz is the dependency-aware probe.
+func (s *Server) handleServiceHealth(c *fiber.Ctx) error {
+	return c.JSON(fiber.Map{"service": serviceName, "ok": true})
+}
+
 // handleHealth is the LIVENESS probe. It answers 200 as long as the process is
 // running. It deliberately does NOT probe downstream dependencies: a transient
 // blip in Redis or a downstream service must not cause Kubernetes to kill and

@@ -16,6 +16,23 @@ import (
 var validRoles = map[string]bool{"user": true, "assistant": true, "tool": true}
 
 // GET /healthz
+// handleHealth is the uniform /health every Raphael service answers: same
+// shape, same field names, so one loop can check all four. This service owns a
+// pool, so it pings it — one round trip, and a 503 when the DB is unreachable.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqCtx(r)
+	defer cancel()
+	if s.ping != nil {
+		if err := s.ping(ctx); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable,
+				map[string]any{"service": serviceName, "ok": false, "db": "down"})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK,
+		map[string]any{"service": serviceName, "ok": true, "db": "ok"})
+}
+
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := reqCtx(r)
 	defer cancel()

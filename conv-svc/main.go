@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -11,29 +11,39 @@ import (
 )
 
 func main() {
+	setupLogging()
+	requireEnv("DATABASE_URL")
+
 	dsn := getenv("DATABASE_URL", "postgresql://raphael:raphael@localhost:5433/raphael")
 	port := getenv("CONV_SVC_PORT", "8082")
+
+	// ONE line with the resolved critical config at boot. DATABASE_URL is
+	// reported SET/UNSET only — it embeds the password.
+	slog.Info("config", "port", port, "database_url", secretState(dsn))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		log.Fatalf("conv-svc: connect: %v", err)
+		slog.Error("connect postgres", "err", err.Error())
+		os.Exit(1)
 	}
 	defer pool.Close()
 
 	if err := pool.Ping(ctx); err != nil {
-		log.Fatalf("conv-svc: ping: %v", err)
+		slog.Error("ping postgres", "err", err.Error())
+		os.Exit(1)
 	}
 
 	srv := newServer(pool, pool.Ping)
-	handler := srv.routes()
+	handler := withLogging(srv.routes())
 
 	addr := ":" + port
-	log.Printf("conv-svc: listening on %s", addr)
+	slog.Info("listening", "port", port)
 	if err := http.ListenAndServe(addr, handler); err != nil {
-		log.Fatalf("conv-svc: serve: %v", err)
+		slog.Error("server stopped", "err", err.Error())
+		os.Exit(1)
 	}
 }
 

@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -18,31 +18,52 @@ func getenv(key, def string) string {
 }
 
 func main() {
+	setupLogging()
+	requireEnv("DATABASE_URL")
+
 	dbURL := getenv("DATABASE_URL", "postgresql://raphael:raphael@localhost:5433/raphael")
 	port := getenv("USER_SVC_PORT", "8081")
+
+	// ONE line with the resolved critical config, so drift between services (a
+	// stale GOOGLE_REDIRECT_URI here and a new one in the gateway) shows up at
+	// boot instead of costing an afternoon. Secrets are SET/UNSET only, and
+	// DATABASE_URL is never printed — it embeds the password.
+	slog.Info("config",
+		"port", port,
+		"google_redirect_uri", os.Getenv("GOOGLE_REDIRECT_URI"),
+		"database_url", secretState(dbURL),
+		"credential_enc_key", secretState(os.Getenv("CREDENTIAL_ENC_KEY")),
+		"internal_token", secretState(os.Getenv("INTERNAL_TOKEN")),
+		"google_client_id", secretState(os.Getenv("GOOGLE_CLIENT_ID")),
+		"google_client_secret", secretState(os.Getenv("GOOGLE_CLIENT_SECRET")),
+	)
 
 	// Fail loudly at boot if the encryption key is missing or malformed.
 	crypto, err := newCryptor(os.Getenv("CREDENTIAL_ENC_KEY"))
 	if err != nil {
-		log.Fatalf("credential encryption unavailable: %v", err)
+		slog.Error("credential encryption unavailable", "err", err.Error())
+		os.Exit(1)
 	}
 
 	// Fail loudly if the internal shared secret is missing — /internal/* returns
 	// decrypted keys and must never be left unauthenticated.
 	internalToken := os.Getenv("INTERNAL_TOKEN")
 	if internalToken == "" {
-		log.Fatalf("INTERNAL_TOKEN is required (guards /internal/* credential endpoints)")
+		slog.Error("INTERNAL_TOKEN is required (guards /internal/* credential endpoints)")
+		os.Exit(1)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
-		log.Fatalf("connect postgres: %v", err)
+		slog.Error("connect postgres", "err", err.Error())
+		os.Exit(1)
 	}
 	defer pool.Close()
 	if err := pool.Ping(ctx); err != nil {
-		log.Fatalf("ping postgres: %v", err)
+		slog.Error("ping postgres", "err", err.Error())
+		os.Exit(1)
 	}
 
 	srv := &server{store: &store{pool: pool, crypto: crypto}, internalToken: internalToken}
@@ -58,11 +79,12 @@ func main() {
 
 	httpSrv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           srv.routes(),
+		Handler:           withLogging(srv.routes()),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	log.Printf("user-svc listening on :%s", port)
+	slog.Info("listening", "port", port)
 	if err := httpSrv.ListenAndServe(); err != nil {
-		log.Fatalf("server: %v", err)
+		slog.Error("server stopped", "err", err.Error())
+		os.Exit(1)
 	}
 }

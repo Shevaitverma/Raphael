@@ -43,6 +43,7 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", s.health) // uniform cross-service health
 	mux.HandleFunc("GET /healthz", s.healthz)
 
 	// Public routes — never return a key.
@@ -123,6 +124,19 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("PATCH /internal/admin/users/{uid}/role", s.requireInternal(s.userSetRole))
 	mux.HandleFunc("DELETE /internal/admin/users/{uid}", s.requireInternal(s.userRemove))
 	return mux
+}
+
+// health is the uniform /health every Raphael service answers: same shape, same
+// field names, so one loop can check all four. This service owns a pool, so it
+// pings it — one round trip, and a 503 when the DB is unreachable.
+func (s *server) health(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.pool.Ping(r.Context()); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable,
+			map[string]any{"service": serviceName, "ok": false, "db": "down"})
+		return
+	}
+	writeJSON(w, http.StatusOK,
+		map[string]any{"service": serviceName, "ok": true, "db": "ok"})
 }
 
 func (s *server) healthz(w http.ResponseWriter, r *http.Request) {

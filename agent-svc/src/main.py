@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import queue
 import threading
 import time
@@ -13,6 +14,8 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+import config
+import logsetup
 from config import DATABASE_URL
 from graph import workflow
 from llm import embeddings, resolver
@@ -22,10 +25,14 @@ from tools import search as search_tool
 
 # Application INFO lines (workflow: per-turn tokens, skip-gate, extract) go
 # nowhere without a root handler — uvicorn only configures its own loggers. One
-# line makes the skip-gate's effect measurable, as workflow.py's comments promise.
-logging.basicConfig(level=logging.INFO)
+# call makes the skip-gate's effect measurable, as workflow.py's comments
+# promise, and emits every line as JSON with the same field names as the Go
+# services (service/request_id/user_id/...).
+logsetup.setup_logging()
 
 app = FastAPI(title="agent-svc")
+# One access line per request + the X-Request-Id the gateway stamped on the way in.
+app.add_middleware(logsetup.AccessLogMiddleware)
 
 REAP_INTERVAL_SECONDS = 24 * 60 * 60  # daily: bounding growth, not a hot path.
 
@@ -62,10 +69,59 @@ def _regen_portraits() -> None:
 
 @app.on_event("startup")
 def _startup() -> None:
+    # Fail fast: without these the service boots and then fails on the first
+    # chat turn ("no active credential") far away from the actual cause.
+    # Raising here aborts uvicorn with a non-zero exit.
+    missing = [
+        name
+        for name, value in (
+            ("DATABASE_URL", config.DATABASE_URL),
+            ("INTERNAL_TOKEN", config.INTERNAL_TOKEN),
+        )
+        if not value
+    ]
+    if missing:
+        logging.error(
+            "missing required configuration", extra={"fields": {"vars": ",".join(missing)}}
+        )
+        raise RuntimeError(f"missing required configuration: {','.join(missing)}")
+
+    # ONE line with the resolved critical config, so drift between services is
+    # visible at boot instead of costing an afternoon. Secrets are SET/UNSET
+    # only, and DATABASE_URL is never printed — it embeds the password.
+    logging.info(
+        "config",
+        extra={
+            "fields": {
+                "port": os.environ.get("AGENT_SVC_PORT", "8000"),
+                "user_svc_url": config.USER_SVC_URL,
+                "conv_svc_url": config.CONV_SVC_URL,
+                "system_config_uid": config.SYSTEM_CONFIG_UID,
+                "embedding_model": config.EMBEDDING_MODEL,
+                "ollama_base_url": config.OLLAMA_BASE_URL,
+                "openrouter_base_url": config.OPENROUTER_BASE_URL,
+                "ollama_num_ctx": config.OLLAMA_NUM_CTX,
+                "search_base_url": config.SEARCH_BASE_URL,
+                "web_search": search_tool.enabled(),
+                "database_url": logsetup.secret_state(config.DATABASE_URL),
+                "internal_token": logsetup.secret_state(config.INTERNAL_TOKEN),
+                "search_api_key": logsetup.secret_state(config.SEARCH_API_KEY),
+            }
+        },
+    )
+
     # Warm the encoder at boot, not on the first request.
     embeddings.warm()
     # The write side of the valid_until contract: one pass now, then daily.
     threading.Thread(target=_reaper_loop, daemon=True).start()
+
+
+@app.get("/health")
+def health():
+    """The uniform /health every Raphael service answers: same shape, same field
+    names, so one loop can check all four. Deliberately cheap — this service owns
+    no pool; /healthz is the dependency-aware probe that dials Postgres."""
+    return {"service": logsetup.SERVICE, "ok": True}
 
 
 @app.get("/healthz")
@@ -162,7 +218,13 @@ def chat(body: ChatBody):
         "emit": emit,
     }
 
+    # A new thread starts with an EMPTY context, so the correlation id has to be
+    # carried over by hand — otherwise every workflow log line for the most
+    # interesting request in the system (the chat turn) is un-traceable.
+    rid = logsetup.request_id_var.get()
+
     def run():
+        logsetup.request_id_var.set(rid)
         try:
             workflow.run(state)
         except Exception as e:  # last-resort guard
