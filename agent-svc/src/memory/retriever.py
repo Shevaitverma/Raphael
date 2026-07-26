@@ -183,13 +183,19 @@ def retrieve(user_id: str, query: str, mem_budget: int, prof_budget: int, k: int
     return out
 
 
-def _bump(cur, table: str, user_id: str, ids) -> None:
+def _bump(cur, table: str, user_id: str, ids, source_message_id=None) -> None:
     # Re-hearing: the world re-asserted this memory (a note dedup-hit, a fact
     # upsert). `table` is a module-level literal at every call site, never input.
+    #
+    # A re-hearing is also the second chance to record provenance: the row the
+    # dedup hit may have been written while conv-svc was down (NULL). COALESCE,
+    # never overwrite — this turn's id may itself be NULL, and a plain assignment
+    # would erase good provenance on the next degraded turn.
     cur.execute(
-        f"UPDATE {table} SET times_seen = times_seen + 1, last_seen = now() "
+        f"UPDATE {table} SET times_seen = times_seen + 1, last_seen = now(), "
+        "source_message_id = COALESCE(source_message_id, %s::uuid) "
         "WHERE id = ANY(%s::uuid[]) AND user_id = %s",
-        ([str(i) for i in ids], user_id),
+        (source_message_id, [str(i) for i in ids], user_id),
     )
 
 
@@ -304,7 +310,13 @@ def write_facts(user_id: str, triples: list[dict], source_message_id) -> int:
                            times_seen = facts.times_seen + 1,
                            last_seen  = now(),
                            confidence = LEAST(1.0, GREATEST(facts.confidence,
-                                                            EXCLUDED.confidence) + 0.02)""",
+                                                            EXCLUDED.confidence) + 0.02),
+                           -- ON CONFLICT is the common path for a returning user,
+                           -- so without this a fact first heard while conv-svc was
+                           -- down stays NULL forever. COALESCE, not assignment:
+                           -- EXCLUDED is NULL on a degraded turn and would wipe it.
+                           source_message_id = COALESCE(facts.source_message_id,
+                                                        EXCLUDED.source_message_id)""",
                     [
                         (
                             user_id,
@@ -357,7 +369,7 @@ def write_notes(user_id: str, notes: list[dict], source_message_id) -> int:
                     )
                     hit = cur.fetchone()
                     if hit and hit[1] < NOTE_DEDUP_DIST:
-                        _bump(cur, "memories", user_id, [hit[0]])
+                        _bump(cur, "memories", user_id, [hit[0]], source_message_id)
                         continue
                     cur.execute(
                         """INSERT INTO memories (user_id, content, kind, confidence,

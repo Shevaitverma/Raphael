@@ -759,7 +759,7 @@ def _post_message(client, conversation_id, user_id, role, content, tool_calls=No
 def persist_node(state: GState) -> dict:
     if state.get("failed"):
         return {}
-    mid = None
+    mid, why = None, None
     try:
         with httpx.Client(timeout=10.0) as client:
             uid = state["user_id"]
@@ -774,8 +774,18 @@ def persist_node(state: GState) -> dict:
             if r.status_code < 300:
                 data = r.json()
                 mid = data.get("id") or data.get("message_id")
-    except Exception:
+            else:
+                why = f"conv-svc {r.status_code} {r.text[:200]!r}"
+    except Exception as e:
         mid = None
+        why = f"{type(e).__name__}: {e}"
+    if mid is None:
+        # The ONLY place that knows why provenance died. Everything downstream
+        # treats a missing id as "nothing memorable happened": extraction still
+        # runs and writes source_message_id = NULL, so a conv-svc that 404s every
+        # turn is indistinguishable from a quiet user unless this line exists.
+        _log.warning("persist: no message row, provenance NULL (%s)",
+                     why or "2xx body carried no id")
     # Two ids, deliberately. message_id is client-facing and may be a locally
     # minted uuid so the turn still completes when conv-svc is down.
     # persisted_message_id is the REAL row or None: it is an FK
@@ -859,3 +869,81 @@ def run(state: dict) -> None:
     state.update(generate_node(state))
     state.update(persist_node(state))
     state.update(done_node(state))
+
+
+def demo() -> None:
+    """The provenance chain end to end: conv-svc's 201 -> persisted_message_id ->
+    write_facts/write_notes.
+
+    Worth its own check because EVERY link is silent when it breaks — persist_node
+    swallows the HTTP failure, extract() swallows everything, and the only symptom
+    is a NULL column in a table nobody reads. Both halves matter: the real id must
+    arrive, and a dead conv-svc must still let the batch through with None.
+    """
+    MID = "11111111-1111-1111-1111-111111111111"
+
+    class _Resp:
+        # conv-svc/handlers.go handleCreateMessage: 201 + the Message struct,
+        # whose id is serialized as "id".
+        status_code, text = 201, ""
+
+        def json(self):
+            return {"id": MID, "role": "assistant", "content": "a"}
+
+    class _Client:
+        def __init__(self, resp):
+            self._r = resp
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, params=None, json=None):
+            if self._r is None:
+                raise ConnectionError("conv-svc down")
+            return self._r
+
+    seen: dict = {}
+    saved = (httpx.Client, retriever.touch, retriever.write_facts, retriever.write_notes,
+             resolver.extractor, extractor_mod.extract)
+    try:
+        retriever.touch = lambda u, ids: None
+        retriever.write_facts = lambda u, items, mid: seen.__setitem__("facts", mid)
+        retriever.write_notes = lambda u, items, mid: seen.__setitem__("notes", mid)
+        resolver.extractor = lambda u: object()
+        extractor_mod.extract = lambda p, m, a: [{"kind": "triple"}, {"kind": "note"}]
+        # A real sentence: extract.py's skip-gate drops any message with no word of
+        # length >= 3, so "hi" would prove nothing at all.
+        base = {"user_id": "u", "conversation_id": "c", "message": "I work at Acme",
+                "answer": "Noted.", "injected_ids": []}
+
+        # HAPPY PATH: the row exists, so both writers get the REAL id.
+        httpx.Client = lambda **k: _Client(_Resp())
+        state = dict(base)
+        state.update(persist_node(state))  # exactly what run() does
+        extract(state)
+        assert state["persisted_message_id"] == MID, state
+        assert state["message_id"] == MID  # no local uuid when the row is real
+        assert seen == {"facts": MID, "notes": MID}, seen
+
+        # DEGRADED: conv-svc down. persisted_message_id must be None (a fabricated
+        # uuid violates facts_source_message_id_fkey and loses the whole batch) and
+        # extraction must still run — NULL provenance beats no memory.
+        seen.clear()
+        httpx.Client = lambda **k: _Client(None)
+        state = dict(base)
+        state.update(persist_node(state))
+        extract(state)
+        assert state["persisted_message_id"] is None
+        assert state["message_id"] and state["message_id"] != MID  # local uuid, client-facing only
+        assert seen == {"facts": None, "notes": None}, seen
+    finally:
+        (httpx.Client, retriever.touch, retriever.write_facts, retriever.write_notes,
+         resolver.extractor, extractor_mod.extract) = saved
+    print("workflow.demo OK")
+
+
+if __name__ == "__main__":
+    demo()
