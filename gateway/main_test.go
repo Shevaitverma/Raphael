@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -12,9 +13,12 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // testConfig returns a Config wired to real (running) Postgres + Redis and to
@@ -63,7 +67,47 @@ func login(t *testing.T, app interface {
 	if out.Token == "" || out.User.ID == "" {
 		t.Fatalf("dev-login returned empty token/user: %+v", out)
 	}
+	t.Cleanup(func() { dropTestUser(t, email, out.User.ID) })
 	return out.Token, out.User.ID
+}
+
+// protectedEmails must never be deleted by a test. dev-login UPSERTS by email, so
+// without this guard a test that logged in as a real address would have its
+// cleanup delete that real account (and CASCADE its facts, memories and chats).
+var protectedEmails = map[string]bool{
+	"dev@raphael.local":         true,
+	"system@raphael.local":      true,
+	"shevaitverma333@gmail.com": true,
+}
+
+var (
+	testPoolOnce sync.Once
+	testPool     *pgxpool.Pool
+)
+
+// dropTestUser removes the throwaway user a test minted. Without it every
+// `go test ./...` leaked a row into users — 26 fixture accounts had piled up and
+// were cluttering the admin user list. Best-effort: a cleanup failure logs and
+// never fails the test it is attached to.
+func dropTestUser(t *testing.T, email, userID string) {
+	t.Helper()
+	if userID == "" || protectedEmails[strings.ToLower(strings.TrimSpace(email))] {
+		return
+	}
+	testPoolOnce.Do(func() {
+		if p, err := pgxpool.New(context.Background(), LoadConfig().DatabaseURL); err == nil {
+			testPool = p
+		}
+	})
+	if testPool == nil {
+		return
+	}
+	// By id, not by pattern: only the exact row this test created. Dependent rows
+	// go with it via ON DELETE CASCADE.
+	if _, err := testPool.Exec(context.Background(),
+		`DELETE FROM users WHERE id = $1`, userID); err != nil {
+		t.Logf("cleanup test user %s: %v", userID, err)
+	}
 }
 
 // Liveness must be 200 regardless of downstream health — its upstreams here all
