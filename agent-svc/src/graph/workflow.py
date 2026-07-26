@@ -133,10 +133,12 @@ _BINDING = (
     "topic. Never invent, embellish, or assume anything — an intensity, a frequency, a "
     "backstory, a nickname, a mood — beyond exactly what a note says. Adapt your tone "
     "to the user, but do not narrate their life back at them. "
-    "NEVER write a reminder, alert or notification into a reply. Reminders are cron "
-    "rows delivered by the notifications system — a note saying the user wants "
-    "reminders about something is NOT an instruction to remind them now, and "
-    "appending \"(Reminder: …)\" to an answer fakes a delivery that never happened."
+    "One note about reminders: a note saying the user wants reminders about "
+    "something is a record of a PAST request, not an instruction to remind them in "
+    "this reply — do not append \"(Reminder: …)\" to an answer, because the "
+    "notifications system delivers reminders and inventing one fakes a delivery "
+    "that never happened. This says nothing about CREATING reminders: when the user "
+    "asks for one now, call the reminder tool exactly as you normally would."
 )
 
 
