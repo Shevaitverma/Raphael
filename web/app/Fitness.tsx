@@ -66,8 +66,15 @@ function todayStr(): string {
 // "" → undefined; a numeric string → the number. Keeps empty inputs off the wire.
 const num = (s: string) => (s.trim() === "" ? undefined : Number(s));
 
+// text-base (16px) on phone or iOS Safari zooms the page on focus; min-h-11 keeps
+// every control a 44px touch target. Widths stay at the call site.
 const field =
-  "rounded-lg border border-edge bg-raised px-3 py-2 text-sm text-on-surface placeholder:text-faint outline-none focus:border-accent";
+  "min-h-11 rounded-lg border border-edge bg-raised px-3 py-2 text-base text-on-surface placeholder:text-faint outline-none focus:border-accent sm:text-sm";
+const select =
+  "min-h-11 rounded-lg border border-edge bg-raised px-2 py-2 text-base text-on-surface outline-none focus:border-accent sm:text-sm";
+// Icon buttons: 44px hit area, and visible on touch (hover-reveal never fires there).
+const iconBtn =
+  "flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-faint transition-colors hover:bg-raised disabled:opacity-40 sm:opacity-0 sm:focus:opacity-100 sm:group-hover:opacity-100";
 
 export default function Fitness() {
   const { token, failed: onFail } = useAuthed();
@@ -124,25 +131,29 @@ export default function Fitness() {
   const loading = workoutsQ.isPending;
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
-      <div className="mx-auto flex min-h-0 max-w-3xl flex-col gap-6">
+    <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-6 sm:px-4 sm:py-8">
+      <div className="mx-auto flex min-h-0 min-w-0 max-w-3xl flex-col gap-6">
         <div>
-          <h2 className="text-2xl font-semibold text-on-surface">Fitness</h2>
+          <h2 className="text-xl font-semibold text-on-surface sm:text-2xl">Fitness</h2>
           <p className="mt-2 text-sm text-muted">
             Workouts, body metrics, nutrition and goals — all in one place. You can
             also just ask sage in chat: “log a 30 minute run”.
           </p>
         </div>
 
-        {/* Pill tab switcher */}
-        <nav className="flex flex-wrap gap-1.5" aria-label="Fitness sections">
+        {/* Pill tab switcher — a snap-scrolling strip on phone (6 tabs never fit
+            320px), a plain wrapping row once there's room. */}
+        <nav
+          className="-mx-1 flex snap-x snap-proximity gap-1.5 overflow-x-auto px-1 pb-1 sm:mx-0 sm:flex-wrap sm:overflow-x-visible sm:px-0 sm:pb-0"
+          aria-label="Fitness sections"
+        >
           {TABS.map((t) => (
             <button
               key={t}
               type="button"
               onClick={() => setTab(t)}
               aria-current={tab === t ? "page" : undefined}
-              className={`rounded-full px-3 py-1.5 text-sm transition-colors ${
+              className={`inline-flex min-h-11 shrink-0 snap-start items-center rounded-full px-4 text-sm transition-colors ${
                 tab === t
                   ? "bg-accent text-on-accent"
                   : "text-muted hover:bg-raised hover:text-on-surface"
@@ -159,7 +170,7 @@ export default function Fitness() {
             <button
               type="button"
               onClick={refetchAll}
-              className="rounded-md border border-edge bg-raised px-3 py-1 text-xs text-on-surface transition-colors hover:bg-panel"
+              className="min-h-11 rounded-md border border-edge bg-raised px-4 py-1 text-sm text-on-surface transition-colors hover:bg-panel"
             >
               Retry
             </button>
@@ -248,15 +259,16 @@ function StatTile({
   accent?: string;
 }) {
   return (
-    <div className="rounded-xl border border-edge bg-panel p-3">
+    <div className="min-w-0 rounded-xl border border-edge bg-panel p-3">
       <p className="text-xs text-faint">{label}</p>
+      {/* break-words, not truncate: a number that gets cut off is worse than one that wraps. */}
       <p
-        className="mt-1 truncate text-lg font-semibold tabular-nums"
+        className="mt-1 break-words text-lg font-semibold tabular-nums"
         style={{ color: accent ?? "var(--color-on-surface)" }}
       >
         {value}
       </p>
-      {sub != null && <p className="mt-0.5 truncate text-[11px] text-muted">{sub}</p>}
+      {sub != null && <p className="mt-0.5 break-words text-[11px] text-muted">{sub}</p>}
     </div>
   );
 }
@@ -295,7 +307,7 @@ function OverviewTab({
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
         <StatTile
           label="This week"
           value={stats ? stats.workouts_this_week : "—"}
@@ -370,9 +382,9 @@ function FrequencyChart({ weekly }: { weekly: { week_start: string; count: numbe
       {weekly.length === 0 ? (
         <p className="text-center text-sm text-faint">No workouts yet.</p>
       ) : (
-        <div className="flex h-24 items-end gap-1.5">
+        <div className="flex h-24 items-end gap-1 sm:gap-1.5">
           {weekly.map((w) => (
-            <div key={w.week_start} className="flex flex-1 flex-col items-center gap-1" title={`${dateLabel(w.week_start)}: ${w.count}`}>
+            <div key={w.week_start} className="flex min-w-0 flex-1 flex-col items-center gap-1" title={`${dateLabel(w.week_start)}: ${w.count}`}>
               <div
                 className="w-full rounded-t bg-accent/70"
                 style={{ height: `${(w.count / max) * 100}%`, minHeight: w.count > 0 ? 3 : 0 }}
@@ -434,7 +446,7 @@ function WorkoutRow({
           }}
           disabled={busy}
           aria-label={`Delete workout: ${w.title}`}
-          className="shrink-0 rounded-md p-1 text-faint opacity-0 transition-colors hover:bg-raised hover:text-error focus:opacity-100 group-hover:opacity-100 disabled:opacity-40"
+          className={`-my-1 hover:text-error ${iconBtn}`}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5" aria-hidden="true">
             <path d="M18 6 6 18" />
@@ -515,7 +527,7 @@ function FilterPill({
     <button
       type="button"
       onClick={onClick}
-      className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs capitalize transition-colors ${
+      className={`flex min-h-11 shrink-0 items-center gap-1.5 rounded-full border px-3.5 text-sm capitalize transition-colors ${
         active ? "border-accent bg-accent/10 text-on-surface" : "border-edge text-muted hover:bg-raised"
       }`}
     >
@@ -526,6 +538,15 @@ function FilterPill({
 }
 
 function WorkoutDetail({ workout: w, onClose }: { workout: Workout; onClose: () => void }) {
+  // Escape closes, same as the backdrop. Window-level so it works wherever focus is.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const grid: [string, string][] = [];
   if (w.duration_min != null) grid.push(["Duration", `${w.duration_min} min`]);
   if (w.perceived_effort != null) grid.push(["RPE", `${w.perceived_effort}/10`]);
@@ -535,18 +556,29 @@ function WorkoutDetail({ workout: w, onClose }: { workout: Workout; onClose: () 
   if (w.avg_heart_rate != null) grid.push(["Avg HR", `${w.avg_heart_rate} bpm`]);
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end" role="dialog" aria-modal="true" aria-label="Workout detail">
+    // Bottom sheet on phone, right-hand slide-over from md: up.
+    <div
+      className="fixed inset-0 z-40 flex items-end justify-center md:items-stretch md:justify-end"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Workout detail"
+    >
       <button type="button" aria-label="Close" onClick={onClose} className="absolute inset-0 bg-black/50" />
-      <div className="relative h-full w-full max-w-md overflow-y-auto border-l border-edge bg-panel p-5">
+      <div
+        className="relative max-h-[85dvh] w-full overflow-y-auto rounded-t-2xl border-t border-edge bg-panel p-4 sm:p-5 md:h-full md:max-h-none md:max-w-md md:rounded-none md:border-l md:border-t-0"
+        style={{ paddingBottom: "calc(1rem + env(safe-area-inset-bottom))" }}
+      >
+        {/* grab handle — phone only, purely a visual affordance for the sheet */}
+        <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-edge md:hidden" aria-hidden="true" />
         <div className="flex items-start gap-2">
           <CategoryBadge category={w.category} />
           <h3 className="min-w-0 flex-1 break-words text-lg font-semibold text-on-surface">{w.title}</h3>
           <button
             onClick={onClose}
             aria-label="Close"
-            className="shrink-0 rounded-md p-1 text-faint transition-colors hover:bg-raised hover:text-on-surface"
+            className="-mr-2 -mt-2 flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-faint transition-colors hover:bg-raised hover:text-on-surface"
           >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5" aria-hidden="true">
               <path d="M18 6 6 18" />
               <path d="m6 6 12 12" />
             </svg>
@@ -660,12 +692,12 @@ function LogWorkoutForm({ onCreate }: { onCreate: (p: WorkoutPayload) => void })
         className={`w-full ${field}`}
       />
 
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
         <select
           value={category}
           onChange={(e) => setCategory(e.target.value)}
           aria-label="Category"
-          className="rounded-lg border border-edge bg-raised px-2 py-2 text-sm capitalize text-on-surface outline-none focus:border-accent"
+          className={`w-full capitalize sm:w-auto ${select}`}
         >
           {CATEGORIES.map((c) => (
             <option key={c} value={c}>
@@ -674,17 +706,17 @@ function LogWorkoutForm({ onCreate }: { onCreate: (p: WorkoutPayload) => void })
           ))}
         </select>
 
-        <input type="number" min="0" value={duration} onChange={(e) => setDuration(e.target.value)} placeholder="min" aria-label="Duration (minutes)" className={`w-20 ${field}`} />
-        <input type="number" min="0" value={calories} onChange={(e) => setCalories(e.target.value)} placeholder="cal" aria-label="Calories" className={`w-20 ${field}`} />
+        <input type="number" min="0" value={duration} onChange={(e) => setDuration(e.target.value)} placeholder="min" aria-label="Duration (minutes)" className={`w-full sm:w-20 ${field}`} />
+        <input type="number" min="0" value={calories} onChange={(e) => setCalories(e.target.value)} placeholder="cal" aria-label="Calories" className={`w-full sm:w-20 ${field}`} />
         {showDistance && (
-          <input type="number" min="0" step="0.1" value={distance} onChange={(e) => setDistance(e.target.value)} placeholder="km" aria-label="Distance (km)" className={`w-20 ${field}`} />
+          <input type="number" min="0" step="0.1" value={distance} onChange={(e) => setDistance(e.target.value)} placeholder="km" aria-label="Distance (km)" className={`w-full sm:w-20 ${field}`} />
         )}
-        <input type="number" min="1" max="10" value={rpe} onChange={(e) => setRpe(e.target.value)} placeholder="RPE" aria-label="Perceived effort (1-10)" className={`w-20 ${field}`} />
+        <input type="number" min="1" max="10" value={rpe} onChange={(e) => setRpe(e.target.value)} placeholder="RPE" aria-label="Perceived effort (1-10)" className={`w-full sm:w-20 ${field}`} />
 
         <button
           type="submit"
           disabled={!title.trim()}
-          className="ml-auto rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent/90 disabled:opacity-40"
+          className="min-h-11 w-full rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent/90 disabled:opacity-40 sm:ml-auto sm:w-auto"
         >
           Log
         </button>
@@ -739,7 +771,7 @@ function MetricsTab({
               .slice()
               .reverse()
               .map((m) => (
-                <li key={m.id} className="flex items-center justify-between rounded-xl border border-edge bg-panel px-3 py-2 text-sm">
+                <li key={m.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 rounded-xl border border-edge bg-panel px-3 py-2 text-sm">
                   <span className="tabular-nums text-on-surface">
                     {m.value} {m.unit ?? ""}
                   </span>
@@ -779,7 +811,9 @@ function LineChart({ series }: { series: Metric[] }) {
         <span>{max}</span>
         <span>{min}</span>
       </div>
-      <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-32 w-full" aria-hidden="true">
+      {/* viewBox + w-full: the plot area is fluid; preserveAspectRatio=none lets the
+          fixed height stand, and non-scaling-stroke keeps the line 1.2px at any width. */}
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-32 w-full sm:h-40" aria-hidden="true">
         <polyline points={line} fill="none" stroke="var(--color-accent)" strokeWidth={1.2} vectorEffect="non-scaling-stroke" />
         {pts.map((p, i) => (
           <circle key={i} cx={p.x} cy={p.y} r={1.6} fill="var(--color-accent-strong)" vectorEffect="non-scaling-stroke" />
@@ -810,15 +844,15 @@ function QuickWeightForm({ onCreate }: { onCreate: (value: number, unit: string)
         e.preventDefault();
         submit();
       }}
-      className="flex flex-wrap items-center gap-2 rounded-xl border border-edge bg-panel p-4"
+      className="flex flex-col gap-2 rounded-xl border border-edge bg-panel p-4 sm:flex-row sm:flex-wrap sm:items-center"
     >
-      <h3 className="mr-auto text-sm font-medium text-muted">Quick log weight</h3>
-      <input type="number" min="0" step="0.1" value={value} onChange={(e) => setValue(e.target.value)} placeholder="weight" aria-label="Weight" className={`w-24 ${field}`} />
-      <select value={unit} onChange={(e) => setUnit(e.target.value)} aria-label="Unit" className="rounded-lg border border-edge bg-raised px-2 py-2 text-sm text-on-surface outline-none focus:border-accent">
+      <h3 className="text-sm font-medium text-muted sm:mr-auto">Quick log weight</h3>
+      <input type="number" min="0" step="0.1" value={value} onChange={(e) => setValue(e.target.value)} placeholder="weight" aria-label="Weight" className={`w-full sm:w-24 ${field}`} />
+      <select value={unit} onChange={(e) => setUnit(e.target.value)} aria-label="Unit" className={`w-full sm:w-auto ${select}`}>
         <option value="kg">kg</option>
         <option value="lb">lb</option>
       </select>
-      <button type="submit" disabled={value.trim() === ""} className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent/90 disabled:opacity-40">
+      <button type="submit" disabled={value.trim() === ""} className="min-h-11 w-full rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent/90 disabled:opacity-40 sm:w-auto">
         Save
       </button>
     </form>
@@ -890,7 +924,7 @@ function NutritionTab({
                   onClick={() => onDelete(m.id)}
                   disabled={busy === m.id}
                   aria-label={`Delete meal: ${m.items_text}`}
-                  className="shrink-0 rounded-md p-1 text-faint opacity-0 transition-colors hover:bg-raised hover:text-error focus:opacity-100 group-hover:opacity-100 disabled:opacity-40"
+                  className={`-my-1 hover:text-error ${iconBtn}`}
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5" aria-hidden="true">
                     <path d="M18 6 6 18" />
@@ -923,7 +957,9 @@ function MacroDonut({ today }: { today: NutritionStats["today"] | undefined }) {
   let offset = 0;
   return (
     <div className="flex flex-col items-center gap-4 rounded-xl border border-edge bg-panel p-4 sm:flex-row sm:justify-center sm:gap-8">
-      <svg viewBox="0 0 100 100" className="h-36 w-36 -rotate-90" aria-hidden="true">
+      {/* viewBox + w-* + h-auto + max-w-full: the donut scales with its column and
+          can never be wider than the card. */}
+      <svg viewBox="0 0 100 100" className="h-auto w-36 max-w-full -rotate-90 sm:w-40" aria-hidden="true">
         <circle cx="50" cy="50" r={r} fill="none" stroke="var(--color-raised)" strokeWidth={10} />
         {total > 0 &&
           grams.map((m) => {
@@ -952,7 +988,7 @@ function MacroDonut({ today }: { today: NutritionStats["today"] | undefined }) {
           kcal
         </text>
       </svg>
-      <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap justify-center gap-x-4 gap-y-2 sm:flex-col sm:justify-start">
         {grams.map((m) => (
           <div key={m.key} className="flex items-center gap-2 text-sm">
             <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: m.color }} aria-hidden="true" />
@@ -1042,7 +1078,7 @@ function GoalCard({
           <button
             onClick={onAchieve}
             disabled={busy}
-            className="shrink-0 rounded-md px-2 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-success disabled:opacity-40"
+            className="-my-1 flex min-h-11 shrink-0 items-center rounded-md px-2 text-xs text-muted transition-colors hover:bg-raised hover:text-success disabled:opacity-40"
           >
             Mark done
           </button>
@@ -1051,7 +1087,7 @@ function GoalCard({
           onClick={onDelete}
           disabled={busy}
           aria-label={`Delete goal: ${g.title}`}
-          className="shrink-0 rounded-md p-1 text-faint opacity-0 transition-colors hover:bg-raised hover:text-error focus:opacity-100 group-hover:opacity-100 disabled:opacity-40"
+          className={`-my-1 hover:text-error ${iconBtn}`}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5" aria-hidden="true">
             <path d="M18 6 6 18" />
@@ -1126,12 +1162,12 @@ function NewGoalForm({ onCreate }: { onCreate: (p: GoalPayload) => void }) {
       className="flex flex-col gap-3 rounded-xl border border-edge bg-panel p-4"
     >
       <h3 className="text-sm font-medium text-muted">New goal</h3>
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
         <select
           value={goalType}
           onChange={(e) => setGoalType(e.target.value as Goal["goal_type"])}
           aria-label="Goal type"
-          className="rounded-lg border border-edge bg-raised px-2 py-2 text-sm capitalize text-on-surface outline-none focus:border-accent"
+          className={`w-full capitalize sm:w-auto ${select}`}
         >
           {GOAL_TYPES.map((t) => (
             <option key={t} value={t}>
@@ -1139,27 +1175,27 @@ function NewGoalForm({ onCreate }: { onCreate: (p: GoalPayload) => void }) {
             </option>
           ))}
         </select>
-        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Goal title" className={`min-w-40 flex-1 ${field}`} />
+        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Goal title" className={`w-full sm:min-w-40 sm:flex-1 ${field}`} />
       </div>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <input type="number" step="0.1" value={target} onChange={(e) => setTarget(e.target.value)} placeholder="target" aria-label="Target value" className={`w-24 ${field}`} />
-        <input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="unit" aria-label="Target unit" className={`w-24 ${field}`} />
-        <label className="flex items-center gap-1 text-xs text-muted">
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+        <input type="number" step="0.1" value={target} onChange={(e) => setTarget(e.target.value)} placeholder="target" aria-label="Target value" className={`w-full sm:w-24 ${field}`} />
+        <input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="unit" aria-label="Target unit" className={`w-full sm:w-24 ${field}`} />
+        <label className="flex w-full items-center gap-2 text-xs text-muted sm:w-auto">
           by
-          <input type="date" value={deadline} onChange={(e) => setDeadline(e.target.value)} aria-label="Deadline" className={`${field} [color-scheme:dark]`} />
+          <input type="date" value={deadline} onChange={(e) => setDeadline(e.target.value)} aria-label="Deadline" className={`min-w-0 flex-1 sm:flex-none ${field} [color-scheme:dark]`} />
         </label>
       </div>
 
       {isMetric && (
-        <div className="flex flex-wrap items-center gap-2">
-          <input value={metricType} onChange={(e) => setMetricType(e.target.value)} placeholder="metric (e.g. weight)" aria-label="Metric type" className={`w-40 ${field}`} />
-          <input type="number" step="0.1" value={start} onChange={(e) => setStart(e.target.value)} placeholder="starting value" aria-label="Starting value" className={`w-32 ${field}`} />
+        <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+          <input value={metricType} onChange={(e) => setMetricType(e.target.value)} placeholder="metric (e.g. weight)" aria-label="Metric type" className={`w-full sm:w-40 ${field}`} />
+          <input type="number" step="0.1" value={start} onChange={(e) => setStart(e.target.value)} placeholder="starting value" aria-label="Starting value" className={`w-full sm:w-32 ${field}`} />
           <select
             value={direction}
             onChange={(e) => setDirection(e.target.value as "" | "gte" | "lte")}
             aria-label="Direction"
-            className="rounded-lg border border-edge bg-raised px-2 py-2 text-sm text-on-surface outline-none focus:border-accent"
+            className={`w-full sm:w-auto ${select}`}
           >
             <option value="">Auto</option>
             <option value="lte">Decrease</option>
@@ -1171,7 +1207,7 @@ function NewGoalForm({ onCreate }: { onCreate: (p: GoalPayload) => void }) {
       <button
         type="submit"
         disabled={!title.trim() || target.trim() === ""}
-        className="ml-auto rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent/90 disabled:opacity-40"
+        className="min-h-11 w-full rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent/90 disabled:opacity-40 sm:ml-auto sm:w-auto"
       >
         Add goal
       </button>

@@ -16,8 +16,8 @@ export default function LoginScreen({
   error: string | null;
 }) {
   return (
-    <div className="flex h-screen flex-col items-center justify-center bg-surface px-4 font-sans text-on-surface">
-      <div className="flex w-full max-w-sm flex-col items-center gap-4 rounded-xl border border-edge bg-panel px-8 py-10 text-center">
+    <div className="flex min-h-dvh flex-col items-center justify-center bg-surface px-4 py-8 font-sans text-on-surface">
+      <div className="flex w-full max-w-sm flex-col items-center gap-4 rounded-xl border border-edge bg-panel px-5 py-8 text-center sm:px-8 sm:py-10">
         <h1 className="font-display text-3xl font-semibold tracking-wide text-accent">
           Raphael
         </h1>
@@ -29,9 +29,9 @@ export default function LoginScreen({
         <button
           onClick={onGoogleLogin}
           disabled={loading}
-          className="mt-2 flex w-full items-center justify-center gap-2 rounded-md border border-edge bg-raised px-5 py-2.5 text-sm font-medium text-on-surface transition-colors hover:bg-panel disabled:opacity-40"
+          className="mt-2 flex min-h-11 w-full items-center justify-center gap-2 rounded-md border border-edge bg-raised px-4 py-3 text-sm font-medium text-on-surface transition-colors hover:bg-panel disabled:opacity-40"
         >
-          <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true" className="shrink-0">
             <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
             <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" />
             <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z" />
@@ -49,7 +49,7 @@ export default function LoginScreen({
             <button
               onClick={onDevLogin}
               disabled={loading}
-              className="w-full rounded-md bg-accent px-5 py-2.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
+              className="min-h-11 w-full rounded-md bg-accent px-4 py-3 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
             >
               {loading ? "Signing in…" : "Dev login"}
             </button>
@@ -57,7 +57,7 @@ export default function LoginScreen({
         )}
 
         {error && (
-          <p className="max-w-md text-center text-sm text-error">{error}</p>
+          <p className="w-full break-words text-center text-sm text-error">{error}</p>
         )}
       </div>
     </div>

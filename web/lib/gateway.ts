@@ -854,7 +854,10 @@ export type GraphNode = {
 export type GraphEdge = {
   // The facts row id — the only stable per-edge handle, and the only safe unit
   // of deletion (a node id is normalized text shared by many facts).
-  id: string;
+  // OPTIONAL on purpose: a server that predates the governance API sends no id.
+  // Such an edge is still shown (it is a real belief) but cannot be forgotten,
+  // so every delete path must check for it rather than assume it exists.
+  id?: string;
   source: string;
   target: string;
   label: string;
@@ -914,7 +917,13 @@ function toEdge(raw: unknown): GraphEdge | null {
   const source = str(e.source);
   const target = str(e.target);
   const label = str(e.label);
-  if (!id || !source || !target || !label) return null;
+  // An edge NEEDS source/target/label to be drawable at all — without those it is
+  // not a relationship and is dropped. `id` is NOT required: it only enables
+  // Forget. An older server (or one mid-deploy) sends no id, and dropping those
+  // edges hid the entire graph — the user saw an empty canvas and asked where
+  // their knowledge graph had gone. Fail closed on the destructive action, never
+  // on showing the user their own data: the UI hides Forget when id is absent.
+  if (!source || !target || !label) return null;
   return {
     id,
     source,

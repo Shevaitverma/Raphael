@@ -20,10 +20,10 @@ import {
   setSystemLifeboat,
   setUserRole,
   type Credential,
-  type NewCredential,
   type User,
 } from "@/lib/gateway";
 import { useAuthed } from "./auth/AuthProvider";
+import AddProviderForm from "./settings/AddProviderForm";
 
 // Seeded sentinel accounts that must never be demoted or deleted from the UI:
 // the human's real data-holding account (…001) and the system-config owner whose
@@ -57,9 +57,9 @@ export function userGuards(
 
 export default function Admin() {
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
-      <div className="mx-auto flex max-w-2xl flex-col gap-10">
-        <div>
+    <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-6 md:py-8">
+      <div className="mx-auto flex max-w-2xl flex-col gap-8 md:gap-10">
+        <div className="pr-12 md:pr-0">
           <h1 className="text-2xl font-semibold text-on-surface">Admin</h1>
           <p className="mt-2 text-sm text-muted">
             Manage who may sign in, each person&apos;s role, and the system-wide model
@@ -158,19 +158,19 @@ function UsersSection() {
         </div>
       )}
 
-      <div className="flex gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row">
         <input
           type="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && add()}
           placeholder="invite person@example.com"
-          className="flex-1 rounded-md border border-edge bg-raised px-3 py-1.5 text-sm text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent"
+          className="min-h-11 w-full min-w-0 flex-1 rounded-md border border-edge bg-raised px-3 py-2 text-base text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent sm:text-sm"
         />
         <button
           onClick={add}
           disabled={busy === "__add__" || !email.trim()}
-          className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
+          className="min-h-11 shrink-0 rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
         >
           {busy === "__add__" ? "Inviting…" : "Invite"}
         </button>
@@ -188,10 +188,10 @@ function UsersSection() {
             return (
               <div
                 key={key}
-                className="flex items-center justify-between rounded-lg border border-dashed border-edge bg-panel px-3 py-2"
+                className="flex flex-col gap-2 rounded-lg border border-dashed border-edge bg-panel px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
               >
                 <div className="min-w-0">
-                  <span className="truncate text-sm text-on-surface">
+                  <span className="block break-words text-sm text-on-surface">
                     {u.email ?? u.id}
                   </span>
                   <div className="text-xs text-faint">
@@ -203,7 +203,7 @@ function UsersSection() {
                   onClick={() =>
                     void run(key, () => removeAllowedEmail(token, u.email ?? ""))
                   }
-                  className="shrink-0 rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-error disabled:opacity-40"
+                  className="min-h-11 shrink-0 self-start rounded-md border border-error/40 px-3 py-2 text-xs font-medium text-error transition-colors hover:bg-error/10 disabled:opacity-40 sm:self-auto"
                 >
                   Remove
                 </button>
@@ -216,18 +216,18 @@ function UsersSection() {
           return (
             <div
               key={u.id}
-              className="flex items-center justify-between rounded-lg border border-edge bg-panel px-3 py-2"
+              className="flex flex-col gap-2 rounded-lg border border-edge bg-panel px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
             >
               <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="truncate text-sm font-medium text-on-surface">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="break-words text-sm font-medium text-on-surface">
                     {u.email ?? u.id}
                   </span>
                   <span
                     className={
                       isAdmin
-                        ? "rounded-md bg-accent/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest text-accent"
-                        : "rounded-md bg-raised px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest text-muted"
+                        ? "rounded-md bg-accent/15 px-2 py-0.5 text-[11px] font-medium uppercase tracking-widest text-accent"
+                        : "rounded-md bg-raised px-2 py-0.5 text-[11px] font-medium uppercase tracking-widest text-muted"
                     }
                   >
                     {u.role ?? "member"}
@@ -239,7 +239,7 @@ function UsersSection() {
                 </div>
               </div>
 
-              <div className="flex shrink-0 items-center gap-2">
+              <div className="flex shrink-0 flex-wrap items-center gap-2">
                 <button
                   disabled={!g.canToggleRole || busy === u.id}
                   title={g.reason}
@@ -248,7 +248,7 @@ function UsersSection() {
                       setUserRole(token, u.id, isAdmin ? "member" : "admin"),
                     )
                   }
-                  className="rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40"
+                  className="min-h-11 rounded-md border border-edge px-3 py-2 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40"
                 >
                   {isAdmin ? "Demote" : "Promote"}
                 </button>
@@ -256,7 +256,7 @@ function UsersSection() {
                   disabled={!g.canRemove || busy === u.id}
                   title={g.reason}
                   onClick={() => void run(u.id, () => removeUser(token, u.id))}
-                  className="rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-error disabled:opacity-40"
+                  className="min-h-11 rounded-md border border-error/40 px-3 py-2 text-xs font-medium text-error transition-colors hover:bg-error/10 disabled:opacity-40"
                 >
                   Remove
                 </button>
@@ -344,20 +344,20 @@ function SystemProvidersSection() {
         {creds?.map((c) => (
           <div
             key={c.id}
-            className="flex items-center justify-between rounded-xl border border-edge bg-panel px-4 py-3"
+            className="flex flex-col gap-3 rounded-xl border border-edge bg-panel px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
           >
             <div className="min-w-0">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="font-medium text-on-surface">
                   {PROVIDER_LABEL[c.provider]}
                 </span>
                 {c.is_active && (
-                  <span className="rounded-md bg-accent/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest text-accent">
+                  <span className="rounded-md bg-accent/15 px-2 py-0.5 text-[11px] font-medium uppercase tracking-widest text-accent">
                     Active
                   </span>
                 )}
                 {c.is_lifeboat && (
-                  <span className="rounded-md bg-raised px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest text-muted">
+                  <span className="rounded-md bg-raised px-2 py-0.5 text-[11px] font-medium uppercase tracking-widest text-muted">
                     Fallback
                   </span>
                 )}
@@ -368,12 +368,12 @@ function SystemProvidersSection() {
               </div>
             </div>
 
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
               {!c.is_active && (
                 <button
                   disabled={busy === c.id}
                   onClick={() => void run(c.id, () => activateSystemProvider(token, c.id))}
-                  className="rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40"
+                  className="min-h-11 rounded-md border border-edge px-3 py-2 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40"
                 >
                   Use this
                 </button>
@@ -382,7 +382,7 @@ function SystemProvidersSection() {
                 <button
                   disabled={busy === c.id}
                   onClick={() => void run(c.id, () => clearSystemLifeboat(token, c.id))}
-                  className="rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40"
+                  className="min-h-11 rounded-md border border-edge px-3 py-2 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40"
                 >
                   Clear fallback
                 </button>
@@ -392,7 +392,7 @@ function SystemProvidersSection() {
                   <button
                     disabled={busy === c.id}
                     onClick={() => void run(c.id, () => setSystemLifeboat(token, c.id))}
-                    className="rounded-md bg-accent/15 px-2.5 py-1 text-xs text-accent transition-colors hover:bg-accent/25 disabled:opacity-40"
+                    className="min-h-11 rounded-md bg-accent/15 px-3 py-2 text-xs text-accent transition-colors hover:bg-accent/25 disabled:opacity-40"
                   >
                     Set as fallback
                   </button>
@@ -414,145 +414,5 @@ function SystemProvidersSection() {
         }}
       />
     </section>
-  );
-}
-
-// Compact provider form, mirroring the member Settings form it replaces. Local
-// (Ollama) / OpenRouter / Claude — provider portability preserved.
-function AddProviderForm({
-  onAdd,
-}: {
-  onAdd: (cred: NewCredential) => Promise<void>;
-}) {
-  const [provider, setProvider] = useState<Credential["provider"]>("openai_compat");
-  const [authType, setAuthType] = useState<"api_key" | "oauth">("api_key");
-  const [modelId, setModelId] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [activate, setActivate] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  const needsBaseUrl = provider === "openai_compat" || provider === "local";
-  const oauthAllowed = provider === "anthropic";
-
-  async function submit() {
-    if (!modelId.trim() || saving) return;
-    setSaving(true);
-    try {
-      await onAdd({
-        provider,
-        auth_type: authType,
-        api_key: apiKey || undefined,
-        base_url: needsBaseUrl && baseUrl ? baseUrl : undefined,
-        model_id: modelId.trim(),
-        activate,
-      });
-      setModelId("");
-      setBaseUrl("");
-      setApiKey("");
-      setActivate(false);
-    } catch {
-      /* error shown by parent */
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="rounded-xl border border-edge bg-panel p-4">
-      <h3 className="mb-4 text-base font-semibold text-on-surface">Add a provider</h3>
-      <div className="grid grid-cols-2 gap-3 text-sm">
-        <label className="flex flex-col gap-1.5">
-          <span className="text-[11px] uppercase tracking-widest text-faint">Provider</span>
-          <select
-            value={provider}
-            onChange={(e) => {
-              const p = e.target.value as Credential["provider"];
-              setProvider(p);
-              if (p !== "anthropic" && authType === "oauth") setAuthType("api_key");
-            }}
-            className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface outline-none transition-colors focus:border-accent"
-          >
-            <option value="anthropic">Claude (Anthropic)</option>
-            <option value="openai_compat">OpenRouter</option>
-            <option value="local">Local (Ollama)</option>
-          </select>
-        </label>
-
-        <label className="flex flex-col gap-1.5">
-          <span className="text-[11px] uppercase tracking-widest text-faint">Auth</span>
-          <select
-            value={authType}
-            onChange={(e) => setAuthType(e.target.value as "api_key" | "oauth")}
-            className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface outline-none transition-colors focus:border-accent"
-          >
-            <option value="api_key">API key</option>
-            {oauthAllowed && <option value="oauth">OAuth (Claude subscription)</option>}
-          </select>
-        </label>
-
-        <label className="col-span-2 flex flex-col gap-1.5">
-          <span className="text-[11px] uppercase tracking-widest text-faint">Model</span>
-          <input
-            value={modelId}
-            onChange={(e) => setModelId(e.target.value)}
-            placeholder={
-              provider === "anthropic"
-                ? "claude-opus-4-8"
-                : provider === "local"
-                  ? "qwen2.5:7b"
-                  : "meta-llama/llama-3.1-70b-instruct"
-            }
-            className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent"
-          />
-        </label>
-
-        {needsBaseUrl && (
-          <label className="col-span-2 flex flex-col gap-1.5">
-            <span className="text-[11px] uppercase tracking-widest text-faint">
-              Base URL {provider === "local" && "(blank = deployment default)"}
-            </span>
-            <input
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-              placeholder={
-                provider === "local" ? "http://ollama:11434/v1" : "https://openrouter.ai/api/v1"
-              }
-              className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent"
-            />
-          </label>
-        )}
-
-        {authType === "api_key" && provider !== "local" && (
-          <label className="col-span-2 flex flex-col gap-1.5">
-            <span className="text-[11px] uppercase tracking-widest text-faint">API key</span>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="stored encrypted; never shown again"
-              className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent"
-            />
-          </label>
-        )}
-
-        <label className="col-span-2 flex items-center gap-2 text-xs text-muted">
-          <input
-            type="checkbox"
-            checked={activate}
-            onChange={(e) => setActivate(e.target.checked)}
-          />
-          Make this the active provider
-        </label>
-      </div>
-
-      <button
-        onClick={() => void submit()}
-        disabled={saving || !modelId.trim()}
-        className="mt-4 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
-      >
-        {saving ? "Adding…" : "Add provider"}
-      </button>
-    </div>
   );
 }

@@ -70,7 +70,7 @@ export default function TimezoneForm() {
             setTz(e.target.value);
             setOk(false);
           }}
-          className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface outline-none transition-colors focus:border-accent"
+          className="min-h-11 w-full min-w-0 rounded-md border border-edge bg-raised px-3 py-2 text-base text-on-surface outline-none transition-colors focus:border-accent sm:text-sm"
         >
           {zones.map((z) => (
             <option key={z} value={z}>
@@ -80,11 +80,11 @@ export default function TimezoneForm() {
         </select>
       </label>
 
-      <div className="mt-4 flex items-center gap-3">
+      <div className="mt-4 flex flex-wrap items-center gap-3">
         <button
           onClick={() => void save()}
           disabled={busy || tz === saved}
-          className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
+          className="min-h-11 rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
         >
           {busy ? "Saving…" : "Save"}
         </button>

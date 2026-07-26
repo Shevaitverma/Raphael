@@ -226,11 +226,13 @@ function ReminderRow({
   const next = r.active ? whenLabel(r.next_fire) : "";
   return (
     <li
-      className={`group flex items-start gap-3 rounded-xl border border-edge bg-panel p-3 ${
+      className={`group flex flex-wrap items-start gap-x-3 gap-y-1 rounded-xl border border-edge bg-panel p-3 ${
         busy ? "opacity-40" : ""
       } ${r.active ? "" : "opacity-70"}`}
     >
-      <div className="min-w-0 flex-1">
+      {/* Below sm: the text takes the whole first line and the controls wrap
+          under it, so nothing is squeezed at 320px. */}
+      <div className="min-w-0 flex-1 basis-full sm:basis-0">
         <p className={`break-words text-sm ${r.active ? "text-on-surface" : "text-muted"}`}>
           {r.text}
         </p>
@@ -241,26 +243,30 @@ function ReminderRow({
         </p>
       </div>
 
-      <button
-        onClick={() => onPause(!r.active)}
-        disabled={busy}
-        className="shrink-0 rounded-md px-2 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40"
-      >
-        {r.active ? "Pause" : "Resume"}
-      </button>
-      <button
-        onClick={onDelete}
-        disabled={busy}
-        aria-label={`Delete reminder: ${r.text}`}
-        className="shrink-0 rounded-md p-1 text-faint opacity-0 transition-colors hover:bg-raised hover:text-error focus:opacity-100 group-hover:opacity-100 disabled:opacity-40"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5" aria-hidden="true">
-          <path d="M3 6h18" />
-          <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-          <path d="M6 6v14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V6" />
-          <path d="M10 11v6M14 11v6" />
-        </svg>
-      </button>
+      <div className="ml-auto flex shrink-0 items-center gap-1">
+        <button
+          onClick={() => onPause(!r.active)}
+          disabled={busy}
+          className="min-h-11 shrink-0 rounded-md px-3 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40 md:min-h-0 md:px-2"
+        >
+          {r.active ? "Pause" : "Resume"}
+        </button>
+        {/* Hover reveal is a desktop-only affordance — touch has no hover, so the
+            delete control is permanently visible below md. */}
+        <button
+          onClick={onDelete}
+          disabled={busy}
+          aria-label={`Delete reminder: ${r.text}`}
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-faint transition-colors hover:bg-raised hover:text-error focus:opacity-100 disabled:opacity-40 md:h-7 md:w-7 md:opacity-0 md:group-hover:opacity-100"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4 md:h-3.5 md:w-3.5" aria-hidden="true">
+            <path d="M3 6h18" />
+            <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            <path d="M6 6v14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V6" />
+            <path d="M10 11v6M14 11v6" />
+          </svg>
+        </button>
+      </div>
     </li>
   );
 }
@@ -320,7 +326,8 @@ function CreateForm({ onCreate }: { onCreate: (p: CreatePayload) => void }) {
         value={text}
         onChange={(e) => setText(e.target.value)}
         placeholder="Remind me to…"
-        className="w-full rounded-lg border border-edge bg-raised px-3 py-2 text-sm text-on-surface placeholder:text-faint outline-none focus:border-accent"
+        // text-base below md: anything smaller makes iOS Safari zoom on focus.
+        className="w-full rounded-lg border border-edge bg-raised px-3 py-3 text-base text-on-surface placeholder:text-faint outline-none focus:border-accent md:py-2 md:text-sm"
       />
 
       <div className="flex flex-wrap items-center gap-2">
@@ -328,7 +335,7 @@ function CreateForm({ onCreate }: { onCreate: (p: CreatePayload) => void }) {
           value={preset}
           onChange={(e) => setPreset(e.target.value)}
           aria-label="Schedule"
-          className="rounded-lg border border-edge bg-raised px-2 py-2 text-sm text-on-surface outline-none focus:border-accent"
+          className="w-full min-w-0 rounded-lg border border-edge bg-raised px-2 py-3 text-base text-on-surface outline-none focus:border-accent sm:w-auto md:py-2 md:text-sm"
         >
           {PRESETS.map((x) => (
             <option key={x.value} value={x.value}>
@@ -342,7 +349,7 @@ function CreateForm({ onCreate }: { onCreate: (p: CreatePayload) => void }) {
             value={day}
             onChange={(e) => setDay(e.target.value)}
             aria-label="Day of week"
-            className="rounded-lg border border-edge bg-raised px-2 py-2 text-sm text-on-surface outline-none focus:border-accent"
+            className="min-w-0 rounded-lg border border-edge bg-raised px-2 py-3 text-base text-on-surface outline-none focus:border-accent md:py-2 md:text-sm"
           >
             {DOW.map((name, i) => (
               <option key={i} value={String(i)}>
@@ -358,7 +365,7 @@ function CreateForm({ onCreate }: { onCreate: (p: CreatePayload) => void }) {
             value={time}
             onChange={(e) => setTime(e.target.value)}
             aria-label="Time of day"
-            className="rounded-lg border border-edge bg-raised px-2 py-2 text-sm text-on-surface outline-none focus:border-accent [color-scheme:dark]"
+            className="min-w-0 rounded-lg border border-edge bg-raised px-2 py-3 text-base text-on-surface outline-none focus:border-accent [color-scheme:dark] md:py-2 md:text-sm"
           />
         )}
 
@@ -368,19 +375,19 @@ function CreateForm({ onCreate }: { onCreate: (p: CreatePayload) => void }) {
             value={at}
             onChange={(e) => setAt(e.target.value)}
             aria-label="Date and time"
-            className="rounded-lg border border-edge bg-raised px-2 py-2 text-sm text-on-surface outline-none focus:border-accent [color-scheme:dark]"
+            className="min-w-0 max-w-full rounded-lg border border-edge bg-raised px-2 py-3 text-base text-on-surface outline-none focus:border-accent [color-scheme:dark] md:py-2 md:text-sm"
           />
         )}
 
         {!isOnce && (
-          <label className="flex items-center gap-1 text-xs text-muted">
+          <label className="flex min-w-0 items-center gap-1 text-xs text-muted">
             until
             <input
               type="date"
               value={until}
               onChange={(e) => setUntil(e.target.value)}
               aria-label="Repeat until (optional)"
-              className="rounded-lg border border-edge bg-raised px-2 py-2 text-sm text-on-surface outline-none focus:border-accent [color-scheme:dark]"
+              className="min-w-0 rounded-lg border border-edge bg-raised px-2 py-3 text-base text-on-surface outline-none focus:border-accent [color-scheme:dark] md:py-2 md:text-sm"
             />
           </label>
         )}
@@ -388,7 +395,7 @@ function CreateForm({ onCreate }: { onCreate: (p: CreatePayload) => void }) {
         <button
           type="submit"
           disabled={!text.trim() || (isOnce && !at)}
-          className="ml-auto rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent/90 disabled:opacity-40"
+          className="min-h-11 w-full rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent/90 disabled:opacity-40 sm:ml-auto sm:w-auto"
         >
           Add
         </button>

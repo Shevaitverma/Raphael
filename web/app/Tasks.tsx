@@ -167,6 +167,23 @@ export default function Tasks() {
     void mutate(task.id, () => updateTask(token, task.id, { priority }));
   };
 
+  // ▴ ▾ tap fallback for within-column reorder. dnd-kit's PointerSensor loses to
+  // the browser's scroll gesture on touch (we deliberately don't set
+  // touch-action:none — that would kill scrolling), so reordering would
+  // otherwise be desktop-only. Swap with the neighbour and persist one position.
+  const bump = (task: Task, dir: -1 | 1) => {
+    const list = columnTasks(task.status);
+    const from = list.findIndex((t) => t.id === task.id);
+    const to = from + dir;
+    if (from < 0 || to < 0 || to >= list.length) return;
+    const ordered = arrayMove(list, from, to);
+    const position = between(ordered[to - 1]?.position, ordered[to + 1]?.position);
+    setTasks((prev) =>
+      prev ? prev.map((t) => (t.id === task.id ? { ...t, position } : t)) : prev,
+    );
+    void mutate(task.id, () => updateTask(token, task.id, { position }));
+  };
+
   function onDragStart(e: DragStartEvent) {
     setActiveId(String(e.active.id));
   }
@@ -247,7 +264,7 @@ export default function Tasks() {
             <button
               type="button"
               onClick={() => void refetch()}
-              className="rounded-md border border-edge bg-raised px-3 py-1 text-xs text-on-surface transition-colors hover:bg-panel"
+              className="min-h-11 rounded-md border border-edge bg-raised px-3 py-1 text-xs text-on-surface transition-colors hover:bg-panel md:min-h-0"
             >
               Retry
             </button>
@@ -261,9 +278,10 @@ export default function Tasks() {
             onDragEnd={onDragEnd}
             onDragCancel={() => setActiveId(null)}
           >
-            {/* Columns scroll horizontally as a group on a narrow window so the
-                page body never overflows. */}
-            <div className="flex gap-4 overflow-x-auto pb-2">
+            {/* Columns scroll horizontally as a group so the page body never
+                overflows. Below md each column is ~one screen wide and snaps,
+                so a phone swipes between To Do / In Progress / Claimed. */}
+            <div className="flex snap-x snap-mandatory gap-4 overflow-x-auto overscroll-x-contain pb-2 md:snap-none">
               {COLUMNS.map((col) => (
                 <Column
                   key={col.status}
@@ -272,6 +290,7 @@ export default function Tasks() {
                   today={today}
                   busy={busy}
                   onMove={move}
+                  onBump={bump}
                   onPriority={setPriority}
                   onAdd={(title, due) =>
                     mutate("__add__", () =>
@@ -307,7 +326,7 @@ export default function Tasks() {
             {/* The floating card that follows the cursor — the Notion feel. */}
             <DragOverlay dropAnimation={null}>
               {activeTask ? (
-                <div className="w-64 rotate-2 rounded-lg border border-glow bg-raised p-2.5 shadow-2xl shadow-black/40 glow-violet">
+                <div className="w-64 max-w-[80vw] rotate-2 rounded-lg border border-glow bg-raised p-2.5 shadow-2xl shadow-black/40 glow-violet">
                   <p className="break-words text-sm text-on-surface">
                     {activeTask.title}
                   </p>
@@ -351,7 +370,7 @@ function SystemBar({ tasks }: { tasks: Task[] }) {
   }, [info.level]);
 
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-edge bg-panel px-4 py-3 glow-violet">
+    <div className="flex items-center gap-3 rounded-xl border border-edge bg-panel px-3 py-3 glow-violet md:px-4">
       <div
         className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-glow/40 bg-glow/10 text-sm font-semibold tabular-nums text-glow ${
           leveledUp ? "level-up" : ""
@@ -361,7 +380,8 @@ function SystemBar({ tasks }: { tasks: Task[] }) {
         {info.level}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="flex items-baseline gap-2">
+        {/* Wraps rather than overflowing once level + rank + EXP exceed 320px. */}
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
           <span className="text-sm font-medium text-on-surface">Level {info.level}</span>
           <span className="text-xs text-glow">{rank.name}</span>
           {leveledUp && (
@@ -392,6 +412,7 @@ function Column({
   today,
   busy,
   onMove,
+  onBump,
   onPriority,
   onAdd,
   onRename,
@@ -403,6 +424,7 @@ function Column({
   today: string;
   busy: string | null;
   onMove: (task: Task, to: Status) => void;
+  onBump: (task: Task, dir: -1 | 1) => void;
   onPriority: (task: Task, priority: Task["priority"]) => void;
   onAdd: (title: string, due: string) => void;
   onRename: (task: Task, title: string) => void;
@@ -414,7 +436,7 @@ function Column({
   return (
     <section
       aria-label={`${col.label} column`}
-      className="flex w-72 shrink-0 flex-col rounded-xl border border-edge bg-panel"
+      className="flex w-[85vw] max-w-xs shrink-0 snap-start flex-col rounded-xl border border-edge bg-panel md:w-72"
     >
       <header className="flex items-center gap-2 px-3 py-2.5">
         <span className={`h-2 w-2 rounded-full ${col.dot}`} aria-hidden="true" />
@@ -435,13 +457,16 @@ function Column({
           {tasks.length === 0 ? (
             <p className="px-1 py-5 text-center text-xs text-faint">Nothing here</p>
           ) : (
-            tasks.map((t) => (
+            tasks.map((t, i) => (
               <TaskCard
                 key={t.id}
                 task={t}
                 today={today}
                 busy={busy === t.id}
+                first={i === 0}
+                last={i === tasks.length - 1}
                 onMove={onMove}
+                onBump={(dir) => onBump(t, dir)}
                 onPriority={(p) => onPriority(t, p)}
                 onRename={(title) => onRename(t, title)}
                 onDue={(due) => onDue(t, due)}
@@ -460,7 +485,10 @@ function TaskCard({
   task,
   today,
   busy,
+  first,
+  last,
   onMove,
+  onBump,
   onPriority,
   onRename,
   onDue,
@@ -469,7 +497,10 @@ function TaskCard({
   task: Task;
   today: string;
   busy: boolean;
+  first: boolean;
+  last: boolean;
   onMove: (task: Task, to: Status) => void;
+  onBump: (dir: -1 | 1) => void;
   onPriority: (priority: Task["priority"]) => void;
   onRename: (title: string) => void;
   onDue: (due: string) => void;
@@ -528,7 +559,7 @@ function TaskCard({
                 setEditing(false);
               }
             }}
-            className="min-w-0 flex-1 resize-none rounded border border-accent bg-panel px-1.5 py-1 text-sm text-on-surface outline-none"
+            className="min-w-0 flex-1 resize-none rounded border border-accent bg-panel px-1.5 py-1 text-base text-on-surface outline-none md:text-sm"
           />
         ) : (
           // The card body is the drag handle; a plain click (no travel) opens
@@ -538,20 +569,22 @@ function TaskCard({
             {...listeners}
             {...attributes}
             onClick={() => setEditing(true)}
-            className={`min-w-0 flex-1 cursor-grab break-words text-left text-sm active:cursor-grabbing ${
+            className={`min-h-11 min-w-0 flex-1 cursor-grab break-words text-left text-sm active:cursor-grabbing md:min-h-0 ${
               isDone ? "text-muted line-through" : "text-on-surface"
             }`}
           >
             {task.title}
           </button>
         )}
+        {/* Hover reveal is desktop-only; touch has no hover, so this stays
+            visible (and 44px) below md. */}
         <button
           onClick={onDelete}
           disabled={busy}
           aria-label={`Delete task: ${task.title}`}
-          className="shrink-0 rounded-md p-1 text-faint opacity-0 transition-colors hover:bg-panel hover:text-error focus:opacity-100 group-hover:opacity-100 disabled:opacity-40"
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-faint transition-colors hover:bg-panel hover:text-error focus:opacity-100 disabled:opacity-40 md:h-7 md:w-7 md:opacity-0 md:group-hover:opacity-100"
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4 md:h-3.5 md:w-3.5" aria-hidden="true">
             <path d="M3 6h18" />
             <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
             <path d="M6 6v14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V6" />
@@ -585,13 +618,13 @@ function TaskCard({
               if ((e.target.value || "") !== (task.due_date ?? "")) onDue(e.target.value);
             }}
             aria-label="Due date"
-            className="rounded border border-accent bg-panel px-1 py-0.5 text-xs text-on-surface outline-none [color-scheme:dark]"
+            className="min-w-0 max-w-full rounded border border-accent bg-panel px-1 py-0.5 text-base text-on-surface outline-none [color-scheme:dark] md:text-xs"
           />
         ) : task.due_date ? (
           <button
             onClick={() => setDueOpen(true)}
             title={task.due_date}
-            className={`rounded px-1 py-0.5 text-xs transition-colors hover:bg-panel ${
+            className={`min-h-11 rounded px-2 py-0.5 text-xs transition-colors hover:bg-panel md:min-h-0 md:px-1 ${
               pastDue ? "text-warning" : "text-muted"
             }`}
           >
@@ -600,29 +633,51 @@ function TaskCard({
         ) : (
           <button
             onClick={() => setDueOpen(true)}
-            className="rounded px-1 py-0.5 text-xs text-faint opacity-0 transition-colors hover:bg-panel hover:text-muted focus:opacity-100 group-hover:opacity-100"
+            className="min-h-11 rounded px-2 py-0.5 text-xs text-faint transition-colors hover:bg-panel hover:text-muted focus:opacity-100 md:min-h-0 md:px-1 md:opacity-0 md:group-hover:opacity-100"
           >
             ＋ due
           </button>
         )}
 
-        {/* Keyboard/click move fallback — the guaranteed a11y path. */}
-        <button
-          onClick={() => prev && onMove(task, prev.status)}
-          disabled={busy || !prev}
-          aria-label={prev ? `Move "${task.title}" to ${prev.label}` : "No column to the left"}
-          className="ml-auto rounded p-0.5 text-muted transition-colors enabled:hover:bg-panel enabled:hover:text-on-surface disabled:opacity-30"
-        >
-          <Chevron dir="left" />
-        </button>
-        <button
-          onClick={() => next && onMove(task, next.status)}
-          disabled={busy || !next}
-          aria-label={next ? `Move "${task.title}" to ${next.label}` : "No column to the right"}
-          className="rounded p-0.5 text-muted transition-colors enabled:hover:bg-panel enabled:hover:text-on-surface disabled:opacity-30"
-        >
-          <Chevron dir="right" />
-        </button>
+        {/* Keyboard/click move fallback — the guaranteed a11y path, and the only
+            way to move a card on touch (see `bump` for the reorder equivalent).
+            Grouped so the four controls wrap as one block on a narrow card. */}
+        <div className="ml-auto flex items-center gap-1">
+          <button
+            onClick={() => prev && onMove(task, prev.status)}
+            disabled={busy || !prev}
+            aria-label={prev ? `Move "${task.title}" to ${prev.label}` : "No column to the left"}
+            className="flex h-11 w-11 items-center justify-center rounded text-muted transition-colors enabled:hover:bg-panel enabled:hover:text-on-surface disabled:opacity-30 md:h-6 md:w-6"
+          >
+            <Chevron dir="left" />
+          </button>
+          <button
+            onClick={() => next && onMove(task, next.status)}
+            disabled={busy || !next}
+            aria-label={next ? `Move "${task.title}" to ${next.label}` : "No column to the right"}
+            className="flex h-11 w-11 items-center justify-center rounded text-muted transition-colors enabled:hover:bg-panel enabled:hover:text-on-surface disabled:opacity-30 md:h-6 md:w-6"
+          >
+            <Chevron dir="right" />
+          </button>
+          {/* Touch reorder: drag can't run on touch, so expose it as taps wherever
+              the primary pointer is coarse (phones AND touch tablets). */}
+          <button
+            onClick={() => onBump(-1)}
+            disabled={busy || first}
+            aria-label={`Move "${task.title}" up`}
+            className="flex h-11 w-11 items-center justify-center rounded text-muted transition-colors enabled:hover:bg-panel enabled:hover:text-on-surface disabled:opacity-30 pointer-fine:hidden"
+          >
+            <Chevron dir="up" />
+          </button>
+          <button
+            onClick={() => onBump(1)}
+            disabled={busy || last}
+            aria-label={`Move "${task.title}" down`}
+            className="flex h-11 w-11 items-center justify-center rounded text-muted transition-colors enabled:hover:bg-panel enabled:hover:text-on-surface disabled:opacity-30 pointer-fine:hidden"
+          >
+            <Chevron dir="down" />
+          </button>
+        </div>
       </div>
     </article>
   );
@@ -650,7 +705,7 @@ function PriorityChip({
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`Difficulty: ${p.label}. Change.`}
-        className={`flex items-center gap-1 rounded px-1 py-0.5 text-xs transition-colors hover:bg-panel disabled:opacity-40 ${p.text}`}
+        className={`flex min-h-11 items-center gap-1 rounded px-2 py-0.5 text-xs transition-colors hover:bg-panel disabled:opacity-40 md:min-h-0 md:px-1 ${p.text}`}
       >
         <span className={`h-1.5 w-1.5 rounded-full ${p.dot}`} aria-hidden="true" />
         {p.label}
@@ -677,7 +732,7 @@ function PriorityChip({
                   setOpen(false);
                   if (k !== task.priority) onPriority(k);
                 }}
-                className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs transition-colors hover:bg-raised ${
+                className={`flex min-h-11 w-full items-center gap-2 rounded px-2 py-1 text-left text-xs transition-colors hover:bg-raised md:min-h-0 ${
                   PRIORITY[k].text
                 } ${k === task.priority ? "bg-raised" : ""}`}
               >
@@ -713,7 +768,7 @@ function AddCard({ onAdd }: { onAdd: (title: string, due: string) => void }) {
     return (
       <button
         onClick={() => setOpen(true)}
-        className="rounded-lg px-2 py-1.5 text-left text-xs text-faint transition-colors hover:bg-raised hover:text-muted"
+        className="min-h-11 rounded-lg px-2 py-1.5 text-left text-xs text-faint transition-colors hover:bg-raised hover:text-muted md:min-h-0"
       >
         ＋ Add a quest
       </button>
@@ -739,16 +794,23 @@ function AddCard({ onAdd }: { onAdd: (title: string, due: string) => void }) {
             setOpen(false);
           }
         }}
-        className="w-full resize-none bg-transparent text-sm text-on-surface placeholder:text-faint outline-none"
+        className="w-full resize-none bg-transparent text-base text-on-surface placeholder:text-faint outline-none md:text-sm"
       />
     </div>
   );
 }
 
-function Chevron({ dir }: { dir: "left" | "right" }) {
+const CHEVRON_PATH = {
+  left: "M15 18l-6-6 6-6",
+  right: "M9 18l6-6-6-6",
+  up: "M18 15l-6-6-6 6",
+  down: "M6 9l6 6 6-6",
+} as const;
+
+function Chevron({ dir }: { dir: keyof typeof CHEVRON_PATH }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4" aria-hidden="true">
-      <path d={dir === "left" ? "M15 18l-6-6 6-6" : "M9 18l6-6-6-6"} />
+      <path d={CHEVRON_PATH[dir]} />
     </svg>
   );
 }

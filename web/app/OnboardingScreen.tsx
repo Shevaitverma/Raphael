@@ -31,8 +31,8 @@ export default function OnboardingScreen({
   }
 
   return (
-    <div className="flex h-screen flex-col items-center justify-center bg-surface px-4 font-sans text-on-surface">
-      <div className="flex w-full max-w-sm flex-col gap-4 rounded-xl border border-edge bg-panel px-8 py-10">
+    <div className="flex min-h-dvh flex-col items-center justify-center bg-surface px-4 py-8 font-sans text-on-surface">
+      <div className="flex w-full max-w-sm flex-col gap-4 rounded-xl border border-edge bg-panel px-5 py-8 sm:px-8 sm:py-10">
         <div className="text-center">
           <h1 className="font-display text-3xl font-semibold tracking-wide text-accent">
             Welcome
@@ -67,14 +67,14 @@ export default function OnboardingScreen({
             }}
             maxLength={40}
             placeholder="Raphael"
-            className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent"
+            className="min-h-11 w-full min-w-0 rounded-md border border-edge bg-raised px-3 py-2 text-base text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent"
           />
         </label>
 
         <button
           onClick={() => void submit()}
           disabled={saving}
-          className="w-full rounded-md bg-accent px-5 py-2.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
+          className="min-h-11 w-full rounded-md bg-accent px-4 py-3 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
         >
           {saving ? "Saving…" : "Continue"}
         </button>

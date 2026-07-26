@@ -366,8 +366,15 @@ export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") =>
   const neverUsed = edges.filter((e) => e.access_count === 0).length;
   const recallKnown = edges.some((e) => e.access_count != null);
 
-  const onForgetFact = (e: GraphEdge) =>
-    forget.mutate({ id: e.id, fn: () => deleteFact(token, e.id) });
+  // An edge from a server that predates the governance API has no id, so there is
+  // nothing to address a delete to. Such a belief is still shown — hiding the
+  // user's own data would be worse — but Forget is withheld rather than firing a
+  // request that could not name a row.
+  const onForgetFact = (e: GraphEdge) => {
+    if (!e.id) return;
+    const id = e.id;
+    forget.mutate({ id, fn: () => deleteFact(token, id) });
+  };
   const onForgetNote = (n: GraphNote) =>
     forget.mutate({ id: n.id, fn: () => deleteNote(token, n.id) });
 
@@ -423,7 +430,7 @@ export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") =>
                   type="button"
                   onClick={() => setMode(m)}
                   aria-pressed={mode === m}
-                  className={`rounded px-3 py-1 capitalize transition-colors ${
+                  className={`min-h-11 rounded px-4 capitalize transition-colors md:min-h-0 md:px-3 md:py-1 ${
                     mode === m
                       ? "bg-raised font-medium text-on-surface"
                       : "text-muted hover:text-on-surface"
@@ -473,7 +480,13 @@ export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") =>
           </div>
         ) : (
           <>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {/* On a phone the flex order is overridden so the CANVAS comes right
+                after the tiles: at DOM order the legend + its explanation push the
+                graph ~800px down, so you never see it without hunting. The legend
+                still reads as the key, just under the thing it explains. Every
+                sibling needs an explicit order or the default-0 notes block would
+                hop above the canvas. sm: and up restores DOM order. */}
+            <div className="order-1 grid grid-cols-2 gap-2 sm:order-none sm:grid-cols-4">
               <StatTile
                 label="Things"
                 value={fmt(nodes.length)}
@@ -504,12 +517,14 @@ export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") =>
             </div>
 
             {predicates.length > 0 && (
+              <div className="order-3 sm:order-none">
               <Legend
                 predicates={predicates}
                 predColor={predColor}
                 filter={filter}
                 onFilter={(p) => setFilter((f) => (f === p ? null : p))}
               />
+              </div>
             )}
 
             {mode === "list" ? (
@@ -521,7 +536,7 @@ export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") =>
                 onForget={onForgetFact}
               />
             ) : (
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_17rem]">
+              <div className="order-2 grid grid-cols-1 gap-4 sm:order-none lg:grid-cols-[1fr_17rem]">
                 <Canvas
                   edges={shown}
                   graph={graph}
@@ -560,8 +575,10 @@ export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") =>
           </>
         )}
 
+        {/* order-4: without it this default-0 block would sit ABOVE the ordered
+            canvas/legend on a phone. */}
         {notes.length > 0 && (
-          <div className="rounded-xl border border-edge bg-panel p-4">
+          <div className="order-4 rounded-xl border border-edge bg-panel p-4 sm:order-none">
             <button
               type="button"
               onClick={() => setShowNotes((s) => !s)}
@@ -581,11 +598,13 @@ export default function MemoryGraph({ onNavigate }: { onNavigate: (v: "chat") =>
                 {notes.map((note) => (
                   <li
                     key={note.id}
-                    className={`flex items-start gap-3 py-2 text-sm ${
+                    className={`flex flex-wrap items-start gap-x-3 gap-y-1.5 py-2 text-sm ${
                       busy === note.id ? "opacity-40" : ""
                     }`}
                   >
-                    <span className="min-w-0 flex-1 text-on-surface">{note.content}</span>
+                    <span className="min-w-[10rem] flex-1 break-words text-on-surface">
+                      {note.content}
+                    </span>
                     <Tag
                       tone={highConf(note.confidence) ? "muted" : "warning"}
                       title={CONF_HELP}
@@ -691,7 +710,8 @@ function Legend({
               type="button"
               onClick={() => onFilter(p)}
               aria-pressed={on}
-              className="flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors"
+              // ≥44px tall on phone: the legend is also the predicate filter.
+              className="flex min-h-11 items-center gap-1.5 rounded-full border px-3 py-1 text-xs transition-colors md:min-h-0 md:px-2.5"
               style={{
                 borderColor: on ? c : C_EDGE,
                 backgroundColor: on ? `${c}1f` : "transparent",
@@ -712,7 +732,7 @@ function Legend({
           <button
             type="button"
             onClick={() => onFilter(filter)}
-            className="rounded-full px-2.5 py-1 text-xs text-faint underline underline-offset-2 hover:text-on-surface"
+            className="min-h-11 rounded-full px-3 text-xs text-faint underline underline-offset-2 hover:text-on-surface md:min-h-0 md:px-2.5 md:py-1"
           >
             show all
           </button>
@@ -808,13 +828,15 @@ function FactRow({
   const stale = age != null && age > STALE_DAYS;
   return (
     <li
-      className={`flex items-start gap-3 py-2 pl-3 text-sm ${busy ? "opacity-40" : ""}`}
+      className={`flex flex-wrap items-start gap-x-3 gap-y-1.5 py-2 pl-3 text-sm ${busy ? "opacity-40" : ""}`}
       // Solid = high confidence, dashed = lower. This is the stored score, not a
       // claim about who said it — see CONF_HELP.
       style={{ borderLeft: `2px ${high ? "solid" : "dashed"} ${color}` }}
     >
-      <div className="min-w-0 flex-1">
-        <p className={stale ? "text-muted" : "text-on-surface"}>
+      {/* min-w, not min-w-0: below this the tags and the trash wrap to their own
+          line instead of squeezing the belief down to one word per line. */}
+      <div className="min-w-[10rem] flex-1">
+        <p className={`break-words ${stale ? "text-muted" : "text-on-surface"}`}>
           <span className="font-medium">{subject}</span>{" "}
           <span className="text-muted">{e.label}</span>{" "}
           <span className={high ? "font-medium" : "font-medium italic"}>{object}</span>
@@ -834,7 +856,12 @@ function FactRow({
         </Tag>
       )}
       {stale && <Tag tone="faint">stale</Tag>}
-      <Forget what={`${subject} ${e.label} ${object}`} busy={busy} onConfirm={onForget} />
+      {/* No id means the server predates the governance API, so there is no row to
+          address a delete to. Show the belief, but omit Forget rather than render a
+          control that silently does nothing. */}
+      {e.id ? (
+        <Forget what={`${subject} ${e.label} ${object}`} busy={busy} onConfirm={onForget} />
+      ) : null}
     </li>
   );
 }
@@ -856,17 +883,21 @@ function Forget({
   const [armed, setArmed] = useState(false);
   const keepRef = useRef<HTMLButtonElement>(null);
   const trashRef = useRef<HTMLButtonElement>(null);
-  const first = useRef(true);
+  const prevArmed = useRef(armed);
 
   // Focus moves to the SAFE control on arm (a <button> fires on Enter, so
   // autofocusing "Forget" would let two Enters destroy a belief with focus never
-  // resting anywhere safe), and back to the trash icon on cancel. The `first`
-  // guard keeps page load from stealing focus into every row.
+  // resting anywhere safe), and back to the trash icon on cancel.
+  //
+  // Gate on an actual armed TRANSITION, not on "is this the first effect run".
+  // A one-shot `first` flag looks equivalent but is defeated by StrictMode, which
+  // mounts, runs effects, cleans up and runs them AGAIN against the same refs:
+  // pass one consumes the flag, pass two then focuses. That put keyboard focus on
+  // a delete control for the last-rendered row at page load — caught by actually
+  // screenshotting the page, not by types or tests.
   useEffect(() => {
-    if (first.current) {
-      first.current = false;
-      return;
-    }
+    if (prevArmed.current === armed) return;
+    prevArmed.current = armed;
     (armed ? keepRef : trashRef).current?.focus();
   }, [armed]);
 
@@ -881,7 +912,9 @@ function Forget({
             setArmed(false);
           }
         }}
-        className="flex shrink-0 items-center gap-1.5"
+        // On a phone the confirm takes its own line (the row is flex-wrap), so
+        // the belief text isn't crushed to nothing at 320px.
+        className="flex w-full shrink-0 flex-wrap items-center justify-end gap-1.5 sm:w-auto"
       >
         <span role="alert" className="text-[11px] text-error">
           Forget permanently?
@@ -891,7 +924,7 @@ function Forget({
           ref={keepRef}
           onClick={() => setArmed(false)}
           aria-label={`Keep: ${what}`}
-          className="rounded-md border border-edge px-2 py-0.5 text-[11px] text-muted transition-colors hover:text-on-surface"
+          className="min-h-11 rounded-md border border-edge px-3 text-[11px] text-muted transition-colors hover:text-on-surface md:min-h-0 md:px-2 md:py-0.5"
         >
           Keep
         </button>
@@ -903,7 +936,7 @@ function Forget({
             onConfirm();
           }}
           aria-label={`Forget permanently: ${what}`}
-          className="rounded-md bg-error px-2 py-0.5 text-[11px] font-medium text-surface transition-opacity hover:opacity-90 disabled:opacity-40"
+          className="min-h-11 rounded-md bg-error px-3 text-[11px] font-medium text-surface transition-opacity hover:opacity-90 disabled:opacity-40 md:min-h-0 md:px-2 md:py-0.5"
         >
           Forget
         </button>
@@ -919,7 +952,7 @@ function Forget({
       onClick={() => setArmed(true)}
       aria-label={`Forget: ${what}`}
       title="Forget this"
-      className="shrink-0 rounded-md p-1 text-faint transition-colors hover:bg-raised hover:text-error focus-visible:text-error disabled:opacity-40"
+      className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md p-1 text-faint transition-colors hover:bg-raised hover:text-error focus-visible:text-error disabled:opacity-40 md:min-h-0 md:min-w-0"
     >
       <svg
         viewBox="0 0 24 24"
@@ -1025,6 +1058,11 @@ function Canvas({
     | { mode: "pan"; startX: number; startY: number; ox: number; oy: number }
     | null
   >(null);
+  // Live pointers, for pinch. There is no wheel on a phone, so without this
+  // there is no zoom at all on touch. Tracked in the CAPTURE phase because a
+  // finger landing on a node stops propagation before the svg's own handler.
+  const ptrs = useRef(new Map<number, { x: number; y: number }>());
+  const pinchRef = useRef<{ d: number; k: number; gx: number; gy: number } | null>(null);
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
   const [, tick] = useReducer((c: number) => c + 1, 0);
 
@@ -1103,9 +1141,39 @@ function Canvas({
     return () => el.removeEventListener("wheel", h);
   }, [toVB]);
 
+  // Baseline for the current two fingers: the pinch distance, the zoom it
+  // started from, and the graph-space point under the midpoint (kept fixed, the
+  // same trick the wheel handler uses). Pure view state — it never touches the
+  // sim, so the settled layout survives a pinch untouched.
+  const baseline = useCallback(() => {
+    const [a, b] = [...ptrs.current.values()];
+    const p = toVB((a.x + b.x) / 2, (a.y + b.y) / 2);
+    pinchRef.current = {
+      d: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+      k: view.k,
+      gx: (p.x - view.x) / view.k,
+      gy: (p.y - view.y) / view.k,
+    };
+  }, [toVB, view]);
+
+  const onDownCapture = (e: React.PointerEvent) => {
+    ptrs.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (ptrs.current.size !== 2) return;
+    // Second finger: abandon the single-pointer gesture in flight. Only
+    // `dragging` is cleared — no x/y/vx/vy write, no reheat.
+    const g = gestureRef.current;
+    if (g?.mode === "node") {
+      const s = simRef.current.find((s) => s.id === g.id);
+      if (s) s.dragging = false;
+    }
+    gestureRef.current = null;
+    baseline();
+  };
+
   const onDownNode = (e: React.PointerEvent, id: string) => {
     e.stopPropagation();
     svgRef.current?.setPointerCapture(e.pointerId);
+    if (pinchRef.current) return; // second finger: pinching, not dragging
     const s = simRef.current.find((s) => s.id === id);
     if (s) s.dragging = true;
     gestureRef.current = { mode: "node", id };
@@ -1114,11 +1182,27 @@ function Canvas({
 
   const onDownBg = (e: React.PointerEvent) => {
     svgRef.current?.setPointerCapture(e.pointerId);
+    if (pinchRef.current) return;
     const p = toVB(e.clientX, e.clientY);
     gestureRef.current = { mode: "pan", startX: p.x, startY: p.y, ox: view.x, oy: view.y };
   };
 
   const onMove = (e: React.PointerEvent) => {
+    const tracked = ptrs.current.get(e.pointerId);
+    if (tracked) {
+      tracked.x = e.clientX;
+      tracked.y = e.clientY;
+    }
+    // Pinch wins over any single-pointer gesture, and moving the midpoint pans.
+    const pz = pinchRef.current;
+    if (pz && ptrs.current.size >= 2) {
+      const [a, b] = [...ptrs.current.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      const p = toVB((a.x + b.x) / 2, (a.y + b.y) / 2);
+      const k = clamp((pz.k * d) / pz.d, 0.35, 3);
+      setView({ k, x: p.x - pz.gx * k, y: p.y - pz.gy * k });
+      return;
+    }
     const g = gestureRef.current;
     if (!g) return;
     const p = toVB(e.clientX, e.clientY);
@@ -1136,6 +1220,13 @@ function Canvas({
   };
 
   const onUp = (e: React.PointerEvent) => {
+    ptrs.current.delete(e.pointerId);
+    if (pinchRef.current) {
+      // Re-baseline on the remaining pair rather than jumping; below two
+      // fingers the pinch is over.
+      if (ptrs.current.size >= 2) baseline();
+      else pinchRef.current = null;
+    }
     const g = gestureRef.current;
     if (g?.mode === "node") {
       const s = simRef.current.find((s) => s.id === g.id);
@@ -1194,8 +1285,23 @@ function Canvas({
         viewBox={`0 0 ${VB_W} ${VB_H}`}
         role="img"
         aria-label={`Knowledge graph: ${fmt(graph.nodes.length)} things joined by ${fmt(edges.length)} facts, each arrow labelled with its relationship and pointing from subject to object. The list view is the readable equivalent.`}
-        className="w-full touch-none select-none"
+        // The viewBox is fixed (the sim's coordinate system), only the rendered
+        // box is fluid. From sm: up the box keeps the viewBox's own 41:26, so
+        // `slice` is identical to `meet` — no crop, desktop unchanged. On a
+        // portrait phone the box goes 4:3 so it isn't a 200px slit, and `slice`
+        // fills it (scaling to cover, ~8% of the width clipped either side)
+        // instead of letterboxing the graph into a band of dead space. The
+        // clipped ends are reachable by pan and pinch. The sim itself is not
+        // retuned: nodes still spread across the full elliptical 820x520.
+        preserveAspectRatio="xMidYMid slice"
+        // Phone gets a tall fixed box, not an aspect ratio: 4/3 of a 341px-wide
+        // column is only ~256px, which renders the 820x520 viewBox at ~0.42 scale
+        // and makes every predicate label unreadable. 62dvh (floored at 420px) is
+        // roughly double that. From sm: up the box aspect equals the viewBox aspect,
+        // so desktop is unchanged.
+        className="h-[max(420px,62dvh)] w-full touch-none select-none sm:aspect-[41/26] sm:h-auto sm:max-h-[80dvh]"
         style={{ cursor: gestureRef.current?.mode === "pan" ? "grabbing" : "grab" }}
+        onPointerDownCapture={onDownCapture}
         onPointerDown={onDownBg}
         onPointerMove={onMove}
         onPointerUp={onUp}
@@ -1283,9 +1389,9 @@ function Canvas({
               pointerEvents="stroke"
               className="cursor-pointer"
               onPointerDown={(ev) => ev.stopPropagation()}
-              onPointerEnter={() => onHoverEdge(e.id)}
+              onPointerEnter={() => onHoverEdge(e.id ?? null)}
               onPointerLeave={() => onHoverEdge(null)}
-              onClick={() => onSelectEdge(e.id)}
+              onClick={() => onSelectEdge(e.id ?? null)}
             />
           ))}
 
@@ -1400,9 +1506,9 @@ function Canvas({
           })}
         </g>
       </svg>
-      <p className="border-t border-edge px-3 py-1.5 text-right text-[11px] text-faint">
-        click a node or a labelled arrow to inspect · drag a node · scroll to zoom ·
-        drag the canvas to pan
+      <p className="border-t border-edge px-3 py-1.5 text-center text-[11px] text-faint sm:text-right">
+        tap a node or a labelled arrow to inspect · drag a node · pinch or scroll to
+        zoom · drag the canvas to pan
       </p>
     </div>
   );
@@ -1450,13 +1556,13 @@ function InspectPanel({
   return (
     <div className="rounded-xl border border-edge bg-panel p-4">
       <div className="flex items-start justify-between gap-2">
-        <h3 className="text-base font-semibold text-on-surface">
+        <h3 className="min-w-0 break-words text-base font-semibold text-on-surface">
           {picked ? `${name(picked.source)} → ${name(picked.target)}` : node?.label}
         </h3>
         <button
           type="button"
           onClick={onClear}
-          className="shrink-0 text-xs text-muted hover:text-on-surface"
+          className="-my-2 -mr-2 inline-flex min-h-11 shrink-0 items-center rounded-md px-2 text-xs text-muted hover:text-on-surface md:m-0 md:min-h-0 md:px-0"
         >
           Clear
         </button>

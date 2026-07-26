@@ -67,14 +67,14 @@ export default function SettingsView({
   const lifeboat = creds?.find((c) => c.is_lifeboat);
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
+    <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-6 md:py-8">
       <div className="mx-auto flex max-w-2xl flex-col gap-6">
         <AssistantNameForm assistantName={assistantName} onSaved={onSaved} />
 
         <TimezoneForm />
 
         <div>
-          <h2 className="text-2xl font-semibold text-on-surface">
+          <h2 className="text-xl font-semibold text-on-surface sm:text-2xl">
             Model providers
           </h2>
           <p className="mt-2 text-sm text-muted">
@@ -112,18 +112,18 @@ export default function SettingsView({
           {creds?.map((c) => (
             <div
               key={c.id}
-              className="flex items-center justify-between rounded-xl border border-edge bg-panel px-4 py-3"
+              className="flex flex-col gap-3 rounded-xl border border-edge bg-panel px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
             >
               <div className="min-w-0">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="font-medium text-on-surface">{PROVIDER_LABEL[c.provider]}</span>
                   {c.is_active && (
-                    <span className="rounded-md bg-accent/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest text-accent">
+                    <span className="rounded-md bg-accent/15 px-2 py-0.5 text-[11px] font-medium uppercase tracking-widest text-accent">
                       Active
                     </span>
                   )}
                   {c.is_lifeboat && (
-                    <span className="rounded-md bg-raised px-2 py-0.5 text-[10px] font-medium uppercase tracking-widest text-muted">
+                    <span className="rounded-md bg-raised px-2 py-0.5 text-[11px] font-medium uppercase tracking-widest text-muted">
                       Fallback
                     </span>
                   )}
@@ -134,12 +134,12 @@ export default function SettingsView({
                 </div>
               </div>
 
-              <div className="flex shrink-0 items-center gap-2">
+              <div className="flex shrink-0 flex-wrap items-center gap-2">
                 {!c.is_active && (
                   <button
                     disabled={busy === c.id}
                     onClick={() => void run(c.id, () => activateProvider(token, c.id))}
-                    className="rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40"
+                    className="min-h-11 rounded-md border border-edge px-3 py-2 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40"
                   >
                     Use this
                   </button>
@@ -148,7 +148,7 @@ export default function SettingsView({
                   <button
                     disabled={busy === c.id}
                     onClick={() => void run(c.id, () => clearLifeboat(token, c.id))}
-                    className="rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40"
+                    className="min-h-11 rounded-md border border-edge px-3 py-2 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40"
                   >
                     Clear fallback
                   </button>
@@ -158,7 +158,7 @@ export default function SettingsView({
                     <button
                       disabled={busy === c.id}
                       onClick={() => void run(c.id, () => setLifeboat(token, c.id))}
-                      className="rounded-md bg-accent/15 px-2.5 py-1 text-xs text-accent transition-colors hover:bg-accent/25 disabled:opacity-40"
+                      className="min-h-11 rounded-md bg-accent/15 px-3 py-2 text-xs text-accent transition-colors hover:bg-accent/25 disabled:opacity-40"
                     >
                       Set as fallback
                     </button>

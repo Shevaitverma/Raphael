@@ -45,11 +45,11 @@ export default function NotificationsBell() {
   }
 
   return (
-    <div className="absolute right-4 top-3 z-20">
+    <div className="absolute right-4 top-[calc(env(safe-area-inset-top)_+_0.375rem)] z-20 md:top-3">
       <button
         onClick={toggle}
         aria-label={`Notifications${unread.length ? ` (${unread.length} unread)` : ""}`}
-        className="relative flex h-9 w-9 items-center justify-center rounded-full border border-edge bg-panel text-muted shadow-sm transition-colors hover:text-on-surface"
+        className="relative flex h-11 w-11 items-center justify-center rounded-full border border-edge bg-panel text-muted shadow-sm transition-colors hover:text-on-surface"
       >
         <svg
           width="18"
@@ -80,11 +80,11 @@ export default function NotificationsBell() {
             onClick={() => setOpen(false)}
             className="fixed inset-0 z-0 cursor-default"
           />
-          <div className="absolute right-0 z-10 mt-2 w-80 overflow-hidden rounded-xl border border-edge bg-panel shadow-lg">
+          <div className="absolute right-0 z-10 mt-2 w-[min(20rem,calc(100vw_-_2rem))] overflow-hidden rounded-xl border border-edge bg-panel shadow-lg">
             <div className="border-b border-edge px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-faint">
               Notifications
             </div>
-            <div className="max-h-80 overflow-y-auto">
+            <div className="max-h-[min(20rem,60dvh)] overflow-y-auto overscroll-contain">
               {viewing.length === 0 ? (
                 <p className="px-3 py-6 text-center text-sm text-faint">
                   No new notifications.
@@ -95,7 +95,7 @@ export default function NotificationsBell() {
                     key={n.id}
                     className="border-b border-edge/60 px-3 py-2 last:border-0"
                   >
-                    <p className="whitespace-pre-wrap text-sm text-on-surface">
+                    <p className="whitespace-pre-wrap break-words text-sm text-on-surface">
                       {n.content}
                     </p>
                     {n.created_at && (

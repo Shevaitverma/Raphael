@@ -81,8 +81,8 @@ export default function Dashboard({
   const active = !!caps?.model;
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8">
-      <div className="mx-auto flex max-w-4xl flex-col gap-6">
+    <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-6 sm:px-4 sm:py-8">
+      <div className="mx-auto flex min-w-0 max-w-4xl flex-col gap-6">
         {error && (
           <div
             role="alert"
@@ -93,11 +93,11 @@ export default function Dashboard({
         )}
 
         {/* Hero — the glowing living Core beside honest, real state. */}
-        <section className="glow-violet relative grid gap-6 overflow-hidden rounded-2xl border border-edge bg-panel p-6 md:grid-cols-[auto_1fr] md:items-center md:p-8">
+        <section className="glow-violet relative grid justify-items-center gap-6 overflow-hidden rounded-2xl border border-edge bg-panel p-4 sm:p-6 md:grid-cols-[auto_1fr] md:items-center md:justify-items-start md:p-8">
           <Core />
 
           <div className="min-w-0">
-            <h2 className="text-2xl font-semibold text-on-surface">
+            <h2 className="text-xl font-semibold text-on-surface sm:text-2xl">
               {active ? "Raphael is active" : "Raphael is standing by"}
             </h2>
             {caps ? (
@@ -157,7 +157,7 @@ export default function Dashboard({
 
         {/* Gauges — bold, real counts. The bars glow but are decorative; the
             numbers are the truth, so no invented percentages. */}
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <div className="grid grid-cols-2 gap-2 sm:gap-3 md:grid-cols-4">
           <Gauge label="Facts learned" value={stats ? fmt(stats.facts) : "—"} />
           <Gauge label="Memories" value={stats ? fmt(stats.episodic) : "—"} />
           <Gauge label="Conversations" value={stats ? fmt(stats.conversations) : "—"} />
@@ -179,7 +179,7 @@ export default function Dashboard({
         {/* Quick start — a real entry to chat, not a fake terminal. It's an
             input-styled button because chat's draft lives elsewhere; typed
             text couldn't be carried honestly, so we open the chat instead. */}
-        <section className="rounded-2xl border border-edge bg-panel p-5">
+        <section className="rounded-2xl border border-edge bg-panel p-4 sm:p-5">
           <h3 className="text-base font-semibold text-on-surface">
             {empty ? "Start a conversation" : "Ask Raphael"}
           </h3>
@@ -190,11 +190,11 @@ export default function Dashboard({
           </p>
           <button
             onClick={() => onNavigate("chat")}
-            className="mt-4 flex w-full items-center gap-3 rounded-xl border border-edge bg-raised px-4 py-3 text-left text-sm text-faint transition-colors hover:border-accent/50 hover:text-muted"
+            className="mt-4 flex min-h-11 w-full items-center gap-3 rounded-xl border border-edge bg-raised px-4 py-3 text-left text-sm text-faint transition-colors hover:border-accent/50 hover:text-muted"
           >
             <span className="core-hub h-2 w-2 shrink-0 rounded-full bg-accent" aria-hidden />
-            Ask Raphael anything…
-            <span className="ml-auto shrink-0 rounded-md bg-accent px-3 py-1 text-xs font-medium text-on-accent">
+            <span className="min-w-0 flex-1">Ask Raphael anything…</span>
+            <span className="hidden shrink-0 rounded-md bg-accent px-3 py-1 text-xs font-medium text-on-accent sm:inline-block">
               Start a conversation
             </span>
           </button>
@@ -203,7 +203,7 @@ export default function Dashboard({
         {/* How Raphael sees you — the exact persona portrait.synthesize() writes
             and workflow injects into every system prompt. Read-only 0-token door;
             completes transparency so the user can see what Raphael assumes about them. */}
-        <section className="rounded-2xl border border-edge bg-panel p-5">
+        <section className="rounded-2xl border border-edge bg-panel p-4 sm:p-5">
           <h3 className="text-base font-semibold text-on-surface">How Raphael sees you</h3>
           {portrait === undefined ? (
             <p className="mt-3 text-sm text-faint">Loading…</p>
@@ -217,8 +217,8 @@ export default function Dashboard({
         </section>
 
         {/* Recent knowledge — the strongest facts Raphael actually knows. */}
-        <section className="rounded-2xl border border-edge bg-panel p-5">
-          <div className="flex items-center justify-between">
+        <section className="rounded-2xl border border-edge bg-panel p-4 sm:p-5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-base font-semibold text-on-surface">Recent knowledge</h3>
             <ActivitySparkline activity={stats?.activity ?? []} />
           </div>
@@ -230,8 +230,8 @@ export default function Dashboard({
               </p>
             )}
             {(stats?.top_facts ?? []).map((f, i) => (
-              <div key={i} className="flex items-center justify-between gap-3 py-2.5">
-                <p className="min-w-0 text-sm text-on-surface">
+              <div key={i} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2.5">
+                <p className="min-w-0 break-words text-sm text-on-surface">
                   <span className="font-medium">{f.subject}</span>{" "}
                   <span className="text-muted">{f.predicate}</span>{" "}
                   <span className="font-medium">{f.object}</span>
@@ -322,10 +322,12 @@ function Core() {
 
 function Gauge({ label, value, unit }: { label: string; value: string; unit?: string }) {
   return (
-    <div className="glow-accent rounded-2xl border border-edge bg-panel p-4">
+    <div className="glow-accent min-w-0 rounded-2xl border border-edge bg-panel p-3 sm:p-4">
       <p className="text-[11px] uppercase tracking-widest text-faint">{label}</p>
-      <p className="mt-2 flex items-baseline gap-1">
-        <span className="text-3xl font-semibold tabular-nums text-on-surface">{value}</span>
+      <p className="mt-2 flex flex-wrap items-baseline gap-1">
+        <span className="break-all text-xl font-semibold tabular-nums text-on-surface sm:text-3xl">
+          {value}
+        </span>
         {unit && <span className="text-xs text-faint">{unit}</span>}
       </p>
       {/* decorative glowing rail — not a ratio, just a sign of life */}
@@ -345,8 +347,8 @@ function SystemPanel({ tasks }: { tasks: Task[] | null }) {
   const pct = Math.round(info.progress * 100);
 
   return (
-    <section className="glow-violet rounded-2xl border border-edge bg-panel p-5">
-      <div className="flex items-center justify-between">
+    <section className="glow-violet rounded-2xl border border-edge bg-panel p-4 sm:p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-base font-semibold text-on-surface">The System</h3>
         <span className="rounded-md bg-accent/15 px-2.5 py-1 text-xs font-medium text-accent">
           {rank.name}
@@ -449,12 +451,10 @@ function ActivitySparkline({ activity }: { activity: { day: string; count: numbe
     .join(" ");
   return (
     <svg
-      width={w}
-      height={h}
       viewBox={`0 0 ${w} ${h}`}
       role="img"
       aria-label={`${fmt(total)} facts learned across the last ${activity.length} days`}
-      className="overflow-visible"
+      className="h-6 w-[90px] max-w-full shrink-0 overflow-visible"
     >
       <polyline
         points={pts}
@@ -472,7 +472,7 @@ function QuickLink({ label, onClick }: { label: string; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className="rounded-md border border-edge px-3 py-1.5 text-sm text-muted transition-colors hover:bg-raised hover:text-on-surface"
+      className="min-h-11 rounded-md border border-edge px-4 py-1.5 text-sm text-muted transition-colors hover:bg-raised hover:text-on-surface"
     >
       {label}
     </button>

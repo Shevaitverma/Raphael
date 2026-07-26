@@ -34,6 +34,19 @@ body {
   @apply bg-surface text-on-surface antialiased;
 }
 
+/* iOS safe areas. Real utilities (not plain classes) so variants work:
+   `pb-safe`, `md:pt-safe`, … Use on anything pinned to a viewport edge —
+   `env()` resolves to 0px where there is no notch/home indicator.
+   These SET padding, they do not add to it. If the element already has a
+   padding utility on the same side, use an additive arbitrary value instead:
+   `pb-[calc(0.5rem+env(safe-area-inset-bottom))]`. */
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+@utility pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+
 * {
   scrollbar-width: thin;
   scrollbar-color: #2a2a2f transparent;

@@ -102,15 +102,15 @@ export default function GoogleSection({
       )}
 
       {status?.connected ? (
-        <div className="flex items-center justify-between gap-3">
-          <p className="min-w-0 text-sm text-on-surface">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="min-w-0 break-words text-sm text-on-surface">
             Connected as{" "}
             <span className="font-medium">{status.email ?? "your Google account"}</span>
           </p>
           <button
             onClick={() => void disconnect()}
             disabled={busy}
-            className="shrink-0 rounded-md border border-edge px-2.5 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40"
+            className="min-h-11 shrink-0 self-start rounded-md border border-edge px-3 py-2 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface disabled:opacity-40 sm:self-auto"
           >
             {busy ? "Working…" : "Disconnect"}
           </button>
@@ -124,7 +124,7 @@ export default function GoogleSection({
           <button
             onClick={() => void connect()}
             disabled={busy || status === null}
-            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
+            className="min-h-11 w-full rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40 sm:w-auto"
           >
             {busy ? "Connecting…" : "Connect Google"}
           </button>

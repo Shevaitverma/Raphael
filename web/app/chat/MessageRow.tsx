@@ -14,7 +14,7 @@ export default function MessageRow({
   const botInitial = (assistantName.trim()[0] ?? "R").toUpperCase();
 
   return (
-    <div className="flex gap-3">
+    <div className="flex min-w-0 gap-2 md:gap-3">
       {/* Avatar */}
       <div
         className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
@@ -48,7 +48,7 @@ export default function MessageRow({
               return (
                 <span
                   key={i}
-                  className="inline-flex items-center rounded-md bg-raised px-2 py-0.5 text-xs text-muted"
+                  className="inline-flex max-w-full items-center break-all rounded-md bg-raised px-2 py-0.5 text-xs text-muted"
                 >
                   🔍 {tc.name}
                   {q ? `: ${q.length > 40 ? q.slice(0, 40) + "…" : q}` : ""}
@@ -58,7 +58,10 @@ export default function MessageRow({
           </div>
         ) : null}
 
-        <div className="mt-1 whitespace-pre-wrap text-sm text-on-surface">
+        {/* pre-wrap keeps code indentation; break-words stops a long URL or
+            unbroken token from widening the page. Anything still too wide
+            scrolls inside this box, never the document. */}
+        <div className="mt-1 overflow-x-auto whitespace-pre-wrap break-words text-sm text-on-surface">
           {message.content}
           {message.streaming && !message.content && (
             <span className="text-muted">…</span>
@@ -94,7 +97,7 @@ export default function MessageRow({
         {message.degraded && (
           <div
             role="status"
-            className="mt-2 border-l-2 border-warning bg-warning/10 px-3 py-2 text-xs text-warning"
+            className="mt-2 break-words border-l-2 border-warning bg-warning/10 px-3 py-2 text-xs text-warning"
           >
             Answered by {message.degraded.provider}{" "}
             <span className="font-semibold">
@@ -109,7 +112,7 @@ export default function MessageRow({
         {message.error && (
           <div
             role="alert"
-            className="mt-2 border-l-2 border-error bg-error/10 px-3 py-2 text-xs text-error"
+            className="mt-2 break-words border-l-2 border-error bg-error/10 px-3 py-2 text-xs text-error"
           >
             {message.error}
           </div>

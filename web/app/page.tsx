@@ -6,7 +6,7 @@ import Dashboard from "./Dashboard";
 import MemoryGraph from "./MemoryGraph";
 import Reminders from "./Reminders";
 import Fitness from "./Fitness";
-import Sidebar, { type View } from "./Sidebar";
+import Sidebar, { VIEW_LABELS, type View } from "./Sidebar";
 import Tasks from "./Tasks";
 import LoginScreen from "./LoginScreen";
 import OnboardingScreen from "./OnboardingScreen";
@@ -42,6 +42,10 @@ export default function Page() {
   // Dashboard is the post-login/onboarding landing. The Google OAuth round-trip
   // still forces "settings" in its effect below.
   const [view, setView] = useState<View>("dashboard");
+
+  // Nav drawer, phone only (the rail is persistent from `md:` up, where this is
+  // ignored). Layout state, so it deliberately does not persist across reloads.
+  const [navOpen, setNavOpen] = useState(false);
 
   // Result of a Google OAuth round-trip (the gateway redirects back with
   // ?google=connected|error). `googleReload` bumps to re-fetch the connection
@@ -204,7 +208,9 @@ export default function Page() {
   }
 
   return (
-    <div className="flex h-screen bg-surface font-sans text-on-surface">
+    // h-dvh, not h-screen: 100vh is the *largest* viewport on mobile Safari, so
+    // the shell's bottom row sits under the browser chrome until you scroll.
+    <div className="flex h-dvh bg-surface font-sans text-on-surface">
       <Sidebar
         view={view}
         setView={setView}
@@ -212,11 +218,43 @@ export default function Page() {
         email={user?.email ?? user?.id ?? ""}
         role={user?.role}
         onLogout={handleLogout}
+        open={navOpen}
+        onClose={() => setNavOpen(false)}
       />
 
-      {/* Content column — sits to the RIGHT of the nav rail. For chat it holds
-          its own [conversation list][thread] pair; everything else is one pane. */}
+      {/* Content column — sits to the RIGHT of the nav rail (below `md:` the rail
+          is off-canvas and this is the whole width). For chat it holds its own
+          [conversation list][thread] pair; everything else is one pane.
+          min-w-0: a flex child defaults to min-width:auto and refuses to shrink
+          below its content — that is what makes the whole page scroll sideways. */}
       <div className="relative flex min-w-0 flex-1 flex-col">
+      {/* Phone-only top bar: opens the nav drawer and names the current view.
+          pr-16 keeps the title clear of NotificationsBell, which absolutely
+          positions itself at this column's top-right and lands inside the bar. */}
+      <header className="flex min-h-14 shrink-0 items-center gap-1 border-b border-edge bg-panel pr-16 pt-safe md:hidden">
+        <button
+          onClick={() => setNavOpen(true)}
+          aria-label="Open navigation"
+          aria-expanded={navOpen}
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-raised hover:text-on-surface"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.75}
+            strokeLinecap="round"
+            className="h-5 w-5"
+            aria-hidden="true"
+          >
+            <path d="M3 6h18M3 12h18M3 18h18" />
+          </svg>
+        </button>
+        <h1 className="min-w-0 truncate text-base font-semibold tracking-tight">
+          {VIEW_LABELS[view]}
+        </h1>
+      </header>
+
       {/* In-app delivery feed — polls unread, marks read on open. REST, 0 tokens. */}
       <NotificationsBell />
       {view === "dashboard" ? (

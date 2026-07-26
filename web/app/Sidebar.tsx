@@ -1,12 +1,32 @@
 "use client";
 
-// The app's primary navigation: a fixed-width left rail, always visible once
-// signed in. Groups its items under muted section labels and pins Settings +
-// the account row to the bottom. Inline SVG icons — no icon dependency.
+// The app's primary navigation. At `md:` and up it is a persistent fixed-width
+// left rail; below `md:` the same markup becomes an off-canvas drawer that
+// page.tsx opens from its compact top bar. Groups its items under muted section
+// labels and pins Settings + the account row to the bottom. Inline SVG icons —
+// no icon dependency.
+
+import { useEffect } from "react";
 
 export type View = "dashboard" | "chat" | "graph" | "settings" | "tasks" | "reminders" | "fitness" | "admin";
 
-type Item = { view: View; label: string; icon: React.ReactNode };
+// Single source of the human label for a view — the nav rows read it, and
+// page.tsx's mobile top bar titles itself from it.
+export const VIEW_LABELS: Record<View, string> = {
+  dashboard: "Dashboard",
+  chat: "Chat",
+  // The `graph` view is labelled "Knowledge" in the nav.
+  graph: "Knowledge",
+  tasks: "Tasks",
+  reminders: "Reminders",
+  fitness: "Fitness",
+  settings: "Settings",
+  admin: "Admin",
+};
+
+type Item = { view: View; icon: React.ReactNode };
+
+const noop = () => {};
 
 // Inline stroke icons (currentColor, ~18px). Kept trivial on purpose.
 function Icon({ children }: { children: React.ReactNode }) {
@@ -89,18 +109,17 @@ const GROUPS: { label: string; items: Item[] }[] = [
   {
     label: "Workspace",
     items: [
-      { view: "chat", label: "Chat", icon: ICONS.chat },
-      // The `graph` view is labelled "Knowledge" in the nav.
-      { view: "graph", label: "Knowledge", icon: ICONS.knowledge },
+      { view: "chat", icon: ICONS.chat },
+      { view: "graph", icon: ICONS.knowledge },
     ],
   },
   {
     label: "Operate",
     items: [
-      { view: "dashboard", label: "Dashboard", icon: ICONS.dashboard },
-      { view: "tasks", label: "Tasks", icon: ICONS.tasks },
-      { view: "reminders", label: "Reminders", icon: ICONS.reminders },
-      { view: "fitness", label: "Fitness", icon: ICONS.fitness },
+      { view: "dashboard", icon: ICONS.dashboard },
+      { view: "tasks", icon: ICONS.tasks },
+      { view: "reminders", icon: ICONS.reminders },
+      { view: "fitness", icon: ICONS.fitness },
     ],
   },
 ];
@@ -118,14 +137,16 @@ function NavButton({
     <button
       onClick={onClick}
       aria-current={active ? "page" : undefined}
-      className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm transition-colors ${
+      // min-h-11 = 44px touch target on phone; the desktop rail keeps its
+      // original compact py-1.5 rows.
+      className={`flex min-h-11 w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors md:min-h-0 md:py-1.5 ${
         active
           ? "bg-raised font-medium text-accent"
           : "text-muted hover:bg-raised/60 hover:text-on-surface"
       }`}
     >
       {item.icon}
-      <span className="truncate">{item.label}</span>
+      <span className="truncate">{VIEW_LABELS[item.view]}</span>
     </button>
   );
 }
@@ -137,6 +158,8 @@ export default function Sidebar({
   email,
   role,
   onLogout,
+  open = false,
+  onClose = noop,
 }: {
   view: View;
   setView: (v: View) => void;
@@ -146,12 +169,47 @@ export default function Sidebar({
   // (nav hidden). The server still enforces via requireAdmin regardless.
   role?: "admin" | "member";
   onLogout: () => void;
+  // Drawer state — only meaningful below `md:`, where the rail is off-canvas.
+  // Defaulted so the persistent-rail case needs neither prop.
+  open?: boolean;
+  onClose?: () => void;
 }) {
+  // Escape closes the drawer. Deliberately no focus trap: the rail is the same
+  // element at every width, and trapping focus in a nav that is permanently
+  // visible on desktop would be a bug, not an affordance. `invisible` below
+  // keeps the closed drawer out of the tab order instead.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  // Selecting a destination navigates AND dismisses the drawer (no-op on desktop).
+  const go = (v: View) => {
+    setView(v);
+    onClose();
+  };
+
   return (
-    <nav
-      aria-label="Primary"
-      className="flex w-56 shrink-0 flex-col border-r border-edge bg-panel"
-    >
+    <>
+      {/* Backdrop — phone only, purely a dismiss surface, so hidden from AT. */}
+      {open && (
+        <div
+          aria-hidden="true"
+          onClick={onClose}
+          className="fixed inset-0 z-30 bg-black/60 md:hidden"
+        />
+      )}
+
+      <nav
+        aria-label="Primary"
+        className={`fixed inset-y-0 left-0 z-40 flex w-64 max-w-[85vw] shrink-0 flex-col border-r border-edge bg-panel pt-safe transition-transform duration-200 ease-out motion-reduce:transition-none md:static md:z-auto md:w-56 md:max-w-none md:translate-x-0 md:transition-none ${
+          open ? "translate-x-0" : "invisible -translate-x-full md:visible"
+        }`}
+      >
       {/* Brand */}
       <div className="flex items-center gap-2 px-4 py-4">
         <span className="flex h-7 w-7 items-center justify-center rounded-md bg-accent/15 text-sm font-semibold text-accent">
@@ -174,7 +232,7 @@ export default function Sidebar({
                 key={item.view}
                 item={item}
                 active={view === item.view}
-                onClick={() => setView(item.view)}
+                onClick={() => go(item.view)}
               />
             ))}
           </div>
@@ -182,18 +240,20 @@ export default function Sidebar({
       </div>
 
       {/* Pinned bottom: Admin (admins only) + Settings + account */}
-      <div className="flex flex-col gap-1 border-t border-edge px-2 py-2">
+      {/* pb is additive rather than `pb-safe` because py-2 is already set here —
+          clears the iOS home indicator without losing the 8px gutter. */}
+      <div className="flex flex-col gap-1 border-t border-edge px-2 py-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))]">
         {role === "admin" && (
           <NavButton
-            item={{ view: "admin", label: "Admin", icon: ICONS.admin }}
+            item={{ view: "admin", icon: ICONS.admin }}
             active={view === "admin"}
-            onClick={() => setView("admin")}
+            onClick={() => go("admin")}
           />
         )}
         <NavButton
-          item={{ view: "settings", label: "Settings", icon: ICONS.settings }}
+          item={{ view: "settings", icon: ICONS.settings }}
           active={view === "settings"}
-          onClick={() => setView("settings")}
+          onClick={() => go("settings")}
         />
         <div className="flex items-center justify-between gap-2 px-2.5 pt-1">
           <span className="min-w-0 truncate text-xs text-muted" title={email}>
@@ -201,12 +261,13 @@ export default function Sidebar({
           </span>
           <button
             onClick={onLogout}
-            className="shrink-0 rounded-md border border-edge px-2 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface"
+            className="flex min-h-11 shrink-0 items-center rounded-md border border-edge px-3 py-1 text-xs text-muted transition-colors hover:bg-raised hover:text-on-surface md:min-h-0 md:px-2"
           >
             Sign out
           </button>
         </div>
       </div>
-    </nav>
+      </nav>
+    </>
   );
 }

@@ -77,15 +77,15 @@ export default function AssistantNameForm({
           }}
           maxLength={40}
           placeholder="Raphael"
-          className="rounded-md border border-edge bg-raised px-2 py-1.5 text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent"
+          className="min-h-11 w-full min-w-0 rounded-md border border-edge bg-raised px-3 py-2 text-base text-on-surface placeholder:text-faint outline-none transition-colors focus:border-accent sm:text-sm"
         />
       </label>
 
-      <div className="mt-4 flex items-center gap-3">
+      <div className="mt-4 flex flex-wrap items-center gap-3">
         <button
           onClick={() => void save()}
           disabled={saving || !trimmed || !dirty}
-          className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
+          className="min-h-11 rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
         >
           {saving ? "Saving…" : "Save"}
         </button>

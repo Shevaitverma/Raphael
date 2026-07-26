@@ -44,6 +44,18 @@ export default function ChatView({
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
 
+  // Below md: the conversation list is an off-canvas sheet over the thread.
+  // At md: and up it is the persistent left column and this flag is inert.
+  const [listOpen, setListOpen] = useState(false);
+  useEffect(() => {
+    if (!listOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setListOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [listOpen]);
+
   const threadRef = useRef<HTMLDivElement>(null);
   // The in-flight chat stream, so switching conversations, signing out, or
   // pressing Stop can cut it loose. The gateway never times a stream out.
@@ -311,30 +323,48 @@ export default function ChatView({
   // --- render ----------------------------------------------------------------
 
   return (
-    <div className="flex min-h-0 flex-1">
-      {/* Conversation list */}
-      <aside className="flex w-64 flex-col border-r border-edge bg-panel">
+    <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+      {/* Backdrop for the phone sheet. Absolute, not fixed, so it stays inside
+          the chat pane and never paints over another tab's view. */}
+      {listOpen && (
         <button
-          onClick={handleNewConversation}
-          className="mx-3 mt-3 rounded-md bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent transition-colors hover:bg-accent/25"
+          type="button"
+          onClick={() => setListOpen(false)}
+          aria-label="Close conversations"
+          className="absolute inset-0 z-20 bg-black/50 md:hidden"
+        />
+      )}
+
+      {/* Conversation list: off-canvas sheet below md, static column at md+. */}
+      <aside
+        className={`absolute inset-y-0 left-0 z-30 flex w-72 max-w-[85%] flex-col border-r border-edge bg-panel transition-transform motion-reduce:transition-none md:static md:z-auto md:w-64 md:max-w-none md:translate-x-0 ${
+          listOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
+        <button
+          onClick={() => {
+            setListOpen(false);
+            void handleNewConversation();
+          }}
+          className="mx-3 mt-3 min-h-[44px] rounded-md bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent transition-colors hover:bg-accent/25 md:min-h-0"
         >
           + New conversation
         </button>
 
         {/* Select-mode header: a toggle, and while on, a select-all/clear
             control plus the bulk-delete arm. */}
-        <div className="flex items-center justify-between px-3 py-2">
+        <div className="flex flex-wrap items-center justify-between gap-x-2 px-3 py-1 md:py-2">
           {!selectMode ? (
             <button
               onClick={() => setSelectMode(true)}
               disabled={conversations.length === 0}
-              className="text-xs text-muted transition-colors hover:text-on-surface disabled:opacity-40"
+              className="min-h-[44px] text-xs text-muted transition-colors hover:text-on-surface disabled:opacity-40 md:min-h-0"
             >
               Select
             </button>
           ) : (
             <>
-              <label className="flex items-center gap-2 text-xs text-muted">
+              <label className="flex min-h-[44px] items-center gap-2 text-xs text-muted md:min-h-0">
                 <input
                   type="checkbox"
                   ref={(el) => {
@@ -344,13 +374,13 @@ export default function ChatView({
                   checked={allSelected}
                   onChange={toggleSelectAll}
                   aria-label={allSelected ? "Clear selection" : "Select all conversations"}
-                  className="accent-accent"
+                  className="h-4 w-4 accent-accent"
                 />
                 {allSelected ? "Clear" : "Select all"}
               </label>
               <button
                 onClick={exitSelectMode}
-                className="text-xs text-muted transition-colors hover:text-on-surface"
+                className="min-h-[44px] px-1 text-xs text-muted transition-colors hover:text-on-surface md:min-h-0 md:px-0"
               >
                 Done
               </button>
@@ -361,16 +391,16 @@ export default function ChatView({
         {selectMode && selected.size > 0 && (
           <div className="px-3 pb-2">
             {confirmBulk ? (
-              <div className="flex items-center gap-1">
+              <div className="flex flex-wrap items-center gap-1">
                 <button
                   onClick={() => void handleDeleteSelected()}
-                  className="rounded px-2 py-1 text-xs font-medium text-error hover:bg-error/10"
+                  className="min-h-[44px] rounded px-2 py-1 text-xs font-medium text-error hover:bg-error/10 md:min-h-0"
                 >
                   Delete {selected.size}?
                 </button>
                 <button
                   onClick={() => setConfirmBulk(false)}
-                  className="rounded px-2 py-1 text-xs text-muted hover:bg-raised hover:text-on-surface"
+                  className="min-h-[44px] rounded px-2 py-1 text-xs text-muted hover:bg-raised hover:text-on-surface md:min-h-0"
                 >
                   Cancel
                 </button>
@@ -378,7 +408,7 @@ export default function ChatView({
             ) : (
               <button
                 onClick={() => setConfirmBulk(true)}
-                className="w-full rounded-md border border-error/40 px-2 py-1 text-xs font-medium text-error transition-colors hover:bg-error/10"
+                className="min-h-[44px] w-full rounded-md border border-error/40 px-2 py-1 text-xs font-medium text-error transition-colors hover:bg-error/10 md:min-h-0"
               >
                 Delete selected ({selected.size})
               </button>
@@ -409,12 +439,15 @@ export default function ChatView({
                     checked={selected.has(c.id)}
                     onChange={() => toggleSelected(c.id)}
                     aria-label={title}
-                    className="ml-3 shrink-0 accent-accent"
+                    className="ml-3 h-4 w-4 shrink-0 accent-accent"
                   />
                 )}
                 <button
-                  onClick={() => setActiveId(c.id)}
-                  className="min-w-0 flex-1 truncate px-3 py-2 text-left"
+                  onClick={() => {
+                    setActiveId(c.id);
+                    setListOpen(false);
+                  }}
+                  className="min-h-[44px] min-w-0 flex-1 truncate px-3 py-2 text-left md:min-h-0"
                   title={c.title ?? c.id}
                 >
                   {title}
@@ -423,22 +456,24 @@ export default function ChatView({
                   <span className="flex shrink-0 items-center gap-1 pr-2">
                     <button
                       onClick={() => void handleDeleteConversation(c.id)}
-                      className="rounded px-1.5 py-0.5 text-xs font-medium text-error hover:bg-error/10"
+                      className="min-h-[44px] rounded px-1.5 py-0.5 text-xs font-medium text-error hover:bg-error/10 md:min-h-0"
                     >
                       Delete?
                     </button>
                     <button
                       onClick={() => setConfirmDeleteId(null)}
-                      className="rounded px-1.5 py-0.5 text-xs text-muted hover:bg-raised hover:text-on-surface"
+                      className="min-h-[44px] rounded px-1.5 py-0.5 text-xs text-muted hover:bg-raised hover:text-on-surface md:min-h-0"
                     >
                       Cancel
                     </button>
                   </span>
                 ) : (
+                  // Touch has no hover: the icon stays visible below md, and
+                  // keeps the reveal-on-hover behaviour on pointer devices.
                   <button
                     onClick={() => setConfirmDeleteId(c.id)}
                     aria-label={"Delete conversation: " + title}
-                    className="mr-1 shrink-0 rounded p-1 text-muted opacity-0 transition-opacity hover:text-error focus:opacity-100 group-hover:opacity-100"
+                    className="mr-1 flex h-11 w-11 shrink-0 items-center justify-center rounded text-muted transition-opacity hover:text-error focus:opacity-100 group-hover:opacity-100 md:h-auto md:w-auto md:p-1 md:opacity-0"
                   >
                     <svg
                       width="14"
@@ -465,6 +500,33 @@ export default function ChatView({
 
       {/* Thread + composer */}
       <main className="flex min-w-0 flex-1 flex-col">
+        {/* Phone-only chat header: the only way to the conversation sheet. */}
+        <div className="flex min-w-0 items-center gap-2 border-b border-edge px-2 md:hidden">
+          <button
+            onClick={() => setListOpen(true)}
+            aria-label="Show conversations"
+            aria-expanded={listOpen}
+            className="flex min-h-[44px] shrink-0 items-center gap-2 rounded-md px-2 text-sm text-muted transition-colors hover:text-on-surface"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              aria-hidden="true"
+            >
+              <path d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+            Conversations
+          </button>
+          <span className="min-w-0 flex-1 truncate text-right text-sm text-muted">
+            {conversations.find((c) => c.id === activeId)?.title?.trim() || ""}
+          </span>
+        </div>
+
         {error && (
           <div
             role="alert"
@@ -476,9 +538,9 @@ export default function ChatView({
         <div
           ref={threadRef}
           aria-live="polite"
-          className="min-h-0 flex-1 overflow-y-auto px-4 py-6"
+          className="min-h-0 flex-1 overflow-y-auto px-3 py-4 md:px-4 md:py-6"
         >
-          <div className="mx-auto flex max-w-3xl flex-col space-y-6">
+          <div className="mx-auto flex min-w-0 max-w-3xl flex-col space-y-6">
             {messages.length === 0 && !error && (
               <p className="py-16 text-center text-sm text-faint">
                 Send a message to start.
@@ -494,8 +556,13 @@ export default function ChatView({
           </div>
         </div>
 
-        <div className="border-t border-edge px-4 py-3">
-          <div className="mx-auto flex max-w-3xl items-end gap-2 rounded-xl border border-edge bg-raised p-2 transition-colors focus-within:border-accent">
+        {/* Composer. The bottom padding clears the iOS home indicator; the
+            shell's h-dvh keeps this above the on-screen keyboard. */}
+        <div
+          className="border-t border-edge px-3 pt-3 md:px-4"
+          style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
+        >
+          <div className="mx-auto flex min-w-0 max-w-3xl items-end gap-2 rounded-xl border border-edge bg-raised p-2 transition-colors focus-within:border-accent">
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
@@ -507,14 +574,15 @@ export default function ChatView({
               }}
               rows={1}
               placeholder={`Message ${assistantName}…`}
-              className="max-h-40 min-h-[44px] flex-1 resize-none bg-transparent px-3 py-2 text-sm text-on-surface placeholder:text-faint outline-none"
+              // text-base below md, or iOS Safari zooms the page on focus.
+              className="max-h-40 min-h-[44px] min-w-0 flex-1 resize-none bg-transparent px-2 py-2 text-base text-on-surface placeholder:text-faint outline-none md:px-3 md:text-sm"
             />
             {/* A stream can hang with no reply and no timeout; Stop is the
                 only way out that does not cost the in-memory session. */}
             {sending ? (
               <button
                 onClick={() => abortRef.current?.abort()}
-                className="rounded-md border border-edge px-4 py-2 text-sm font-medium text-muted transition-colors hover:bg-raised hover:text-on-surface"
+                className="min-h-[44px] shrink-0 rounded-md border border-edge px-4 py-2 text-sm font-medium text-muted transition-colors hover:bg-raised hover:text-on-surface"
               >
                 Stop
               </button>
@@ -522,25 +590,25 @@ export default function ChatView({
               <button
                 onClick={() => void handleSend()}
                 disabled={draft.trim().length === 0}
-                className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
+                className="min-h-[44px] shrink-0 rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent-strong disabled:opacity-40"
               >
                 Send
               </button>
             )}
           </div>
 
-          <div className="mx-auto mt-2 flex max-w-3xl items-center gap-2 text-xs">
+          <div className="mx-auto mt-2 flex max-w-3xl flex-wrap items-center gap-x-2 gap-y-1 py-1 text-xs">
             <input
               id="web-search"
               type="checkbox"
               checked={searchOn}
               disabled={!searchAvailable}
               onChange={(e) => onToggleSearch(e.target.checked)}
-              className="accent-accent disabled:opacity-40"
+              className="h-4 w-4 shrink-0 accent-accent disabled:opacity-40"
             />
             <label
               htmlFor="web-search"
-              className={searchAvailable ? "text-muted" : "text-faint"}
+              className={`min-w-0 break-words ${searchAvailable ? "text-muted" : "text-faint"}`}
             >
               Search the web (sends your question to a search provider)
             </label>
