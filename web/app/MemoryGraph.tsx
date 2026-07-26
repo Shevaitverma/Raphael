@@ -90,6 +90,15 @@ const LABEL_BAND_W = 92; // ~18 chars at 11px, the node-label truncation width
 // the focused node's own edges) keep their label.
 const EDGE_LABEL_MAX = 28;
 
+// Decoration budget, same spirit as EDGE_LABEL_MAX. Above either cap the idle
+// drift and the edge-flow overlay are dropped: dozens of independently
+// animating groups is the only thing on this canvas that costs real compositor
+// time, and a dense graph reads calmer without the shimmer anyway. Hover,
+// selection and entrance stay on at any size — they are per-interaction, not
+// per-node-forever.
+const MOTION_NODE_MAX = 60;
+const MOTION_EDGE_MAX = 120;
+
 // Persisted view choice — same convention as "raphael.view" in page.tsx.
 const MODE_KEY = "raphael.memoryView";
 const ARROW_ID = "raphael-memory-arrow";
@@ -934,7 +943,51 @@ function Forget({
 // --- the spatial view ----------------------------------------------------------
 // Same force sim as before, calm styling: no grid, no scanline, no glow filters,
 // no reticle. Colour carries the predicate, dashes carry "inferred", width
-// carries reinforcement. The only motion left is the layout settling.
+// carries reinforcement. Motion is layout settling plus a thin decorative layer
+// (below) that never touches the physics.
+
+// Decoration is CSS-only ON PURPOSE. The sim cools and FREEZES (the rAF loop in
+// Canvas stops once alpha decays); anything that animated by writing sim state
+// would either re-heat it — undoing the tuned spacing and colliding the mid-edge
+// predicate labels — or need its own rAF running forever. Keyframes on a wrapper
+// <g> layered over the settled coordinates cost zero JS per frame and cannot
+// reach x/y/vx/vy. The reduced-motion block is the authoritative off switch: it
+// works even if the JS `motion` flag were ever wrong.
+const NODE_CSS = `
+.rg-node  { animation: rg-in 380ms ease-out backwards; }
+.rg-drift { animation: rg-drift var(--rg-dur) ease-in-out var(--rg-phase) infinite; }
+.rg-disc  { transform-box: fill-box; transform-origin: center;
+            animation: rg-pop 380ms cubic-bezier(.2,.9,.3,1) backwards; }
+.rg-sel   { transform-box: fill-box; transform-origin: center;
+            animation: rg-spin 9s linear infinite; }
+.rg-flow  { animation: rg-flow 1.1s linear infinite; }
+@keyframes rg-in   { from { opacity: 0; } }
+@keyframes rg-pop  { from { transform: scale(.4); } }
+@keyframes rg-spin { to   { transform: rotate(360deg); } }
+@keyframes rg-flow { to   { stroke-dashoffset: -24px; } }
+@keyframes rg-drift {
+  0%, 100% { transform: translate(0, 0); }
+  25%      { transform: translate(1.7px, -2.1px); }
+  50%      { transform: translate(-1.5px, -0.7px); }
+  75%      { transform: translate(0.9px, 2px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rg-node, .rg-drift, .rg-disc, .rg-sel, .rg-flow { animation: none !important; }
+  .rg-node, .rg-disc, .rg-label { transition: none !important; }
+}
+`;
+
+// Per-node drift phase, derived from the id so it is identical across renders
+// and across a refetch — a node must not re-randomise its float when a sibling
+// is deleted. Two independent slices of one FNV-1a hash, so duration and phase
+// don't move together and the field shimmers instead of throbbing in unison.
+function phaseOf(id: string): { dur: number; phase: number; enter: number } {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 16777619);
+  const u = ((h >>> 0) % 1000) / 1000;
+  const v = ((h >>> 11) % 997) / 997;
+  return { dur: 4.5 + u * 3.5, phase: -v * 8, enter: v * 180 };
+}
 
 function Canvas({
   edges,
@@ -1107,6 +1160,9 @@ function Canvas({
   }
   const showAllLabels = edges.length <= EDGE_LABEL_MAX;
   const fade = motion ? "opacity 160ms ease" : undefined;
+  // Idle drift + edge flow only while the graph is small enough to afford them.
+  const lively = motion && graph.nodes.length <= MOTION_NODE_MAX && edges.length <= MOTION_EDGE_MAX;
+  const snap = motion ? "transform 150ms cubic-bezier(.2,.8,.3,1), stroke 140ms ease, stroke-width 140ms ease" : undefined;
 
   // Edge geometry, computed once and shared by the stroke, the hit area and the
   // label: endpoints trimmed to the node rims so the arrowhead lands on the
@@ -1161,6 +1217,9 @@ function Canvas({
             <path d="M0 0 L10 5 L0 10 Z" fill={C_MUTED} />
           </marker>
         </defs>
+        {/* One stylesheet for the whole canvas — no per-node filter, no per-node
+            marker, no per-node timer. */}
+        <style>{NODE_CSS}</style>
 
         {/* Full-canvas hit area so a pointerdown on empty space pans. */}
         <rect x={0} y={0} width={VB_W} height={VB_H} fill={C_PANEL} />
@@ -1185,6 +1244,30 @@ function Canvas({
               style={{ transition: fade }}
             />
           ))}
+
+          {/* Direction of travel, on the focused node's edges only. A separate
+              thin overlay rather than dashing the edge itself: the base line's
+              dasharray already means "lower confidence" and must keep meaning
+              that, and the arrowhead stays on the base line. */}
+          {lively &&
+            laid.map(({ e, x1, y1, x2, y2, active }) =>
+              active ? (
+                <line
+                  key={e.id}
+                  className="rg-flow"
+                  x1={x1}
+                  y1={y1}
+                  x2={x2}
+                  y2={y2}
+                  stroke={predColor(e.label)}
+                  strokeWidth={Math.max(1.5, strokeFor(e.times_seen) * 0.7)}
+                  strokeLinecap="round"
+                  strokeDasharray="2 10"
+                  opacity={0.85}
+                  pointerEvents="none"
+                />
+              ) : null,
+            )}
 
           {/* Fat invisible strokes: an edge is a click target too, so a fact can
               be inspected (and forgotten) without going via one of its nodes. */}
@@ -1239,37 +1322,79 @@ function Canvas({
             const dim = anyFocus && !isActive && !isNeighbor;
             const identity = s.kind === "identity";
             const picked = selected === s.id;
-            const stroke = picked || identity ? C_ACCENT : C_EDGE;
+            const hot = hovered === s.id;
+            const stroke = picked || identity ? C_ACCENT : isActive ? C_MUTED : C_EDGE;
+            const ph = phaseOf(s.id);
+            // Drag lifts more than hover, so "held" reads differently from "under
+            // the cursor". Everything below is decoration: the position still
+            // comes from the frozen sim, on the outer <g> only.
+            const lift = s.dragging ? 1.16 : hot ? 1.09 : 1;
             return (
               <g
                 key={s.id}
-                className="cursor-pointer"
+                className="rg-node cursor-pointer"
+                transform={`translate(${s.x.toFixed(2)} ${s.y.toFixed(2)})`}
                 onPointerDown={(e) => onDownNode(e, s.id)}
                 onPointerEnter={() => onHover(s.id)}
                 onPointerLeave={() => onHover(null)}
                 onClick={() => onSelect(s.id)}
                 opacity={dim ? 0.3 : 1}
-                style={{ transition: fade }}
+                style={{ animationDelay: `${ph.enter.toFixed(0)}ms`, transition: fade }}
               >
-                <circle
-                  cx={s.x}
-                  cy={s.y}
-                  r={s.r}
-                  fill={identity ? "#4d8eff22" : C_RAISED}
-                  stroke={stroke}
-                  strokeWidth={picked ? 2.5 : 1.25}
-                />
-                <text
-                  x={s.x}
-                  y={s.y + s.r + 13}
-                  textAnchor="middle"
-                  fontSize={11}
-                  className="pointer-events-none"
-                  fill={picked || identity ? C_TEXT : C_MUTED}
-                  style={{ paintOrder: "stroke", stroke: C_PANEL, strokeWidth: 3.5 }}
+                {/* Disc, ring, label and hit target all live inside the drifting
+                    group, so what you see is always what you can click. */}
+                <g
+                  className={lively && !s.dragging ? "rg-drift" : undefined}
+                  style={
+                    {
+                      "--rg-dur": `${ph.dur.toFixed(2)}s`,
+                      "--rg-phase": `${ph.phase.toFixed(2)}s`,
+                    } as React.CSSProperties
+                  }
                 >
-                  {truncate(s.label, 18)}
-                </text>
+                  {picked && (
+                    <circle
+                      className="rg-sel"
+                      r={s.r + 7}
+                      fill="none"
+                      stroke={C_ACCENT}
+                      strokeWidth={1.25}
+                      strokeDasharray="5 7"
+                      opacity={0.7}
+                      pointerEvents="none"
+                    />
+                  )}
+                  <circle
+                    className="rg-disc"
+                    r={s.r}
+                    fill={identity ? "#4d8eff22" : C_RAISED}
+                    stroke={stroke}
+                    strokeWidth={picked ? 2.5 : hot ? 2 : 1.25}
+                    style={{
+                      transform: `scale(${lift})`,
+                      animationDelay: `${ph.enter.toFixed(0)}ms`,
+                      // Shadow on the disc only — never on the label, which has to
+                      // stay crisp against the halo.
+                      filter: s.dragging ? "drop-shadow(0 4px 7px rgba(0,0,0,.6))" : undefined,
+                      transition: snap,
+                    }}
+                  />
+                  <text
+                    y={s.r + 13}
+                    textAnchor="middle"
+                    fontSize={11}
+                    className="rg-label pointer-events-none"
+                    fill={picked || identity || isActive ? C_TEXT : C_MUTED}
+                    style={{
+                      paintOrder: "stroke",
+                      stroke: C_PANEL,
+                      strokeWidth: 3.5,
+                      transition: motion ? "fill 140ms ease" : undefined,
+                    }}
+                  >
+                    {truncate(s.label, 18)}
+                  </text>
+                </g>
               </g>
             );
           })}
@@ -1481,6 +1606,26 @@ function verifySim(): void {
   const after = seed(g(["b", "c", "d"]), before);
   console.assert(after.find((s) => s.id === "c")?.x === 111, "a surviving node keeps its position");
   console.assert(after.length === 3 && !after.some((s) => s.id === "a"), "a deleted node is dropped");
+
+  // Decorative drift must be a pure function of the id (same float after every
+  // refetch), bounded (a runaway duration would look broken), and out of phase
+  // between neighbours so the field shimmers instead of throbbing together.
+  const ids = ["a", "b", "c", "d", "person:me", "entity:coffee"];
+  console.assert(
+    JSON.stringify(phaseOf("person:me")) === JSON.stringify(phaseOf("person:me")),
+    "drift phase must be deterministic per id",
+  );
+  console.assert(
+    ids.every((id) => {
+      const p = phaseOf(id);
+      return p.dur >= 4.5 && p.dur <= 8 && p.phase <= 0 && p.phase >= -8 && p.enter <= 180;
+    }),
+    "drift duration/phase/entrance must stay in their tuned bands",
+  );
+  console.assert(
+    new Set(ids.map((id) => phaseOf(id).phase.toFixed(2))).size > ids.length / 2,
+    "different ids must land on different phases",
+  );
 }
 
 if (process.env.NODE_ENV !== "production") verifySim();
