@@ -77,6 +77,10 @@ func main() {
 	// 60s and writes templated check-in / weekly-summary / goal-nudge notifications.
 	startFitnessCoach(pool)
 
+	// Outbound delivery: drains notifications to Telegram. Inert without a bot
+	// token. Sibling of the two schedulers above, and the adapter db/014 named.
+	startNotifier(pool)
+
 	// Bind LOOPBACK by default. This service's public /users/{uid}/... routes carry
 	// NO authentication — the entire isolation model is "only the gateway can reach
 	// them", and the gateway is what forces uid from the JWT. Binding every

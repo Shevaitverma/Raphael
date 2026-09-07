@@ -22,6 +22,7 @@ import httpx
 from config import (
     ANTHROPIC_DEFAULT_MODEL,
     INTERNAL_TOKEN,
+    MAIL_ALLOW_CLOUD_CLASSIFIER,
     OLLAMA_BASE_URL,
     OPENROUTER_BASE_URL,
     SYSTEM_CONFIG_UID,
@@ -121,6 +122,31 @@ def extractor(user_id: str):
     if cred and cred.get("provider") == "local":
         return build_provider(cred)
     return lifeboat(user_id)
+
+
+def classifier(user_id: str):
+    """The credential for MAIL classification: a LOCAL provider, or None.
+
+    Deliberately NOT extractor(). extractor falls back to the lifeboat, and the
+    lifeboat is by design a cloud provider (it exists to keep chat alive when a
+    paid credential dies). Email bodies are the most private data this system
+    touches, so "the local model is down" must mean "do not classify", never
+    "send it to OpenRouter instead".
+
+    MAIL_ALLOW_CLOUD_CLASSIFIER is the one way past that, and it is an explicit
+    operator decision recorded in config, not a runtime fallback the system can
+    take on its own. Even then it uses the ACTIVE credential — never the
+    lifeboat, whose whole job is to be reached by accident.
+
+    None -> the worker runs rules-only (tier 4) and says so, which is a real
+    degraded mode, not a silent one.
+    """
+    cred = _fetch_active(user_id)
+    if cred and cred.get("provider") == "local":
+        return build_provider(cred)
+    if cred and MAIL_ALLOW_CLOUD_CLASSIFIER:
+        return build_provider(cred)
+    return None
 
 
 def embed():

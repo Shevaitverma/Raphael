@@ -57,3 +57,10 @@ web/shots/
 
 # Local DB safety dumps taken before destructive memory edits
 backups/
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/

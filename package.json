@@ -1,0 +1,22 @@
+{
+  "name": "raphael",
+  "version": "1.0.0",
+  "description": "One vertical slice that really runs:",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git@github.com-personal:Shevaitverma/Raphael.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@playwright/test": "^1.62.0",
+    "@types/node": "^26.1.2"
+  }
+}

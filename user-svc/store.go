@@ -337,10 +337,35 @@ func (s *store) setProfile(ctx context.Context, userID, name string, onboarded *
 
 // googleStatusResult is the PUBLIC shape: booleans + display email + scope names,
 // never a token.
+//
+// MailScope reports whether THIS stored grant actually carries gmail.modify. It
+// is computed from the scopes Google returned, never from the gateway's consent
+// constant: a user who connected before Gmail was added holds a valid Calendar
+// grant with no mail access, and the mail worker must stay inert for them rather
+// than 403-looping. The UI reads it to decide whether to show "Reconnect to
+// enable mail".
 type googleStatusResult struct {
 	Connected bool     `json:"connected"`
 	Email     *string  `json:"email"`
 	Scopes    []string `json:"scopes"`
+	MailScope bool     `json:"mail_scope_granted"`
+}
+
+// gmailModifyScope is the one Gmail scope this deployment ever requests. Kept
+// here (not imported from the gateway — separate binaries) and asserted against
+// the stored grant.
+const gmailModifyScope = "https://www.googleapis.com/auth/gmail.modify"
+
+// hasMailScope reports whether a granted-scope list includes gmail.modify.
+// Exact match only: no prefix matching, because gmail.modify.restricted and
+// gmail.metadata share a prefix but grant different things.
+func hasMailScope(scopes []string) bool {
+	for _, s := range scopes {
+		if s == gmailModifyScope {
+			return true
+		}
+	}
+	return false
 }
 
 // readGoogleStatus reports whether the user has a connected Google account, with
@@ -364,7 +389,10 @@ func (s *store) readGoogleStatus(ctx context.Context, userID string) (*googleSta
 	if scopes == nil {
 		scopes = []string{}
 	}
-	return &googleStatusResult{Connected: true, Email: email, Scopes: scopes}, nil
+	return &googleStatusResult{
+		Connected: true, Email: email, Scopes: scopes,
+		MailScope: hasMailScope(scopes),
+	}, nil
 }
 
 // googleTokenRow is the INTERNAL-only shape carrying decrypted tokens.
@@ -450,7 +478,47 @@ func (s *store) upsertGoogle(ctx context.Context, userID, refreshToken, accessTo
 			google_sub = EXCLUDED.google_sub,
 			updated_at = now()`,
 		userID, refreshEnc, accessEnc, expiresAt, scopes, emailPtr, subPtr)
-	return err
+	if err != nil {
+		return err
+	}
+	// A working credential now exists, so retire any outstanding "reconnect"
+	// alert. This is what re-arms the dedup key: googleToken writes at most one
+	// alert per broken connection (UNIQUE (user_id, dedup_key) swallows the
+	// rest), and reconnecting clears it so the NEXT breakage can alert again.
+	// Best-effort — failing to tidy a notification must never fail a reconnect.
+	_, _ = s.pool.Exec(ctx,
+		`DELETE FROM notifications WHERE user_id = $1 AND dedup_key = $2`,
+		userID, googleReconnectDedupKey)
+	return nil
+}
+
+// googleReconnectDedupKey marks the single "Gmail access expired" alert per
+// broken connection. Cleared by upsertGoogle on a successful reconnect.
+const googleReconnectDedupKey = "google_reconnect"
+
+// raiseGoogleReconnectAlert writes the one alert that must never be missed: the
+// Google grant is dead and no amount of retrying will fix it.
+//
+// A worker that has lost its token looks exactly like a quiet inbox, and that
+// ambiguity is what destroys trust in the whole feature — so this failure gets
+// the top tier. Duplicate suppression is the UNIQUE partial index on
+// (user_id, dedup_key): the mail worker asks for a token every few minutes, and
+// only the first 404 becomes an alert.
+//
+// Best-effort by design: the caller is in the middle of tearing down a dead
+// credential, and that teardown must happen whether or not the alert lands.
+func (s *store) raiseGoogleReconnectAlert(ctx context.Context, userID string) {
+	if !validUUID(userID) {
+		return
+	}
+	const msg = "Gmail access expired — reconnect Google in Settings. " +
+		"Mail sorting and alerts are paused until you do. " +
+		"(A Google password change or a revoked app will do this.)"
+	_, _ = s.pool.Exec(ctx, `
+		INSERT INTO notifications (user_id, text, tier, dedup_key)
+		VALUES ($1, $2, 'act_now', $3)
+		ON CONFLICT DO NOTHING`,
+		userID, msg, googleReconnectDedupKey)
 }
 
 // updateGoogleAccess persists a refreshed access token (and a rotated refresh

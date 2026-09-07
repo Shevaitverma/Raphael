@@ -15,9 +15,36 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-// googleScopes is the FROZEN No-CASA scope set: identity + Calendar read-only.
-// Anything more (write, Gmail, Drive) would trip Google's CASA security review.
-const googleScopes = "openid email profile https://www.googleapis.com/auth/calendar.readonly"
+// googleScopes is the consent set: identity, Calendar read-only, and Gmail modify.
+//
+// gmail.modify is a RESTRICTED scope and is here deliberately, replacing the
+// earlier no-CASA freeze. Three facts made that trade acceptable:
+//
+//   - It is the MINIMUM that does the job. Reading bodies, creating labels and
+//     applying them to a message all appear under gmail.modify and nowhere
+//     cheaper. gmail.readonly+gmail.labels CANNOT do it: applying a label to a
+//     message is a message-modify operation, and gmail.labels only governs the
+//     label objects. Adding gmail.readonly or gmail.labels alongside this widens
+//     the consent screen for zero capability.
+//
+//   - It is a CEILING, not just a permission. gmail.modify cannot permanently
+//     delete — messages.delete/batchDelete need full mail.google.com. So "the
+//     assistant never destroys mail" is enforced by Google rather than by our
+//     code, and the worst case for a bug (or a hijacked classifier) is a message
+//     in Trash, recoverable for 30 days. NEVER add mail.google.com.
+//
+//   - CASA is not triggered for personal use. Google's restricted-scope
+//     verification exempts apps used by "only you or a few known users". The
+//     consent screen must be PUBLISHED (In production) though — a screen left in
+//     Testing status issues refresh tokens that expire after 7 days, which no
+//     unattended worker survives.
+//
+// include_granted_scopes below means an existing Calendar user re-consenting
+// keeps Calendar; google_credentials.scopes records what Google actually granted,
+// and the mail worker gates on that, never on this constant.
+const googleScopes = "openid email profile " +
+	"https://www.googleapis.com/auth/calendar.readonly " +
+	"https://www.googleapis.com/auth/gmail.modify"
 
 // loginSentinel is the state marker that tells the (single) callback this is a
 // LOGIN, not a re-consent. It is signed into the state exactly like a uid, so

@@ -111,6 +111,9 @@ func (s *server) routes() http.Handler {
 	// lives behind requireInternal alongside the credential internals.
 	mux.HandleFunc("POST /internal/users/{uid}/google/exchange", s.requireInternal(s.googleExchange))
 	mux.HandleFunc("GET /internal/users/{uid}/google/token", s.requireInternal(s.googleToken))
+	// Outbox ingress: agent-svc's mail worker queues an alert here rather than
+	// writing to the notifications table itself, keeping one writer per service.
+	mux.HandleFunc("POST /internal/users/{uid}/notifications", s.requireInternal(s.internalNotify))
 
 	// Auth + RBAC — internal only (the gateway proxies these after minting/forcing
 	// the JWT). googleLogin resolves the account from an id_token (bootstrap admin /

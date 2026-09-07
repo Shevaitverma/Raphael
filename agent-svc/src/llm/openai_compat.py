@@ -159,13 +159,33 @@ class OpenAICompatProvider:
             out.append({"role": m["role"], "content": m["content"]})
         return out
 
-    def _optional(self, json_mode: bool, reasoning: bool, tools) -> dict:
-        """Optional params minus the ones this deployment already rejected."""
+    def _optional(self, json_mode, reasoning: bool, tools) -> dict:
+        """Optional params minus the ones this deployment already rejected.
+
+        json_mode is True (shape only) or a JSON SCHEMA dict (values too). The
+        schema form is not a nicety: on the Ollama backend it is compiled to a
+        GBNF grammar that MASKS invalid tokens at the sampler, so the model
+        cannot emit a value outside an enum. That turns "usually valid JSON"
+        into "valid by construction", which is what lets a 2B model be trusted
+        with a fixed taxonomy.
+
+        Ollama's OpenAI-compatible endpoint reads response_format.json_schema
+        .schema and hands it straight to the runner, so ONE wire shape serves
+        both Ollama and OpenRouter. A deployment that rejects it falls down the
+        existing drop-ladder to no response_format at all — the caller then
+        leans on parse-and-validate, which it does regardless.
+        """
         kw = {}
         if tools and (self.base_url, self.model, "tools") not in _UNSUPPORTED:
             kw["tools"] = [{"type": "function", "function": t} for t in tools]
         if json_mode and (self.base_url, self.model, "response_format") not in _UNSUPPORTED:
-            kw["response_format"] = {"type": "json_object"}
+            if isinstance(json_mode, dict):
+                kw["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {"name": "result", "strict": True, "schema": json_mode},
+                }
+            else:
+                kw["response_format"] = {"type": "json_object"}
         if not reasoning and (self.base_url, self.model, "reasoning_effort") not in _UNSUPPORTED:
             # A THINKING model leaves content EMPTY until it stops deliberating,
             # so a verbose thinker burns the whole budget and returns "". You
@@ -187,6 +207,7 @@ class OpenAICompatProvider:
     def chat(
         self, messages, system=None, tools=None, max_tokens=1024, json_mode=False, reasoning=True
     ) -> ChatResponse:
+        # json_mode: False | True (json_object) | dict (a JSON Schema, grammar-enforced)
         """tools/json_mode/reasoning are BEST-EFFORT: none is universally supported
         (OpenRouter fronts hundreds of models), so each is attempted, and a 400 is
         remembered per deployment and never paid again. Defaults preserve every

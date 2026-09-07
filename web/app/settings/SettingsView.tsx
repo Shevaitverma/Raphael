@@ -13,6 +13,7 @@ import { useAuthed } from "../auth/AuthProvider";
 import AddProviderForm from "./AddProviderForm";
 import AssistantNameForm from "./AssistantNameForm";
 import GoogleSection from "./GoogleSection";
+import MailSection from "./MailSection";
 import TimezoneForm from "./TimezoneForm";
 
 // --- settings: model providers + lifeboat designation ----------------------
@@ -183,6 +184,8 @@ export default function SettingsView({
         />
 
         <GoogleSection reload={googleReload} notice={googleNotice} />
+
+        <MailSection />
       </div>
     </div>
   );

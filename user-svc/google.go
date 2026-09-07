@@ -344,6 +344,13 @@ func (s *server) googleToken(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if tr != nil && tr.Error == "invalid_grant" {
 			// Revoked or expired refresh token: drop the dead connection.
+			//
+			// Alert BEFORE deleting. This is the one failure the user has to hear
+			// about — a Gmail-scoped refresh token dies on a Google password
+			// change, and a background worker that silently stops looks identical
+			// to an inbox with nothing in it. Deduped, so the mail worker's next
+			// hundred token requests do not become a hundred alerts.
+			s.store.raiseGoogleReconnectAlert(r.Context(), uid)
 			_ = s.store.deleteGoogle(r.Context(), uid)
 			writeErr(w, http.StatusNotFound, "Google connection was revoked; reconnect required")
 			return

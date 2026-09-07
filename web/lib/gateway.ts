@@ -986,6 +986,10 @@ export async function getPortrait(token: string): Promise<string> {
 export type GoogleStatus = {
   connected: boolean;
   email: string | null;
+  // Whether THIS stored grant carries gmail.modify. A user who connected before
+  // mail existed has a valid Calendar grant and no mail access, so the UI has to
+  // tell them to reconnect rather than showing mail as broken.
+  mail_scope_granted: boolean;
 };
 
 // Returns the Google consent URL to navigate to. A 503 means this deployment has
@@ -1004,6 +1008,7 @@ export async function googleStatus(token: string): Promise<GoogleStatus> {
   return {
     connected: !!data.connected,
     email: data.email ?? null,
+    mail_scope_granted: !!data.mail_scope_granted,
   };
 }
 
@@ -1310,4 +1315,110 @@ function indexOfBlankLine(s: string): number {
 
 function blankLineLength(s: string, at: number): number {
   return s.startsWith("\r\n\r\n", at) ? 4 : 2;
+}
+
+// --- mail ------------------------------------------------------------------
+// Straight REST against agent-svc through the gateway. Deliberately no chat and
+// no tokens: reading your own mail settings should not cost model inference.
+
+export type MailConfig = {
+  enabled: boolean;
+  alerts_enabled: boolean;
+  backfill_days: number;
+  label_prefix: string;
+  quiet_start: string;
+  quiet_end: string;
+  telegram_chat_id: string | null;
+  // Sync state, shown so "nothing is happening" is always explicable.
+  history_id: string | null;
+  backfill_cursor: string | null;
+  backfill_done_at: string | null;
+  last_synced_at: string | null;
+  last_error: string | null;
+};
+
+export type MailMessage = {
+  id: string;
+  gmail_message_id: string;
+  gmail_thread_id: string;
+  sender_address: string;
+  sender_display: string;
+  subject: string;
+  received_at: string;
+  state: string;
+  auth_ok: boolean;
+  bulk: boolean;
+  stripped_hidden_chars: number;
+  category: string | null;
+  event_type: string | null;
+  tier: string | null;
+  summary: string | null;
+  reason: string | null;
+  deadline: string | null;
+  amount_minor: number | null;
+  currency: string | null;
+  degraded: boolean | null;
+  rule_fired: string | null;
+  corrected_tier: string | null;
+  corrected_category: string | null;
+};
+
+export type MailStats = {
+  tiers: Record<string, number>;
+  states: Record<string, number>;
+};
+
+export async function getMailConfig(token: string): Promise<MailConfig> {
+  const res = await fetch(`${GATEWAY_URL}/api/mail/config`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`mail config failed: ${res.status}`, res.status);
+  return (await res.json()) as MailConfig;
+}
+
+export async function saveMailConfig(
+  token: string,
+  patch: Partial<Pick<MailConfig,
+    "enabled" | "alerts_enabled" | "backfill_days" | "label_prefix" |
+    "quiet_start" | "quiet_end" | "telegram_chat_id">>,
+): Promise<MailConfig> {
+  const res = await fetch(`${GATEWAY_URL}/api/mail/config`, {
+    method: "PUT",
+    headers: { ...authHeader(token), "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new ApiError(`mail config save failed: ${res.status}`, res.status);
+  return (await res.json()) as MailConfig;
+}
+
+export async function listMail(
+  token: string,
+  tier?: string,
+  limit = 50,
+): Promise<MailMessage[]> {
+  const q = new URLSearchParams({ limit: String(limit) });
+  if (tier) q.set("tier", tier);
+  const res = await fetch(`${GATEWAY_URL}/api/mail/messages?${q}`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`mail list failed: ${res.status}`, res.status);
+  const data = await res.json();
+  return (data.items ?? []) as MailMessage[];
+}
+
+export async function getMailStats(token: string): Promise<MailStats> {
+  const res = await fetch(`${GATEWAY_URL}/api/mail/stats`, { headers: authHeader(token) });
+  if (!res.ok) throw new ApiError(`mail stats failed: ${res.status}`, res.status);
+  return (await res.json()) as MailStats;
+}
+
+// Records that the human disagreed. Stored beside the original verdict, never
+// over it — the pair is the training signal for personalised classification.
+export async function correctMail(
+  token: string,
+  messageId: string,
+  patch: { tier?: string; category?: string },
+): Promise<void> {
+  const res = await fetch(`${GATEWAY_URL}/api/mail/messages/${encodeURIComponent(messageId)}/correct`, {
+    method: "POST",
+    headers: { ...authHeader(token), "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new ApiError(`correction failed: ${res.status}`, res.status);
 }

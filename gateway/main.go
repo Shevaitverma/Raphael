@@ -229,6 +229,11 @@ func (s *Server) BuildApp() *fiber.App {
 
 	// Fitness: workouts + body metrics + stats, same JWT-uid-forcing proxy as
 	// tasks/reminders. The :id and ?type= ride inside proxyFitness's guarded path.
+	// Mail: settings, the classified list, stats, and the human's correction.
+	// One handler for every verb and subpath, like proxyFitness.
+	api.Get("/mail/*", s.proxyMail)
+	api.Put("/mail/*", s.proxyMail)
+	api.Post("/mail/*", s.proxyMail)
 	api.Get("/fitness/workouts", s.proxyFitness)
 	api.Post("/fitness/workouts", s.proxyFitness)
 	api.Delete("/fitness/workouts/:id", s.proxyFitness)

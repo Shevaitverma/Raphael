@@ -22,6 +22,8 @@ from graph import workflow
 from llm import embeddings, resolver
 from memory import govern, portrait, read, retriever
 from tools import google as google_tool
+from mail import store as mail_store
+from mail import worker as mail_worker
 from tools import search as search_tool
 
 # Application INFO lines (workflow: per-turn tokens, skip-gate, extract) go
@@ -104,6 +106,11 @@ def _startup() -> None:
                 "ollama_num_ctx": config.OLLAMA_NUM_CTX,
                 "search_base_url": config.SEARCH_BASE_URL,
                 "web_search": search_tool.enabled(),
+                "mail_enabled": config.MAIL_ENABLED,
+                "mail_poll_seconds": config.MAIL_POLL_SECONDS,
+                # Loud on purpose: this is the switch that decides whether email
+                # bodies may leave the machine.
+                "mail_allow_cloud_classifier": config.MAIL_ALLOW_CLOUD_CLASSIFIER,
                 "database_url": logsetup.secret_state(config.DATABASE_URL),
                 "internal_token": logsetup.secret_state(config.INTERNAL_TOKEN),
                 "search_api_key": logsetup.secret_state(config.SEARCH_API_KEY),
@@ -115,6 +122,9 @@ def _startup() -> None:
     embeddings.warm()
     # The write side of the valid_until contract: one pass now, then daily.
     threading.Thread(target=_reaper_loop, daemon=True).start()
+    # Gmail sync + classification. No-ops unless MAIL_ENABLED, and even then
+    # only for users who switched it on in mail_config.
+    mail_worker.start()
 
 
 @app.get("/health")
@@ -284,3 +294,62 @@ def chat(body: ChatBody):
             yield f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
     return StreamingResponse(sse(), media_type="text/event-stream")
+
+
+# ---- mail --------------------------------------------------------------
+# Read-only projections plus the two writes a person makes from the UI. The
+# heavy work belongs to the worker thread; nothing here calls Gmail or an LLM,
+# so the "two doors" rule holds — the UI hits REST directly and spends no tokens.
+
+
+@app.get("/mail/config")
+def mail_config(user_id: str):
+    """Settings + sync state. Never a token, never a chat id secret beyond the
+    one the user typed in themselves."""
+    return mail_store.get_config(user_id)
+
+
+class MailConfigBody(BaseModel):
+    enabled: bool | None = None
+    alerts_enabled: bool | None = None
+    backfill_days: int | None = None
+    label_prefix: str | None = None
+    quiet_start: str | None = None
+    quiet_end: str | None = None
+    telegram_chat_id: str | None = None
+
+
+@app.put("/mail/config")
+def mail_config_put(user_id: str, body: MailConfigBody):
+    """Partial update: None means "not supplied" and keeps the stored value."""
+    mail_store.put_config(user_id, **{k: v for k, v in body.model_dump().items()
+                                      if v is not None})
+    return mail_store.get_config(user_id)
+
+
+@app.get("/mail/messages")
+def mail_messages(user_id: str, tier: str | None = None, limit: int = 50):
+    return {"items": mail_store.list_classified(user_id, tier, limit)}
+
+
+@app.get("/mail/stats")
+def mail_stats(user_id: str):
+    return mail_store.stats(user_id)
+
+
+class MailCorrectionBody(BaseModel):
+    tier: str | None = None
+    category: str | None = None
+
+
+@app.post("/mail/messages/{message_id}/correct")
+def mail_correct(message_id: uuid.UUID, user_id: str, body: MailCorrectionBody):
+    """Record that the human disagreed.
+
+    Stored ALONGSIDE the original verdict, never over it: the pair (what we
+    said, what you said) is the whole training signal for the V2 personalisation
+    pass, and overwriting would throw away the half that matters.
+    """
+    if not mail_store.record_correction(user_id, str(message_id), body.tier, body.category):
+        raise HTTPException(status_code=404, detail="not found")
+    return {"ok": True}

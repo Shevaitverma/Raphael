@@ -486,3 +486,36 @@ func sseError(c *fiber.Ctx, msg string) error {
 	c.Status(fiber.StatusOK)
 	return c.SendString(fmt.Sprintf("event: error\ndata: {\"message\":%q}\n\n", msg))
 }
+
+// proxyMail forwards the mail capability to agent-svc, which owns the Gmail
+// sync, the classifier and the mail tables.
+//
+// The isolation control is the same one every other proxy uses and the only one
+// that matters: uid comes from the JWT via c.Locals, never from the path, the
+// body or the query. Client query params are passed through, but user_id is SET
+// (never appended) so a client that supplies ?user_id=<victim> has its value
+// overwritten rather than sitting alongside ours.
+func (s *Server) proxyMail(c *fiber.Ctx) error {
+	uid := c.Locals(userIDKey).(string)
+
+	rest := strings.TrimPrefix(c.Path(), "/api/mail")
+	if strings.Contains(rest, "..") || strings.Contains(strings.ToLower(rest), "internal") {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid path")
+	}
+
+	target, err := url.Parse(s.cfg.AgentSvcURL + "/mail" + rest)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid path")
+	}
+	q := c.Request().URI().QueryArgs()
+	vals := url.Values{}
+	q.VisitAll(func(k, v []byte) { vals.Set(string(k), string(v)) })
+	vals.Set("user_id", uid) // Set, not Add: the client cannot smuggle a second uid.
+	target.RawQuery = vals.Encode()
+
+	var body []byte
+	if len(c.Body()) > 0 {
+		body = c.Body()
+	}
+	return s.forward(c, c.Method(), target.String(), body)
+}

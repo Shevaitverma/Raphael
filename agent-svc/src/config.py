@@ -55,3 +55,37 @@ SEARCH_API_KEY = os.environ.get("BRAVE_API_KEY") or None
 SEARCH_BASE_URL = os.environ.get(
     "SEARCH_BASE_URL", "https://api.search.brave.com/res/v1/web/search"
 )
+
+# ---- mail intelligence ----------------------------------------------------
+# Off by default: MAIL_ENABLED gates the worker thread entirely, and each user
+# additionally opts in via mail_config.enabled. Empty/false = the thread never
+# starts, no Gmail call is ever made, and the feature costs nothing.
+MAIL_ENABLED = (os.environ.get("MAIL_ENABLED", "") or "").lower() in ("1", "true", "yes")
+
+# How often the worker wakes. 5 minutes, not the hour the brief assumed:
+# users.history.list costs 2 quota units against 6,000 units/MINUTE, so
+# 5-minutely spends ~576 units/day — hourly buys nothing but latency.
+MAIL_POLL_SECONDS = int(os.environ.get("MAIL_POLL_SECONDS", "300"))
+
+# How far back the one-time import reaches, and how much it chews per tick.
+# Bounded per tick so the backfill shares the box with everything else rather
+# than monopolising the model for three hours.
+MAIL_BACKFILL_DAYS = int(os.environ.get("MAIL_BACKFILL_DAYS", "90"))
+MAIL_BATCH_SIZE = int(os.environ.get("MAIL_BATCH_SIZE", "25"))
+
+# Gmail label namespace. Configurable so the labels carry no project name.
+MAIL_LABEL_PREFIX = os.environ.get("MAIL_LABEL_PREFIX", "Assistant")
+
+# Optional pin for the classifier model. Empty = use whatever the resolved local
+# credential specifies, which keeps one source of truth for model choice.
+MAIL_MODEL = os.environ.get("MAIL_MODEL") or None
+
+# THE PRIVACY SWITCH. False (the default) means classification resolves a LOCAL
+# provider or does not happen at all — email bodies never reach a cloud API.
+# Turning it on is a deliberate, logged decision, not a fallback the system can
+# take by itself when the local model is down. The lifeboat is deliberately NOT
+# consulted for mail: it exists to keep CHAT alive on a dead paid credential and
+# is designed to be a cloud provider, which is exactly wrong here.
+MAIL_ALLOW_CLOUD_CLASSIFIER = (
+    os.environ.get("MAIL_ALLOW_CLOUD_CLASSIFIER", "") or ""
+).lower() in ("1", "true", "yes")

@@ -59,6 +59,9 @@ services:
   user-svc:
     build: ./user-svc
     environment:
+      # Telegram delivery for the notifications outbox. Unset = the
+      # delivery goroutine never starts; notifications stay in-app.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       # Containers need every interface for bridge networking. The binary defaults
       # to 127.0.0.1 because its /users/{uid}/... routes have NO auth — exposure is
       # opt-in, and inside the compose network only the gateway can reach it.
@@ -97,6 +100,14 @@ services:
       # The knobs .env.example documents. Without these, compose silently ignores
       # them and only scripts/dev.sh's `set -a` ever delivers them.
       OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-4096}
+      # Mail: optional subsystem, inert when unset (same convention as search).
+      MAIL_ENABLED: ${MAIL_ENABLED:-}
+      MAIL_POLL_SECONDS: ${MAIL_POLL_SECONDS:-300}
+      MAIL_BACKFILL_DAYS: ${MAIL_BACKFILL_DAYS:-90}
+      MAIL_BATCH_SIZE: ${MAIL_BATCH_SIZE:-25}
+      MAIL_LABEL_PREFIX: ${MAIL_LABEL_PREFIX:-Assistant}
+      MAIL_MODEL: ${MAIL_MODEL:-}
+      MAIL_ALLOW_CLOUD_CLASSIFIER: ${MAIL_ALLOW_CLOUD_CLASSIFIER:-false}
       BRAVE_API_KEY: ${BRAVE_API_KEY:-}
       SEARCH_BASE_URL: ${SEARCH_BASE_URL:-https://api.search.brave.com/res/v1/web/search}
     depends_on:
